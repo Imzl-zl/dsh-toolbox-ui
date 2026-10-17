@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import * as dshTools from '@deepseek-ai/dsh-tools'
 import {
   DEFAULTS,
   activeMaskedServers,
@@ -277,13 +278,44 @@ test('resolveRuntimeConfig: 缺省、maxDiscovered 下限抬到 maxResults、非
 
 // ── 装配集成（高保真夹具：契约如实，ctx 与 agent 分离）──
 
-function createFixture({ schemas = [], events = [], messages = [], config = {}, throwOnSchemas = false } = {}) {
+function createFixture({ schemas = [], events = [], messages = [], config = {}, throwOnSchemas = false, toolsMode, ptcRuntime } = {}) {
   const handlers = new Map()
   const guards = []
   const sections = []
   const registered = new Map()
-  let currentSchemas = schemas
+  let currentSchemas = schemas.map(stripOutput)
   let schemasCalls = 0
+  let getCalls = 0
+
+  // 真宿主的语义：注册之后它才出现在 `schemas(scope)` 里。夹具必须照做——否则
+  // "搜索工具自己必须留在手册里"这条断言会因为没有对手而假绿。
+  const registerTool = (definition) => {
+    registered.set(definition.name, definition)
+    currentSchemas = [...currentSchemas, {
+      name: definition.name,
+      description: definition.description,
+      parameters: definition.parameters,
+      output: definition.output?.schema,
+    }]
+    return () => {
+      registered.delete(definition.name)
+      currentSchemas = currentSchemas.filter((entry) => entry.name !== definition.name)
+    }
+  }
+  // 公开取数路径（F22）：`schemas()` 给 name/description/parameters，逐工具 `get()` 补
+  // output.schema。SDK 裁剪走这条路重建宿主的渲染输入。
+  const getTool = (name) => {
+    getCalls++
+    const found = currentSchemas.find((entry) => entry.name === name)
+    return found === undefined ? undefined : { name, output: { schema: found.output } }
+  }
+  const guardTool = (fn) => {
+    guards.push(fn)
+    return () => {
+      const index = guards.indexOf(fn)
+      if (index >= 0) guards.splice(index, 1)
+    }
+  }
 
   const agent = {
     session: {
@@ -297,38 +329,31 @@ function createFixture({ schemas = [], events = [], messages = [], config = {}, 
           if (throwOnSchemas) throw new Error('宿主工具视图不可用')
           return currentSchemas
         },
-        register: (definition) => {
-          registered.set(definition.name, definition)
-          return () => registered.delete(definition.name)
-        },
-        guard: (fn) => {
-          guards.push(fn)
-          return () => {
-            const index = guards.indexOf(fn)
-            if (index >= 0) guards.splice(index, 1)
-          }
-        },
+        get: getTool,
+        ...(toolsMode === undefined ? {} : { modeFor: () => toolsMode }),
+        register: registerTool,
+        guard: guardTool,
       },
     },
   }
   const ctx = {
     // 服务访问走 ctx.get（cordis 对未注入服务的属性访问直接抛错；生产里 system-prompt
     // 恒在，但取用方式必须安全）。shape 同 skillsHost 夹具。
-    get: (name) => (name === 'systemPrompt' ? ctx.systemPrompt : undefined),
+    get: (name) => {
+      if (name === 'systemPrompt') return ctx.systemPrompt
+      if (name === 'ptcRuntime') return ptcRuntime
+      return undefined
+    },
     on: (name, handler) => {
       handlers.set(name, handler)
       return () => handlers.delete(name)
     },
     tools: {
       schemas: () => currentSchemas,
-      register: (definition) => {
-        registered.set(definition.name, definition)
-        return () => registered.delete(definition.name)
-      },
-      guard: (fn) => {
-        guards.push(fn)
-        return () => guards.splice(guards.indexOf(fn), 1)
-      },
+      get: getTool,
+      ...(toolsMode === undefined ? {} : { modeFor: () => toolsMode }),
+      register: registerTool,
+      guard: guardTool,
     },
     systemPrompt: {
       section: (section) => {
@@ -340,8 +365,12 @@ function createFixture({ schemas = [], events = [], messages = [], config = {}, 
   }
   return {
     ctx, agent, handlers, guards, sections, registered,
+    /** 宿主此刻会渲染出的 `tools:sdk` 原文（可见工具去掉 run_code，每条带 output）。 */
+    hostSdkText: () => dshTools.renderToolsSdk(currentSchemas.filter((entry) => entry.name !== 'run_code').map(stripOutput)),
+    visibleSchemas: () => currentSchemas,
     setSchemas: (next) => { currentSchemas = next },
     schemasCalls: () => schemasCalls,
+    getCalls: () => getCalls,
     cleanup: installToolSearchRuntime(ctx, config),
   }
 }
@@ -350,7 +379,12 @@ const BIG_SCHEMAS = Array.from({ length: 20 }, (_, index) => ({
   name: `mcp__jshook__tool_${index}`,
   description: `tool number ${index} for browser work`,
   parameters: { type: 'object', properties: { arg: { type: 'string' } } },
+  output: { type: 'object', properties: { value: { type: 'number' } } },
 }))
+
+/** 宿主渲染 `tools:sdk` 的投影：可见工具去掉 run_code，每条带 output。
+ *  测试侧独立拼（不复用生产代码的 readSdkSchemas），前提自检才有意义。 */
+const stripOutput = ({ name, description, parameters, output }) => ({ name, description, parameters, output })
 
 const DEFER_CONFIG = { deferServers: ['jshook'], serverNames: ['jshook'] }
 
@@ -504,6 +538,112 @@ test('目录只列还没被发现的工具，且按 (revision, discoveredVersion
     fixture.guards[0]({ name: 'mcp__jshook__tool_0', agent: fixture.agent })
     const afterTouch = (await assemble(fixture, assembly)).sections.find((section) => section.name === 'tool-search:catalog').text
     assert.equal(afterTouch, afterDiscover, 'touch 不该让目录文本缓存失效')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+// ── S5：装配时裁 SDK 手册（PTC 下唯一真正省字的地方）──
+
+const PTC_RUNTIME = { language: 'typescript' }
+
+/** PTC 形状的组装：函数清单只剩 run_code（wireSchemas 的 collapse），手册段才是工具面。 */
+const ptcAssembly = (fixture) => ({
+  tools: [{ name: 'run_code' }],
+  sections: [{ name: 'tools:sdk', text: fixture.hostSdkText(), interpolate: false }, { name: 'persona', text: 'x' }],
+})
+
+const sdkTextOf = (result) => result.sections.find((section) => section.name === 'tools:sdk').text
+
+test('裁手册：PTC agent 的 tools:sdk 不含未发现的延迟工具，kept 的还在', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
+  try {
+    const hostText = fixture.hostSdkText()
+    const result = await assemble(fixture, ptcAssembly(fixture))
+    const text = sdkTextOf(result)
+    assert.notEqual(text, hostText, '必须真的裁过（前提自检通过才会走到这里）')
+    assert.equal(text.includes('mcp__jshook__tool_0'), false, '未发现的延迟工具不得出现在手册里')
+    assert.ok(text.includes('tool_search'), '搜索工具自己必须留在手册里（B6：它是模型唯一的入口）')
+    // 裁剪结果必须**正是宿主渲染器对"保留项"的输出**，而不是别处拼出来的文本：
+    // 测试侧独立拼一份期望值（去掉 20 个延迟工具，保留 tool_search），逐字节比。
+    const expected = dshTools.renderToolsSdk(
+      fixture.visibleSchemas()
+        .filter((entry) => !entry.name.startsWith('mcp__jshook__'))
+        .map(stripOutput),
+    )
+    assert.equal(text, expected, '裁剪结果必须是宿主渲染器对保留项的输出（逐字节）')
+    assert.ok(text.length < hostText.length, '裁完必须更短，否则这个功能没有意义')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('裁手册：同进程的 native agent 一个字节都不动（模式判据是 per-agent 的）', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
+  try {
+    // native 形状：清单里有真实工具（不是 run_code），且手册段仍给了文本——
+    // 这是最严格的对造：段文本并非空，只能靠**模式**判据区分。
+    const hostText = fixture.hostSdkText()
+    const native = await assemble(fixture, {
+      tools: [{ name: 'Read' }, ...BIG_SCHEMAS.map((entry) => ({ name: entry.name }))],
+      sections: [{ name: 'tools:sdk', text: hostText, interpolate: false }],
+    })
+    assert.equal(sdkTextOf(native), hostText, 'native 会话的手册必须原样放行')
+    // 遮罩照旧（native 的有效面是函数清单）。
+    assert.equal(native.tools.some((tool) => tool.name === 'mcp__jshook__tool_0'), false, 'native 下遮罩必须照旧')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('裁手册：requireDiscovery: false 时不裁（B12）', async () => {
+  // 守卫在 requireDiscovery:false 时直接放行，若再把签名裁掉就是"藏了签名却允许盲调"——
+  // 正是本项目定性为不可接受的半失效。
+  const fixture = createFixture({
+    schemas: BIG_SCHEMAS,
+    config: { ...DEFER_CONFIG, requireDiscovery: false },
+    ptcRuntime: PTC_RUNTIME,
+  })
+  try {
+    const hostText = fixture.hostSdkText()
+    const result = await assemble(fixture, ptcAssembly(fixture))
+    assert.equal(sdkTextOf(result), hostText, '允许盲调时手册必须保持完整')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('裁手册：前提自检失败就退回原文（别处改写过段文本）', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
+  try {
+    const tampered = fixture.hostSdkText().replace('tool number 0', 'tool number zero')
+    const result = await assemble(fixture, { tools: [{ name: 'run_code' }], sections: [{ name: 'tools:sdk', text: tampered }] })
+    assert.equal(sdkTextOf(result), tampered, '自检失败必须原样放行——不猜、不发坏文本')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('裁手册：段文本为空时短路，不白跑一次全集重渲染', async () => {
+  // PTC 部署下的 native agent 就是这样：段存在但 `sdkSection` 对 native 返回 ''。
+  // 此时 render(全集) !== '' 会命中 premise-mismatch —— 白跑一趟（701 工具 15ms）。
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
+  try {
+    const before = fixture.getCalls()
+    await assemble(fixture, { tools: [{ name: 'run_code' }], sections: [{ name: 'tools:sdk', text: '' }] })
+    assert.equal(fixture.getCalls(), before, '空文本必须在取数之前短路（否则每次装配都付一次 O(n²)）')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('裁手册：已发现的工具必须留在手册里', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
+  try {
+    await fixture.registered.get('tool_search').execute({ query: 'select:mcp__jshook__tool_3' }, { agent: fixture.agent })
+    const text = sdkTextOf(await assemble(fixture, ptcAssembly(fixture)))
+    assert.ok(text.includes('mcp__jshook__tool_3'), '发现的工具必须回到手册（模型要能写程序调它）')
+    assert.equal(text.includes('mcp__jshook__tool_4'), false)
   } finally {
     fixture.cleanup()
   }
