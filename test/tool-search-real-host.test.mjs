@@ -6,6 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import ToolRuntime, { TOOL_RUNTIME_SCHEDULER } from '@deepseek-ai/dsh-tools'
 import * as scopeMod from '@deepseek-ai/dsh-scope'
 import { installToolSearchRuntime, DEFAULTS } from '../lib/tool-search-runtime.js'
+import { renderToolsSdk } from '@deepseek-ai/dsh-tools'
 
 // 真宿主集成：真 cordis Context + 真 SystemPrompt + 真 ToolRuntime + 真 dsh-scope。
 // 手写夹具证明不了"修好的代码在宿主里跑得对"——B2（interpolate）当初就是夹具全绿、
@@ -34,10 +35,14 @@ const OWN_TOOLS = Array.from({ length: 12 }, (_, index) => ({
   parameters: { type: 'object', properties: { arg: { type: 'string' } } },
 }))
 
-async function createHost({ descriptionOf, hyphenated = false, deferNothing = false, globalToolCount = 16 } = {}) {
+async function createHost({ descriptionOf, hyphenated = false, deferNothing = false, globalToolCount = 16, presentation } = {}) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  // PTC 会话需要 `ctx.ptcRuntime`：宿主 sdkSection 与 wireSchemas 都要求它存在
+  // （`requirePtcRuntime` 在没有时会抛）。这里只需要 `language`——手册渲染器按它选，
+  // 而 0.2.0 的渲染器还只有单个参数（`programFormat` 是 0.2.1 才有的，见 V2/G3）。
+  if (presentation === 'ptc') ctx.provide('ptcRuntime', { language: 'typescript' })
   const tools = ctx.get('tools')
   const systemPrompt = ctx.get('systemPrompt')
   // 服务器名可切换成含连字符的（内置目录里 11/47 个是这种），用来覆盖 `+<server>` 约束。
@@ -89,6 +94,9 @@ async function createHost({ descriptionOf, hyphenated = false, deferNothing = fa
       async execute() { return { ok: true, tool: schema.name } },
     })
   }
+  // PTC 呈现：`presentAs` 必须在这个 agent 的**作用域 ctx** 上调用（而不是部署默认层），
+  // 这正是本轮要验的 per-agent 判据。它同时注册 sdkSection/collapseSection 两个段。
+  if (presentation === 'ptc') agent.ctx.tools.presentAs('ptc')
 
   // context 形状必须与宿主一致：`assembleContextFor` 返回 `{ agent, scope: agent, signal }`
   // （dsh-agent）。少给 agent 字段，handler 会按 fail-open 早退——那正是"没遮住"的样子。
@@ -97,6 +105,34 @@ async function createHost({ descriptionOf, hyphenated = false, deferNothing = fa
 
   return { ctx, tools, agent, assemble, call, dispose: async () => { dispose(); await agent.scope?.dispose(); await ctx.fiber.dispose() } }
 }
+
+test('real host: PTC 会话的 tools:sdk 手册不含未发现的延迟工具，且真的更短', TEST_TIMEOUT_MS, async () => {
+  // D1 的真宿主度量：PTC 下模型看的不是函数清单而是这份手册，插件改的正是它。
+  // 期望值由宿主自己的渲染器独立算出来（`renderToolsSdk(sdkSchemas(agent))` 就是宿主
+  // sdkSection 的算法），不比字符串猜。
+  const host = await createHost({ presentation: 'ptc' })
+  try {
+    const assembly = await host.assemble()
+    const section = assembly.sections.find((entry) => entry.name === 'tools:sdk')
+    assert.ok(section, 'PTC 下必须真的有 tools:sdk 段')
+    const untrimmed = renderToolsSdk(host.tools.sdkSchemas(host.agent))
+    assert.notEqual(section.text, untrimmed, '手册必须被裁（前提自检通过才会走到这里）')
+    assert.equal(section.text.includes('mcp__deferme__g0'), false, '未发现的延迟工具不得出现在手册里')
+    assert.ok(section.text.includes('tool_search'), '搜索入口必须留在手册里（B6）')
+    assert.ok(section.text.length < untrimmed.length, '裁完必须更短，否则 PTC 下仍然是净亏')
+    // 函数清单在 PTC 下本来就只有 run_code（wireSchemas 的 collapse），遮罩是 no-op。
+    assert.deepEqual(assembly.tools.map((tool) => tool.name), ['run_code'])
+
+    // 发现之后必须回到手册里——但 PTC 下模型**不能直调** tool_search：collapses 只放行
+    // run_code。这恰好解释了为什么手册里必须留着 tool_search（B6/F7）：它是程序内部唯一的
+    // 搜索入口。"发现后回到手册"那条断言放在 `tool-search-runtime.test.mjs` 的 PTC 夹具里
+    // （那里按嵌套派发的形状驱动，与真 host 里 run_code 内部调它等价）。
+    const direct = await host.call('tool_search', { query: 'select:mcp__deferme__g3' })
+    assert.equal(direct.isError, true, 'PTC 下 model-direct 调 tool_search 必须被 collapses 拒')
+  } finally {
+    await host.dispose()
+  }
+})
 
 test('real host: 遮罩同时覆盖全局族与项目族，目录带 interpolate:false', TEST_TIMEOUT_MS, async () => {
   const host = await createHost()
