@@ -24,9 +24,10 @@ const dshHostPackages = [
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/dsh-typert-protocol',
 ]
-// 只支持 0.1.5 起（与 peer 窗口一致）：setup 在 0.1.5 才把 agent 作为第二参数传给插件，
-// 而 mcp-client 也是 0.1.5 起才按注册作用域判 serverName 唯一性。旧版本不再兼容。
-const COMPAT_WINDOW = '>=0.1.5-rc.1 <0.2.0'
+// 只支持 0.2.x：ToolSearch 的 per-agent 呈现模式、`tools:sdk` 手册与 `sessionProjections`
+// 都是 0.2 的形态（0.1.x 没有 `modeFor(scope)`，也无法把一个内部投影挂到会话上）。
+// 窗口从原来的 `>=0.1.5-rc.1 <0.2.0` 上修——那条在 0.2.1 一发布就会被宿主判不兼容。
+const COMPAT_WINDOW = '>=0.2.0-rc.1 <0.3.0'
 // 开发基线跟随已验证的最新 RC；发布边界由 peer 窗口表达。
 const DEV_BASELINE = '^0.2.0-rc.2'
 // 锁文件里解析出的具体版本。**从 DEV_BASELINE 推导**，不要另写一处：这里原本硬编码
@@ -68,6 +69,15 @@ test('package declares the DSH compatibility window and pins development to a ve
     assert.equal(packageJson.peerDependencies?.[name], COMPAT_WINDOW)
     assert.equal(packageJson.devDependencies?.[name], DEV_BASELINE)
   }
+  // 窗口两端各自钉一次：下限是"0.2 的第一个 RC"，上限是"0.3 之前"。
+  // 这么写是因为**宿主真正的判定函数**（`evaluatePluginCompatibility`，带 includePrerelease）
+  // 不随本包发布，仓里也没有它——模拟 semver 只会得到相反结论（见 docs/design.md §版本范围）。
+  // 所以这里只钉结构：换了元组就红，至于某个具体版本能不能装，由宿主那道闸门回答。
+  const [lower, upper] = COMPAT_WINDOW.split(' ')
+  assert.equal(lower, '>=0.2.0-rc.1', '下限必须是 0.2 的第一个 RC')
+  assert.equal(upper, '<0.3.0', '上限必须挡住 0.3（粗上限：只回答"这个大版本没验证过"）')
+  // devDependencies 必须落在 peer 窗口内：否则开发/测试跑的是一个用户装不上的版本组合。
+  assert.equal(DEV_BASELINE_VERSION.startsWith('0.2.'), true, `开发基线 ${DEV_BASELINE_VERSION} 必须在 0.2.x`)
 })
 
 test('every host contract this plugin actually depends on is declared as a peer', () => {

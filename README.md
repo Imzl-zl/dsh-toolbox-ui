@@ -11,7 +11,7 @@
   <a href="https://www.npmjs.com/package/dsh-toolbox-ui"><img src="https://img.shields.io/npm/dm/dsh-toolbox-ui" alt="downloads"></a>
   <a href="https://github.com/Imzl-zl/dsh-toolbox-ui/actions/workflows/ci.yml"><img src="https://github.com/Imzl-zl/dsh-toolbox-ui/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/npm/l/dsh-toolbox-ui" alt="license"></a>
-  <img src="https://img.shields.io/badge/DSH-%E2%89%A50.1.5--rc.1-blue" alt="DSH >= 0.1.5-rc.1">
+  <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.0--rc.1-blue" alt="DSH >= 0.2.0-rc.1">
 </p>
 
 <p align="center"><b>中文</b> | <a href="README.en.md">English</a></p>
@@ -125,11 +125,12 @@ dsh plugin --profile web update dsh-toolbox-ui
 
 | 项目 | 已验证 |
 |---|---|
-| DeepSeek Harness | `0.1.5-rc.1` 及以上（已验证至 `0.2.0-rc.2`） |
+| DeepSeek Harness | `0.2.0-rc.1` 及以上（已验证至 `0.2.0-rc.2`，源码侧核对到 `0.2.1-rc.2`） |
 | Node.js | DSH 自带/支持的运行时 |
 | 平台 | Windows；Linux/macOS 使用同一 DSH Web 契约 |
 
-只支持 0.1.5 起（更早的版本缺少「按注册作用域判 `serverName` 唯一性」与「setup 传入 agent」两个能力），不为旧版本保留降级分支。
+只支持 0.2.x 起：ToolSearch 依赖 0.2 的 per-agent 呈现模式（`ctx.tools.modeFor(agent)`）与
+`tools:sdk` 手册段，0.1.x 上这两样都不存在。不为旧版本保留降级分支。
 
 ## 开发
 

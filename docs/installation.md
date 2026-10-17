@@ -7,11 +7,11 @@
 
 ## 环境要求
 
-- DeepSeek Harness `0.1.5-rc.1` 及以上（已验证至 `0.2.0-rc.2`）
+- DeepSeek Harness `0.2.0-rc.1` 及以上（已验证至 `0.2.0-rc.2`，源码侧核对到 `0.2.1-rc.2`）
 - 已初始化的 `web` profile
 - Node.js 和 pnpm 可由 DSH 的插件命令正常调用
 
-插件把 DSH 宿主 API 声明为 `>=0.1.5-rc.1 <0.2.0` 的 peer 依赖。只支持 0.1.5 起，因为插件用了两个 0.1.5 才有的官方能力：`mcp-client` 按注册作用域判 `serverName` 唯一性（项目级 MCP 的同名能力建立在此），以及 `setup` 把 agent 作为第二个参数传给插件（项目 MCP 挂载需要 agent 的 cwd）。开发基线跟随已验证的最新 RC，并镜像每一个 peer 依赖（另有一个仅供测试的 `@deepseek-ai/dsh-typert-loader`，见[设计与限制](design.md#版本范围怎么定以及它管不到什么)）；升级 DSH 后运行 `pnpm install && npm test` 验证。
+插件把 DSH 宿主 API 声明为 `>=0.2.0-rc.1 <0.3.0` 的 peer 依赖。只支持 0.2.x，因为 ToolSearch 用的是 0.2 的接口：per-agent 呈现模式（`ctx.tools.modeFor(agent)`，决定"这个会话走函数清单还是 `tools:sdk` 手册"）、PTC 手册段 `tools:sdk`、以及会话投影服务 `ctx.sessionProjections`（发现集恢复唯一的正当路径）。0.1.x 上这三样都不存在，所以不为它保留任何降级分支。开发基线跟随已验证的最新 RC，并镜像每一个 peer 依赖（另有一个仅供测试的 `@deepseek-ai/dsh-typert-loader`，见[设计与限制](design.md#版本范围怎么定以及它管不到什么)）；升级 DSH 后运行 `pnpm install && npm test` 验证。
 
 ## 安装
 

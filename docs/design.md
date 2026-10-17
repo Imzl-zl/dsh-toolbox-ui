@@ -156,26 +156,27 @@ mcpManager/projectConnections → { connections: [{ wsPath, serverName, state, r
 
 ## 兼容性与依赖细节
 
-DSH 宿主 API 通过 `peerDependencies` 以 `>=0.1.5-rc.1 <0.2.0` 声明。
+DSH 宿主 API 通过 `peerDependencies` 以 `>=0.2.0-rc.1 <0.3.0` 声明（只支持 0.2.x）。
 
-**为什么只支持 0.1.5 起**：插件依赖两个 0.1.5 才具备的官方能力——
+**为什么只支持 0.2.x**：ToolSearch 的三条地基都是 0.2 的形态——
 
-1. **`mcp-client` 按注册作用域判 `serverName` 唯一性**（`scopeOf(ctx) ?? ctx.root`；更早的版本把注册表挂在 `ctx.root`，全进程唯一）。项目级 MCP 的「跨项目/全局与项目同名」就建立在这条上。
-2. **`setup` 把 agent 作为第二个参数交给插件**（`setup?.(prepared.agent.ctx, prepared.agent)`；更早的版本只传 ctx）。项目 MCP 的挂载需要 agent 的 `session.header.cwd`；从 ctx 上读 agent 会被 cordis 服务守卫拒绝（`cannot get property "agent" without inject`），而 setup 抛错会让会话的创建与恢复直接失败。
+1. **per-agent 呈现模式**（`ctx.tools.modeFor(agent)`）：同一个进程里可以有 native 与 ptc 两种会话。装配点只能读到**部署默认层**，所以判据必须下移到 per-agent——0.1.x 没有这个接口。
+2. **PTC 手册段 `tools:sdk`**：PTC 下模型看的不是函数清单而是这份生成物，插件能改它（它在 `assembly.sections` 里）才有 PTC 下省字的可能。
+3. **会话投影 `ctx.sessionProjections`**：PTC 的搜索发生在程序内部，只留 `tool/ptc-dispatch` 事件（不是 surface 事件，`deriveMessages()` 看不到），投影是唯一能恢复发现集的正当路径。
 
-旧版本不再兼容，也不再为它们保留降级分支。
+0.1.x 不再兼容，也不再为它保留降级分支。窗口从 `>=0.1.5-rc.1 <0.2.0` 上修的直接原因是：那条声明在 0.2.1 一发布就会被宿主判不兼容（`dsh --version` 是 0.2.x，而 peer 上限卡在 0.2.0）。
 
 ### 版本范围怎么定（以及它管不到什么）
 
 三条取舍规则，改动范围前先读这里：
 
-1. **下限是硬要求，上限是宿主执行的硬闸门**。`0.1.5` 之前没有上面那两个能力，装上必坏，所以下限不能松。上限 `0.2.0` 只在宿主确实会向后破坏时才有意义——DSH 自称「开发者预览…未来将出现破坏兼容性的变更」，而插件面对宿主升级必然慢一步，所以留一个**粗**上限：它的作用是把「你正跑在一个我们没验证过的大版本上」变成宿主明确的拒绝，而不是静默装上再出怪问题。
+1. **下限是硬要求，上限是宿主执行的硬闸门**。`0.2.0-rc.1` 之前没有上面那三条能力，装上必坏，所以下限不能松。上限 `0.3.0` 只在宿主确实会向后破坏时才有意义——DSH 自称「开发者预览…未来将出现破坏兼容性的变更」，而插件面对宿主升级必然慢一步，所以留一个**粗**上限：它的作用是把「你正跑在一个我们没验证过的大版本上」变成宿主明确的拒绝，而不是静默装上再出怪问题。
 
    **这道闸门由 DSH 自己执行，不是 pnpm/npm**——安装器的 peer 警告（如 pnpm 的 `[WARN] Issues with peer dependencies found`）既不是判定依据，也不与它一致。`dsh-app-boot` 的 `evaluatePluginCompatibility` 拿 `dsh --version` 的实际版本比对本插件的 `peerDependencies`：不兼容的 bundle 会被跳过并打印 `skipping profile bundle …`，插件根本不加载（走 profile 清单的 `preflight` 路径时则是 `disabling profile plugin …`）。用户不想升级时可以授予**精确版本**豁免继续用：`dsh plugin --profile <profile> allow-version <name>@<version> --dsh-version <exact> --accept-risk`（豁免按 `name@version` × 精确宿主版本记账，落在 profile 目录的 `compatibility.json`）。**下限不会挡住任何新版本，只有上限可能「限死」，所以上限宁粗不细。**
-2. **预发布不需要特殊照顾**。按 npm 的 semver 规则，`0.1.6-alpha.1` 会落在 `>=0.1.5-rc.1 <0.2.0` 之外（预发布只在同名 `major.minor.patch` 元组内被承认）。但**上面那道闸门不套用这条规则**：`evaluatePluginCompatibility` 调 `semver.satisfies` 时带的是 `{ includePrerelease: true }`，预发布因此按数值参与比较——`0.1.6-alpha.1`、`0.1.7-rc.2` 乃至 `0.2.0-rc.1` 都落在范围内，只有 `0.2.0` 及以后的正式版（以及 `0.3.0-rc.1` 这种更高元组的预发布）才越界。所以这个范围既不会挡住 0.1.x 的预发布，也不会挡住 0.1.x 的正式版——不必为「覆盖未来预发布」去改范围。
+2. **预发布不需要特殊照顾**。按 npm 的 semver 规则，`0.2.1-alpha.1` 会落在 `>=0.2.0-rc.1 <0.3.0` 之外（预发布只在同名 `major.minor.patch` 元组内被承认）。但**上面那道闸门不套用这条规则**：`evaluatePluginCompatibility` 调 `semver.satisfies` 时带的是 `{ includePrerelease: true }`，预发布因此按数值参与比较——`0.2.0`、`0.2.1-alpha.1`、`0.2.1-rc.2` 都落在范围内，只有 `0.3.0-rc.1` 这种更高元组的预发布才越界。所以这个范围不会挡住任何 0.2.x（含预发布）——不必为「覆盖未来预发布」去改范围。
 
-   注意这条**只对宿主自己的闸门成立**：拿不带 `includePrerelease` 的严格 semver 去判，`0.1.7-rc.2` 会被判为不满足 `>=0.1.5-rc.1 <0.2.0`（下限元组是 `0.1.5`，认不了 `0.1.7-rc.x`）。谁要复核这个范围，必须用宿主自己的 `evaluatePluginCompatibility`，而不是 `semver.satisfies(range)` 或 pnpm 的 peer 检查——那两者会给出相反的结论。实测（用宿主导出的函数跑本插件的真实 `package.json`）：`0.1.5-rc.1` / `0.1.5-rc.3` / `0.1.6` / `0.1.7-rc.1` / `0.1.7-rc.2` / `0.1.7` / `0.1.8-rc.1` / `0.1.8` / `0.2.0-rc.1` 全部无 issue，仅 `0.2.0` 与 `0.3.0-rc.1` 被拒。
-3. **范围回答不了「装上还对不对」，而 CI 也只能盖住一半**。`0.1.6-alpha.2` 把 typert strict codec 从 `schema:`（zod v4 实例）换成 `create()`（进程内 realm 的懒工厂，registry 用 `record.value ??= record.create()` 物化）就是这么一次：它落在 `>=0.1.5-rc.1 <0.2.0` 之内，插件的兼容性声明天生拦不住，2026-09-21 的漂移任务因此变红（那一次 130 项里唯一失败的就是加载期契约那条）。真正的保护分两层：**(a) 运行时契约**由 [`.github/workflows/upstream-drift.yml`](../.github/workflows/upstream-drift.yml) 每周把宿主整套换到 `latest` / `next` / `alpha` 三个渠道跑契约用例（`test/*.test.mjs` 去掉 `package-contract`，因为那份断言的是 pin 本身）；**(b) 宿主侧的加载期契约**（`lib/typert.js` 的形状由宿主 loader 校验，不由我们校验）由 `test/typert-manifest.test.mjs` 覆盖：它直接调宿主自己的 `validateTypertManifest` 验这份产物，形状一变就红；同一文件里还有一条**不依赖 loader 版本**的形状断言，钉住「strict codec 同时带 `schema` 与 `create()`」（下一条理由）——本地 devDependency 的 loader 是开发基线，看不见 alpha 的要求，只靠前者要等一周才知道。这一层原本是缺口——既有用例只保证 `lib/typert.js` 与 `lib/client.js` 两份产物彼此一致（`client-lifecycle.test.mjs`），宿主改了要求也不会变红，而后果是用户升级 DSH 后面板整个不可用。它也是 `@deepseek-ai/dsh-typert-loader` 只进 `devDependencies`、不进 peer 的原因：校验发生在宿主进程里，插件运行时不 import 它。
+   注意这条**只对宿主自己的闸门成立**：拿不带 `includePrerelease` 的严格 semver 去判，`0.2.1-alpha.1` 会被判为不满足 `>=0.2.0-rc.1 <0.3.0`（下限元组是 `0.2.0`，认不了 `0.2.1-rc.x`）。谁要复核这个范围，必须用宿主自己的 `evaluatePluginCompatibility`，而不是 `semver.satisfies(range)` 或 pnpm 的 peer 检查——那两者会给出相反的结论。`test/package-contract.test.mjs` 因此只钉窗口两端（`>=0.2.0-rc.1` / `<0.3.0`），不模拟 semver。
+3. **范围回答不了「装上还对不对」，而 CI 也只能盖住一半**。`0.1.6-alpha.2` 把 typert strict codec 从 `schema:`（zod v4 实例）换成 `create()`（进程内 realm 的懒工厂，registry 用 `record.value ??= record.create()` 物化）就是这么一次：它落在当时的 `>=0.1.5-rc.1 <0.2.0` 之内，插件的兼容性声明天生拦不住，2026-09-21 的漂移任务因此变红（那一次 130 项里唯一失败的就是加载期契约那条）。真正的保护分两层：**(a) 运行时契约**由 [`.github/workflows/upstream-drift.yml`](../.github/workflows/upstream-drift.yml) 每周把宿主整套换到 `latest` / `next` / `alpha` 三个渠道跑契约用例（`test/*.test.mjs` 去掉 `package-contract`，因为那份断言的是 pin 本身）；**(b) 宿主侧的加载期契约**（`lib/typert.js` 的形状由宿主 loader 校验，不由我们校验）由 `test/typert-manifest.test.mjs` 覆盖：它直接调宿主自己的 `validateTypertManifest` 验这份产物，形状一变就红；同一文件里还有一条**不依赖 loader 版本**的形状断言，钉住「strict codec 同时带 `schema` 与 `create()`」（下一条理由）——本地 devDependency 的 loader 是开发基线，看不见 alpha 的要求，只靠前者要等一周才知道。这一层原本是缺口——既有用例只保证 `lib/typert.js` 与 `lib/client.js` 两份产物彼此一致（`client-lifecycle.test.mjs`），宿主改了要求也不会变红，而后果是用户升级 DSH 后面板整个不可用。它也是 `@deepseek-ai/dsh-typert-loader` 只进 `devDependencies`、不进 peer 的原因：校验发生在宿主进程里，插件运行时不 import 它。
 
 **为什么 strict codec 两个键都写**（`lib/typert.js` 与 `lib/client.js` 各一份，`client-lifecycle.test.mjs` 钉住两者一致）：宿主在两个渠道上查**不同的键**，且都忽略对方的键——`0.1.5-rc.x`（= 当时的 `latest` / `next`，也就是 `npx` 默认装到的那条）查 `codec.schema.parse` 必须是 zod v4 实例；`0.1.6-alpha.2` 起查 `typeof codec.create === 'function'`。少写 `schema` 会在最新 RC 上加载即拒，少写 `create` 会在 alpha 上加载即拒；`mode: 'src-json'` 不是出路（loader 强制 invocation 的 codec 必须是 strict）。拿三个版本的 loader 直接跑自己的产物：
 

@@ -11,7 +11,7 @@
   <a href="https://www.npmjs.com/package/dsh-toolbox-ui"><img src="https://img.shields.io/npm/dm/dsh-toolbox-ui" alt="downloads"></a>
   <a href="https://github.com/Imzl-zl/dsh-toolbox-ui/actions/workflows/ci.yml"><img src="https://github.com/Imzl-zl/dsh-toolbox-ui/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/npm/l/dsh-toolbox-ui" alt="license"></a>
-  <img src="https://img.shields.io/badge/DSH-%E2%89%A50.1.5--rc.1-blue" alt="DSH >= 0.1.5-rc.1">
+  <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.0--rc.1-blue" alt="DSH >= 0.2.0-rc.1">
 </p>
 
 <p align="center"><a href="README.md">中文</a> | <b>English</b></p>
@@ -125,11 +125,11 @@ When a newer version exists the panel shows a dismissible banner; pressing Upgra
 
 | Item | Verified |
 |---|---|
-| DeepSeek Harness | `0.1.5-rc.1` and above (verified up to `0.2.0-rc.2`) |
+| DeepSeek Harness | `0.2.0-rc.1` and above (verified up to `0.2.0-rc.2`, source-checked to `0.2.1-rc.2`) |
 | Node.js | the runtime DSH ships with / supports |
 | Platform | Windows; Linux and macOS use the same DSH Web contract |
 
-Requires 0.1.5 or newer (older versions lack per-scope `serverName` uniqueness and the `agent` passed to setup); no downgrade branches are kept for older hosts.
+Requires 0.2.x or newer: ToolSearch depends on the per-agent presentation mode (`ctx.tools.modeFor(agent)`) and the `tools:sdk` manual section, and neither exists on 0.1.x. No downgrade branches are kept for older hosts.
 
 ## Development
 

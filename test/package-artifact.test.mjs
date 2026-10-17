@@ -20,9 +20,9 @@ const dshHostPackages = [
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/dsh-typert-protocol',
 ]
-// 与 package-contract 的兼容窗口一致：只支持 0.1.5 起（setup 从它开始传 agent 第二参数，
-// mcp-client 也从它开始按注册作用域判重）。
-const COMPAT_WINDOW = '>=0.1.5-rc.1 <0.2.0'
+// 与 package-contract 的兼容窗口一致：只支持 0.2.x（ToolSearch 依赖 per-agent 呈现模式、
+// `tools:sdk` 手册段与会话投影三样 0.2 才有的接口）。
+const COMPAT_WINDOW = '>=0.2.0-rc.1 <0.3.0'
 
 function tarString(buffer, offset, length) {
   const end = buffer.indexOf(0, offset)
