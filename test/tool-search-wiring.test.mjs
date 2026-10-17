@@ -26,8 +26,8 @@ function createAgent() {
 
 /** 装载真插件，返回捕获面。deferEntries 控制 loader 条目里的 defer 配置。
  *  patchBody 覆盖写进 cordis.patch.yml 的初始内容（默认空列表）——需要真实 patch 条目
- *  的用例（如 setDeferAll）用它。 */
-async function mountPlugin(deferEntries, { toolsMode, patchBody = '[]\n' } = {}) {
+ *  的用例（如 setDeferAll）用它。occupied 模拟"工具名已被别人占用"（G4 重名预检）。 */
+async function mountPlugin(deferEntries, { toolsMode, patchBody = '[]\n', occupied = [] } = {}) {
   const { Context } = await import('@deepseek-ai/cordis')
   const { McpManagerGateway } = await import('../lib/index.js')
   const root = await mkdtemp(join(tmpdir(), 'dsh-wiring-'))
@@ -74,10 +74,21 @@ async function mountPlugin(deferEntries, { toolsMode, patchBody = '[]\n' } = {})
         schemas: () => [],
         register: (definition) => { registered.push(definition.name); return () => {} },
         guard: (fn) => { guards.push(fn); return () => {} },
+        // 公开的重名预检入口（G4）：宿主 NamedEntries.insert 对重名直接抛错，所以注册前
+        // 必须先用 get() 问一次。
+        get: (name) => (occupied.includes(name) ? { name } : undefined),
         // 宿主读部署默认模式的公开 API（dsh-tools modeFor，不传 scope 即默认层）。
         // PTC 下 assembly.tools 只剩 run_code，工具面在 tools:sdk section 里——
         // assembly 遮罩与 guard 在那条路径上双失效。
-        ...(toolsMode === undefined ? {} : { modeFor: () => toolsMode }),
+        // 缺省也提供（返回 'native'）：真宿主恒有它，缺了插件要记一条退化日志——
+        // 桩上故意不提供只会在测试输出里堆无关告警。
+        modeFor: () => toolsMode ?? 'native',
+      })
+      // dsh-base 组合里的会话投影服务：发现集恢复靠它（PTC 下唯一可行的路径）。
+      // 契约照 dsh-session-projection：register(definition) 返回 disposer、stateOf(session, key)。
+      inner.provide('sessionProjections', {
+        register: () => () => {},
+        stateOf: () => undefined,
       })
       // systemPrompt 必须提供：ToolSearch 会注册一个静态引导 section。这里的 section()
       // **照抄宿主的 order 校验**——曾经就是少了它，导致"丢了 order"这种回归在 681 个
@@ -212,7 +223,26 @@ test('装配：插件装载即注册 tool_search 与守卫', async () => {
   }
 })
 
-test('setDeferAll 同步内存 entry：运行中的会话立即生效，无需重启进程', async () => {
+test('装配：tool_search 名字被占时换名注册，且指引文案跟着换', async () => {
+  // G4：宿主的 NamedEntries.insert 对重名直接抛错，而这是插件构造函数里的同步路径——
+  // 不预检就等于"将来某个同名工具会让整个 mcp-manager 装不上"。换了还必须说清楚：
+  // 守卫给出的指引里带的名字必须是**真正注册的那个**，否则模型照着提示调用会失败。
+  const mounted = await mountPlugin(
+    [{ serverName: 'deferme', transport: 'stdio', command: 'x', defer: true }],
+    { occupied: ['tool_search'] },
+  )
+  try {
+    assert.equal(mounted.registered.includes('tool_search'), false, '被占用的名字不得再注册')
+    assert.ok(mounted.registered.includes('deferred_tool_search'), '必须换成确定性备选名注册')
+    const denial = mounted.guards[0]({ name: 'mcp__deferme__tool_1', agent: createAgent() })
+    assert.equal(typeof denial, 'string')
+    assert.ok(denial.includes('deferred_tool_search'), '守卫指引必须指向真正注册的名字')
+  } finally {
+    await mounted.dispose()
+  }
+})
+
+test('装配：setDeferAll 同步内存 entry：运行中的会话立即生效，无需重启进程', async () => {
   // 钉住的不变量：**patch 与内存 entry 一致**。
   // 修复前 setDeferAll 只 writePatch 就返回，内存 entry.options.config.defer 还是旧值，
   // 而 deferServersOf 读的正是那个字段——于是 patch 已是新值、运行中的会话永远读旧值，
