@@ -8,7 +8,7 @@
 >
 > **第五轮（独立审查后的整改）之后的变化**：O1 已修完并真机验证（见 §12.3 #24）。
 > O3 定性为"非产品缺陷、但是隔离环境 UI 结论不可信的方法论警示"。
-> 剩下的未验证项是 **O2** 与 **O5**；O1 的终验缺口（O1R）已在第六轮补上。
+> **第七轮：O2 已终验（见下）**。剩下的未验证项是 **O5**；O1 的终验缺口（O1R）已在第六轮补上。
 
 ---
 
@@ -32,18 +32,73 @@
 
 ---
 
-## O2（未验证）skills 三个 RPC 的运行中生效性
+## O2（已终验，第七轮）skills 三个 RPC 的运行中生效性
 
-`setEnabled` / `setModelInvocable` / `removeSkill` **没有实测**。
+**原判定**：`setEnabled` / `setModelInvocable` / `removeSkill` 在 `lib/skills-file-ops.js` 里只有
+`writeTextKeepingMode` / `rm`，没有 registry 通知；投递机制**推断**是宿主
+`@deepseek-ai/dsh-skill-filesystem` 的 watcher（`watch` 默认 true，chokidar + `fs.watchFile`，
+变更调 `control.invalidate`）。推断当时不是实测。
 
-**代码判定**（`lib/skills-file-ops.js`）：三者只有 `writeTextKeepingMode` / `rm`，无 registry 通知。投递机制推断是宿主 `@deepseek-ai/dsh-skill-filesystem` 的 watcher（`watch` 默认 true，chokidar + `fs.watchFile`，变更调 `control.invalidate`）——**这是读码推断，不是实测**。
+**结论：推断成立，三个 RPC 都在运行中生效。**
 
-**为什么没测**：要起真 `dsh-skill` + `dsh-skill-filesystem`。审查轮已证实拦路石不成立：
-`@deepseek-ai/dsh-fs` 与 `dsh-home-paths` **就在 `.pnpm store`**（peerDeps 被自动装入，只是没在根 node_modules 顶层链接）——"依赖树里没有"是错的。隔离 profile 里真技能服务跑着（「skills 服务已就绪」，42 技能）也佐证了这一点。
+**用例**：`test/skills-host.test.mjs` 的 `the three mutating RPCs take effect in the running host,
+not only on disk`。夹具 = 临时技能根（`mkdtemp`，绝不碰 `~/.agents/skills`）× 真 `SkillRegistry`
+× 真 `dsh-skill-filesystem`（`watch: true`，真机默认）；RPC 引用取自**面板自己的列表路径**
+`listSkillViews`，不手写。七条用例覆盖：扁平的启/停、模型面关/开、捆绑的停用、捆绑目录删除
+（`unlinkDir`）、扁平文件删除（`unlink`）。每条都断言「新会话**目录**里它在不在、模型/用户两个面
+拿不拿得到、正文是否等于盘上那一份」。
 
-**要修需要什么**：搭一个夹具：建临时技能根 → 写一个扁平技能 → mount 真 skill 服务 → 调 RPC →
-观察 registry 是否反映变更。最小第一步：隔离 profile 加临时技能根（别碰用户 `~/.agents/skills`）
-→ 重启 → UI toggle → 新会话 `/` 命令列表。
+**拿到的真证据（invalidate → registry 重扫 → 会话可见）**：
+
+| 证据 | 内容 |
+|---|---|
+| 正向 | 七条 RPC 全部 `changed:true`，且宿主的**新会话视图**（`ctx.skills.snapshot()` + `ctx.skills.get()`）在 5s 窗口内收敛到盘面状态（实测 200–300ms，受 watcher 的 `stabilityThreshold: 200ms` 支配）。删除两条：目录里**消失**（扁平删 `unlink`、捆绑删 `unlinkDir`，两条是不同代码路径） |
+| 反证（撤掉机制看红） | `watch: false` 复跑同一条路径：三个 RPC **全都返回 `changed:true`**，而 registry 一直报 `modelVisible:true`；`removeSkill(bundle)` 之后 **3 秒**目录里仍然报得出那条**目录已被删除**的技能。也就是说没有 watcher 投递时，这三个 RPC 就是「报成功但运行中不生效」——正是当初担心的形态 |
+| 负对照（证明探针读的是宿主缓存） | 盯住**同一格**（旁观技能的描述）走 A→B：A 处连读两次目录，两次都是同一个旧值；改盘后等它自己翻成新值。证明「有缓存」且「缓存会被作废」。RPC 之后连**旁观技能**（没被 RPC 碰过）的新描述也在目录里 → 宿主重扫的是**整个根**，不是特判修补某一行 |
+
+**反证的配方**（30 秒可复现，`.tasks/` 里的临时脚本已删——别为一次性反证留脚本）：
+把上面那条用例里 `fsProvider` 的 `{ dshHome, agentsHome, watch: true }` 改成 `watch: false`，然后
+① 先 `await ctx.skills.snapshot({})`（把缓存填上）→ ② `listSkillViews(hostCtx, {})` 取引用来调三个
+RPC（都会报 `changed:true`）→ ③ 反复读 `ctx.skills.snapshot({})`：状态**永远不变**，
+`removeSkill(bundle)` 删掉的目录 3 秒后仍被报成一条可被模型调用的技能。改完记得改回来。
+
+**过程中被实测推翻的错误假设**（留给下一个人，省得再踩）：
+
+1. **「宿主有静默改动」不存在**。原打算用「watcher 判据里与技能无关的改动」做负对照，实测
+   `isRelevantWatchEvent` 收得极宽：根下 `*.md` 的 `add`/`unlink`、一级的 `addDir`/`unlinkDir`、
+   两层以内的 `SKILL.md` 的 `add`/`change`/`unlink` **全都算**。所以**任何**改到技能内容或存亡的
+   事件都会触发 invalidate（改描述这种最常见的手工编辑也算）——这也解释了为什么这条链一直好用。
+2. **宿主缓存只在目录一侧陈旧，`get()` 永远是盘上最新的**。实测：刚写完文件，同一刻
+   `snapshot()` 仍是旧描述，而 `ctx.skills.get('x').description` 已经是新的（`get()` 每次回
+   provider 重读正文）。**拿 `get()` 的量做陈旧性断言会恒真**——这是本条用例第一版翻车的地方。
+
+**顺带钉死的一条 wire 事实**：扁平技能的 `kind` 是 flat，但 `entry` 是**带扩展名的文件名**
+（`probe-flat.md`，不是 `probe-flat`）。这是 `skills-registry` 的 `matchFlatEntry` 按 realpath 匹配
+后返回的**根下条目名**。用例里手写 `entry: 'probe-flat'` 会让 RPC 直接抛 `SkillNotFoundError`
+——所以引用一律从 `listSkillViews` 现取（手写 wire 形状的用例测不出真契约，design.md §12.1）。
+
+**残留的三点（都不影响上面结论，但别当成已验证）**：
+
+- **硬前置：这三个 RPC 的生效性依赖 filesystem provider 的 watcher 真的起来了**。watcher 不是
+  挂载时就起，而是由 `provider.list()` 里的 `observeRoots()` 拉起（`dsh-skill-filesystem/lib/index.js:93-108`），
+  而 `observeRoots` 只**登记**根、`ensureWatcher` → `openStableWatcher` 才开 chokidar。
+  所以「某个根上的第一次读取」是这三个 RPC 在该根上生效的前提。
+  ⚠️ **别以为 provider 的 `complete:false` 能兜住**（我第一版这么写，读码核对后改掉了）：
+  `SkillRegistry.collect()`（`dsh-skill/lib/index.js:265-297`）在**缓存命中时直接返回**
+  （`return { entries: cached, cacheable: true }`），`collectFresh` / `collectLayer` 的
+  `cacheable=false` 只在**未命中**那条路上产生效果。也就是说：
+  **首次读取之前** watcher 就失败 → 不缓存、每次都重扫（这时 `complete:false` 有效）；
+  **先有过一次可缓存读取、随后 watcher 失效** → 缓存条目留着，`complete:false` 再也到不了判定点，
+  消费者可以**永久**读到陈旧目录。**这一段是读码结论，本轮没实测**（要实测得让 watcher 中途死掉，
+  夹具里没有现成的触发手段）。
+- **watcher 中途失效（`handleWatcherError` / `scheduleRewatch`）后的行为没测**。代码里那条路也会
+  `queueInvalidation()`（所以**失效这个动作本身**不是静默的），但失效之后、没有任何后续文件事件时
+  不会自愈——结合上一条，那种状态下缓存会一直陈旧下去。「失效期间做的 RPC 之后会不会补上」没实测。
+
+- **没走 UI 那条最小路径**：没起隔离 profile 做 UI toggle → 新会话 `/` 命令列表。理由是程序化夹具
+  能拿到**更强**的证据（同一进程里直接读 `ctx.skills` 的目录，而 UI 只能看见渲染结果），且 UI 路径
+  的每一段都已被这条用例覆盖（RPC 入口相同、`listSkillViews` 相同、宿主相同）。若要补 UI 级确认，
+  配方在 `.tasks/mcp-tool-search/REVIEW-PROMPT.md` 的「环境事实」一节。
 
 ---
 
@@ -94,5 +149,6 @@ toggle[aria-checked=true]    = rgb(249,250,251)
 | F3 | 「全部延迟」按钮在列表底栏、太小，滚出视野就找不到功能 | 移到过滤器行（第一屏），主按钮 + 闪电图标，唯一入口；`test/detail-panes.test.mjs` 用**真实渲染**断言位置。第五轮修掉三处残留（项目小列表下按钮不渲染、计数口径分裂、ListFooter 死槽位） |
 | F4 | token 估算是假精确感（我们不知道用户装了什么 MCP，schema 大小差一个量级） | 整套删除：两个估算函数、两处计算、三处渲染、4 个单测。徽标只剩「延迟」，表单预告只留工具数与 per-server 规则。第五轮修掉永假守卫与 i18n 缺口（补 6 条 EN、删 8 条死词条、parity 扩到 `t()` 调用点） |
 | O1 | `add` / `removeServer` / `installBuiltins` 只写盘，运行中进程不生效 | 第五轮修好：writePatch 之后在**运行中的进程**里创建/停掉 loader 条目（根部创建 + `entry.parent.remove`），共用同一个失败回滚形状。`test/real-host-loader.test.mjs` 用真 Loader + 真 mcp-client + 真 stdio 子进程覆盖。剩一条终验缺口见 O1R |
+| O2 | skills 三个变更 RPC 的运行中生效性未实测 | **不是缺陷，是未验证**：第七轮搭真夹具验掉了（临时技能根 × 真 SkillRegistry × 真 dsh-skill-filesystem `watch:true`）。三个 RPC 都在运行中生效，投递机制就是宿主的 watcher → `control.invalidate` → registry 重扫。反证：`watch:false` 复跑时三个 RPC 都报 `changed:true` 而 registry 永远不变（删掉的技能 3 秒后还在目录里）。细节见上面 O2 条目 |
 
 **F1 的那个讽刺**（第五轮复查后改写）：`test/typert-manifest.test.mjs` 原有 `assert.equal(mcp.length, 34)` 的精确计数，在 `setDeferAll` 缺失时 manifest 恰好还是 34 条——**这条断言把缺口固化成了"正确值"**。已改成 35 并加注释。但第五轮的变异实验进一步证明：即使计数改对，**三边同序比对对"三边同时缺"仍然失明**（那条用例绿，只有计数红）——所以真正补的是第四边。

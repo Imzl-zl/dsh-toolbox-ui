@@ -24,10 +24,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { SkillsManagerGateway } from '../lib/index.js'
-import { skillRowKey } from '../lib/skills-registry.js'
+import { listSkillViews, skillRowKey } from '../lib/skills-registry.js'
 import { diagnoseSkill } from '../lib/skills-frontmatter.js'
 
 const hostIndex = readFileSync(fileURLToPath(new URL('../lib/index.js', import.meta.url)), 'utf8')
+
+// 真 watcher 的用例要等宿主的文件事件（stabilityThreshold 200ms）+ 重扫，60s 是硬上限：
+// 它是「卡死」的兜底，不是期望耗时（实测这几条都在 1s 内收敛）。
+const TEST_TIMEOUT_MS = 60_000
 
 test('MCP panel still activates on a real cordis Context when skills is absent', async () => {
   // SPEC 约束 16 的**行为级**验收（比断言 inject 数组强得多）：Cordis 的 inject 是依赖声明，
@@ -927,6 +931,337 @@ test('setModelInvocable writes the referenced file and refuses a read-only root'
     )
     assert.equal(await readFile(join(bundled, 'builtin', 'SKILL.md'), 'utf8'), before, '内置根不得被写入')
   } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+// ── O2：三个变更 RPC 的**运行中生效性** ──────────────────────────────────────
+//
+// O2 要问的问题：`setEnabled` / `setModelInvocable` / `removeSkill` 在 lib/skills-file-ops.js
+// 里只写盘（writeTextKeepingMode / rm），**没有任何 registry 通知**。它们到底靠什么生效？
+// 推断是宿主 @deepseek-ai/dsh-skill-filesystem 的 watcher（watch 默认 true）监听文件事件后调
+// control.invalidate。推断不是证据，所以这里搭夹具把它验掉：
+//
+//   临时技能根（绝不碰用户的 ~/.agents/skills）→ 写一条技能 → mount **真** SkillRegistry
+//   + **真** filesystem provider（watch: true，真机默认）→ 调 RPC → 看**新会话读到的目录**
+//   有没有跟着变。
+//
+// 关键：宿主的 **发现缓存**（SkillRegistry.collectCache）意味着「新会话看得见」并不是免费的
+// ——文件改了而缓存没作废的话，新会话读到的仍是旧条目。所以每条用例都先证明**探针读的是那份
+// 缓存**：同一个格子前后各读一次目录，先读到旧描述，改盘后等它自己翻成新描述。这一条同时证明
+// 「有缓存」与「缓存会被作废」；没有它，正向断言可能只是因为探针每问一次都重扫盘而成立。
+//
+// 本例**自带反证**（撤掉机制看红，配方留在 .tasks/mcp-tool-search/OPEN-ITEMS.md 的 O2 条目）：
+// 把 provider 的 `watch` 改成 false 复跑同一路径，三个 RPC 全都返回 `changed:true`，而 registry
+// 一直报 `modelVisible:true`、`removeSkill(bundle)` 删掉的技能 3 秒后还在目录里。也就是说这一组
+// 断言不是空过——它们守的正是「宿主自己发现改动」这件事。
+test('the three mutating RPCs take effect in the running host, not only on disk', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const { Context } = await import('@deepseek-ai/cordis')
+  const { SkillRegistry, isModelInvocable, isUserInvocable } = await import('@deepseek-ai/dsh-skill')
+  const fsProvider = await import('@deepseek-ai/dsh-skill-filesystem')
+  const { SkillsManagerGateway } = await import('../lib/index.js')
+
+  const base = await mkdtemp(join(tmpdir(), 'dsh-runtime-effect-'))
+  const agentsHome = join(base, 'agents-home')
+  const root = join(agentsHome, 'skills')
+  const dshHome = join(base, 'dsh-home')
+  await mkdir(root, { recursive: true })
+
+  const FLAT = 'probe-flat'          // 扁平（<根>/probe-flat.md）
+  const BUNDLE = 'probe-bundle'      // 目录捆绑（<根>/probe-bundle/SKILL.md）
+  const BYSTANDER = 'probe-bystander'
+  const FLAT_FILE = join(root, `${FLAT}.md`)
+  const BUNDLE_FILE = join(root, BUNDLE, 'SKILL.md')
+  const BYSTANDER_FILE = join(root, `${BYSTANDER}.md`)
+  await writeFile(FLAT_FILE, `---\nname: ${FLAT}\ndescription: 探针（扁平）\n---\n\n扁平正文。\n`)
+  await mkdir(join(root, BUNDLE), { recursive: true })
+  await writeFile(BUNDLE_FILE, `---\nname: ${BUNDLE}\ndescription: 探针（目录捆绑）\n---\n\n捆绑正文。\n`)
+  await writeFile(BYSTANDER_FILE, `---\nname: ${BYSTANDER}\ndescription: 负对照用的旁观技能\n---\n\n旁观正文。\n`)
+
+  const ctx = new Context()
+  await ctx.plugin(SkillRegistry)
+  // watch: true 是**真机默认**（presets 没关它、profile 也没覆盖）——这正是 O2 要验的机制。
+  // watch: false 跑会让下面每一条都读到旧缓存，把一个正确的实现报成失败。
+  const fiber = ctx.plugin({
+    apply: fsProvider.apply, inject: fsProvider.inject, name: fsProvider.name, Config: fsProvider.Config,
+  }, { dshHome, agentsHome, watch: true })
+  await fiber
+
+  // 宿主替身只补 loader（RPC 的引用核对要读 provider config）——`skills` 是**真的** ctx.skills，
+  // 所以路径与真机逐字相同（skills-registry 的 skillsService 问的就是 ctx.get('skills')）。
+  const hostCtx = {
+    get: (name) => ctx.get(name),
+    loader: { entries: () => [{ options: { name: '@deepseek-ai/dsh-skill-filesystem', config: { dshHome, agentsHome } } }] },
+  }
+
+  /**
+   * 一条技能的引用——**取自面板自己的列表路径**（`listSkillViews`），不手写。
+   *
+   * ⚠️ 这一条是被测试逼出来的：手写 `entry: 'probe-flat'` 会直接抛「找不到技能条目」——
+   * 扁平技能的磁盘条目是**带扩展名的那个文件名**（`probe-flat.md`），而技能名（frontmatter 的
+   * name）是 `probe-flat`。两者不同，正是 skills-registry 里 locateSkill 要还原的东西。
+   * 用例若自己编引用，测的就是「我以为的 wire 形状」而不是面板真正送出去的形状
+   * （教训 §12.1：手写夹具会系统性漏掉真契约）。
+   */
+  const panelReference = async (name) => {
+    const rows = await listSkillViews(hostCtx, {})
+    const row = rows.find((candidate) => candidate.name === name)
+    assert.notEqual(row, undefined, `面板的列表里必须有 ${name}（否则它在面板上根本没得操作）`)
+    assert.notEqual(row.root, undefined, `${name} 必须定位到根（否则面板那一行操作不了）`)
+    return {
+      name: row.name,
+      entry: row.entry,
+      kind: row.kind,
+      source: row.source,
+      root: row.root,
+      projectPath: row.cwd,
+    }
+  }
+
+  /**
+   * 新会话此刻读到的目录。
+   *
+   * 探针读的是**真宿主的公开面**：`snapshot()` 给目录（会话技能目录就是它）、`get()` 取正文
+   * （会话装载技能走的就是它）。不断言网关自己投影出来的行——那是被验的对象，不是消费者。
+   */
+  const newSessionView = async (name) => {
+    const { skills } = await ctx.skills.snapshot({})
+    const entry = skills.find((skill) => skill.name === name)
+    if (entry === undefined) return { present: false, modelVisible: false, userVisible: false, body: null }
+    // 会话对目录条目应用调用面策略（dsh-skill 自己导出这两个判据，不在这里重抄语义）。
+    const body = await ctx.skills.get(name, {})
+    return {
+      present: true,
+      modelVisible: isModelInvocable(entry),
+      userVisible: isUserInvocable(entry),
+      body: body?.content ?? null,
+    }
+  }
+
+  /**
+   * 等宿主**自己**发现改动（watcher 的 stabilityThreshold 是 200ms，给足 5s 余量）。
+   * 等不到就把最后一次读数原样报出来——绝不能把一个没生效的实现说成生效。
+   */
+  const waitForView = async (name, expected, why) => {
+    let actual
+    for (let i = 0; i < 50; i += 1) {
+      actual = await newSessionView(name)
+      if (Object.entries(expected).every(([field, value]) => actual[field] === value)) return actual
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    assert.deepEqual(actual, { ...actual, ...expected }, why)
+    return actual
+  }
+
+  /**
+   * 负对照用的改动：只换掉旁观技能 frontmatter 里的描述那一行。
+   *
+   * 为什么不用 `setFrontmatterBoolean`（本仓自己那套改写）：它只写布尔字段，而这里要动的是
+   * 描述字符串——本用例要的不是"产品路径"，而是一个**确定能被宿主发现**的改动（实测宿主的
+   * `isRelevantWatchEvent` 收得很宽，改描述也会触发 invalidate），好让负对照落在「这个缓存
+   * 会不会被作废」而不是「这个改动宿主看不看得见」。
+   */
+  const rewriteDescription = (text, description) => {
+    const next = text.replace(/^description:.*$/m, `description: ${description}`)
+    assert.notEqual(next, text, '负对照前提：描述那一行确实被替换掉了')
+    return next
+  }
+
+  /**
+   * 负对照与「全量重扫」要断言的量：新会话**目录里**那条技能的描述。
+   *
+   * ⚠️ 必须取自 `snapshot()`（= 目录），不能取自 `get()`：`get()` 每次都回 provider 重读正文，
+   * 它**永远**是盘上最新的，读它做负对照会恒真（实测：刚写完立刻 `get()` 就返回新描述，
+   * 而同一刻的 `snapshot()` 还是旧描述）。陈旧性只存在于目录这一侧——也正是「模型自动调用
+   * 哪些技能」所依据的那一侧。
+   */
+  const catalogDescription = async (name) => {
+    const { skills } = await ctx.skills.snapshot({})
+    return skills.find((skill) => skill.name === name)?.description
+  }
+
+  /** 等一个探针收敛到期望值（watcher 的稳定阈值是 200ms，给足余量）。 */
+  const waitForProbe = async (probe, expected, why) => {
+    let actual
+    for (let i = 0; i < 50; i += 1) {
+      actual = await probe()
+      if (actual === expected) return actual
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    assert.equal(actual, expected, why)
+    return actual
+  }
+
+  /**
+   * RPC 目标状态。期望的调用面从**改完之后那个文件**现读（生产解析路径），
+   * 不在用例里重抄字段名与缺省方向。
+   */
+  const targetView = async (file) => {
+    const { invocation } = diagnoseSkill(await readFile(file, 'utf8'))
+    return { present: true, modelVisible: invocation.modelInvocable, userVisible: invocation.userInvocable }
+  }
+
+  try {
+    // 前提①：宿主在**被改之前**就先看见这几条技能——否则下面的「变了」无从谈起。
+    // 这一步同时把 watcher 在根上装起来：provider 的 watcher 由它自己的 list() 拉起。
+    for (const name of [FLAT, BUNDLE]) {
+      const initial = await newSessionView(name)
+      assert.equal(initial.present, true, `前提：改动之前宿主就报得出 ${name}`)
+      assert.equal(initial.modelVisible, true, `前提：${name} 初始是模型可调用的`)
+      assert.equal(initial.userVisible, true, `前提：${name} 初始是用户可调用的`)
+    }
+    // 前提②：宿主确实在有缓存地服务这个目录（`complete` 是宿主自己报的「这次读没有降级」）。
+    // 没有这一条，下面的断言可以因为「宿主每次都重新扫盘」而恰好成立，那就什么都没证明：
+    // 缓存是 invalidation 唯一有意义的舞台。
+    for (let i = 0; i < 3; i += 1) {
+      const observed = await ctx.skills.snapshot({})
+      assert.equal(observed.complete, true, '前提：宿主在这个根上的读取是完整观测（没有降级、没有跳过缓存）')
+      assert.equal(observed.skills.some((skill) => skill.name === FLAT), true)
+    }
+
+    // 每一条：`skill` 是被操作的那条技能（RPC 引用按它现取，见 panelReference），`file` 是它
+    // 改完之后该有的状态来源（删除类没有文件），`body` 是新会话应该取到的正文。
+    // 期望的调用面从 `file` 上现读——不在用例里重抄语义。
+    const asked = {
+      'setEnabled(off)': {
+        skill: FLAT,
+        file: FLAT_FILE,
+        body: '扁平正文。',
+        call: async () => SkillsManagerGateway.prototype.setEnabled.call({ ctx: hostCtx },
+          { ...await panelReference(FLAT), enabled: false }),
+        // 停用不搬文件：宿主因此**照样报得出**它，只是两个面都关（这正是面板不必扫盘的原因）。
+        expectHiddenFromModel: true,
+      },
+      'setEnabled(on)': {
+        skill: FLAT,
+        file: FLAT_FILE,
+        body: '扁平正文。',
+        call: async () => SkillsManagerGateway.prototype.setEnabled.call({ ctx: hostCtx },
+          { ...await panelReference(FLAT), enabled: true }),
+        expectHiddenFromModel: false,
+      },
+      'setModelInvocable(false)': {
+        skill: FLAT,
+        file: FLAT_FILE,
+        body: '扁平正文。',
+        call: async () => SkillsManagerGateway.prototype.setModelInvocable.call({ ctx: hostCtx },
+          { ...await panelReference(FLAT), modelInvocable: false }),
+        // 只关模型面 = 规范里「仅手动可调用」那一档：模型自动调用看不到它，`/名字` 仍然可以。
+        expectHiddenFromModel: true,
+      },
+      'setModelInvocable(on)': {
+        skill: FLAT,
+        file: FLAT_FILE,
+        body: '扁平正文。',
+        call: async () => SkillsManagerGateway.prototype.setModelInvocable.call({ ctx: hostCtx },
+          { ...await panelReference(FLAT), modelInvocable: true }),
+        expectHiddenFromModel: false,
+      },
+      // 目录捆绑：先停用（走 frontmatter 写路径），再从暂停态删除。
+      'setEnabled(bundle off)': {
+        skill: BUNDLE,
+        file: BUNDLE_FILE,
+        body: '捆绑正文。',
+        call: async () => SkillsManagerGateway.prototype.setEnabled.call({ ctx: hostCtx },
+          { ...await panelReference(BUNDLE), enabled: false }),
+        expectHiddenFromModel: true,
+      },
+      // ⚠️ 目录捆绑的删除：watcher 侧走的是 unlinkDir（不是 unlink），与扁平那条**不是**同一条
+      // 代码路径，必须单独验。
+      'removeSkill(bundle)': {
+        skill: BUNDLE,
+        file: undefined,
+        body: null,
+        call: async () => SkillsManagerGateway.prototype.removeSkill.call({ ctx: hostCtx },
+          await panelReference(BUNDLE)),
+        expectHiddenFromModel: true,
+      },
+      // 扁平文件的删除：unlink。放在最后——删完这条技能就不在了。
+      'removeSkill(flat)': {
+        skill: FLAT,
+        file: undefined,
+        body: null,
+        call: async () => SkillsManagerGateway.prototype.removeSkill.call({ ctx: hostCtx },
+          await panelReference(FLAT)),
+        expectHiddenFromModel: true,
+      },
+    }
+
+    // ⚠️ 防「用例空过」：下面每一类判据都登记在这里，断言到才销账。这条 `deepEqual` 是**变异
+    // 测试逼出来的**——循环里 `break` / 提前 return / 表格被改空，都会让整段静默变绿。
+    const notChecked = new Set(['RPC 报告 changed', '两个调用面', '正文', '负对照', '全量重扫', '前提', '模型侧目录'])
+    for (const [label, entry] of Object.entries(asked)) {
+      // ① 前提：每一条用例都要先证明「宿主此刻看得见它」。逐条重问，因为被测技能在上一条
+      //    用例里刚被改过（停用/删除），循环外问一次是不够的。
+      const before = await newSessionView(entry.skill)
+      assert.equal(before.present, true, `${label}：前提——改动之前宿主必须报得出 ${entry.skill}`)
+      notChecked.delete('前提')
+
+      // ② 负对照：证明探针**读的是宿主的发现缓存**，而且缓存确实会被作废。
+      //
+      //    做法是盯住**同一格**（旁观技能的描述）走完 A→B：
+      //      A. 改盘**之前**连读两次目录，两次必须都是那个旧值 —— 「稳定地读到缓存里的旧值」；
+      //      B. 改盘，然后等这一格翻成新值。
+      //    宿主的 watcher 是 chokidar + `awaitWriteFinish`（stabilityThreshold 200ms，见
+      //    @deepseek-ai/dsh-skill-filesystem 的 openRootWatcher），所以 A 与 B 之间必然隔着一次
+      //    真实的 invalidate → 重扫；若 A 处就已经跟着盘面走，那 B 什么都证明不了。
+      //
+      //    ⚠️ 别用「写完之后立刻读仍是旧值」那种写法：上一条用例的 RPC 可能刚好在那一刻把缓存
+      //    作废掉（实测踩到过一次 flaky）。A→B 只依赖本格自身的两次读数，与别的用例的时序无关。
+      const nonce = `${label}#${Date.now()}`
+      const described = `${nonce} 改过的描述`
+      const firstRead = await catalogDescription(BYSTANDER)
+      const secondRead = await catalogDescription(BYSTANDER)
+      assert.notEqual(firstRead, undefined, `${label}：旁观技能必须一直在目录里（负对照的前提）`)
+      assert.equal(secondRead, firstRead,
+        `${label} 的负对照前提：没有磁盘改动时，目录里的描述必须稳定（否则这一格不是缓存读数）`)
+      assert.notEqual(firstRead, described, `${label} 的负对照前提：新描述与旧值不能撞上`)
+      await writeFile(BYSTANDER_FILE, rewriteDescription(await readFile(BYSTANDER_FILE, 'utf8'), described))
+      await writeFile(join(root, 'notes.txt'), label)
+      const invalidated = await waitForProbe(() => catalogDescription(BYSTANDER), described,
+        `${label} 的负对照失败：盘上描述改了，但宿主一直没作废缓存（${entry.skill} 的正向断言因此无从谈起）。`
+        + '若这条红了，说明这个夹具里的 watcher 没有工作——先修夹具，别改成断言文件内容')
+      assert.equal(invalidated, described, `${label}：目录里的描述必须换成本次写进去的那一份`)
+      notChecked.delete('负对照')
+
+      // ④ 正戏：**面板自己的写路径**（RPC）
+      const result = await entry.call()
+      assert.equal(result.changed, true, `${label} 的 RPC 必须报告「确实改了」`)
+      notChecked.delete('RPC 报告 changed')
+
+      // 期望值从**RPC 之后的那个文件**上读出来（生产解析路径），而不是在用例里重抄字段名与缺省方向。
+      // 删除类用例没有文件可读——它的期望就是「不存在」。
+      const expected = entry.file === undefined
+        ? { present: false, modelVisible: false, userVisible: false, body: null }
+        : { ...await targetView(entry.file), body: entry.body }
+      const seen = await waitForView(entry.skill, {
+        present: expected.present,
+        modelVisible: expected.modelVisible,
+        userVisible: expected.userVisible,
+      }, `${label}：宿主必须**自己**发现这次改动并让新会话读到它（文件监听 → registry 作废重扫）`)
+      assert.equal(seen.body, expected.body, `${label}：新会话取到的正文必须是盘上那一份（null = 取不到）`)
+      notChecked.delete('两个调用面')
+      notChecked.delete('正文')
+
+      // ⑤ 「新会话」的实质是**模型/用户两个面拿不拿得到**，不是列表里有没有那一行。
+      const modelSet = new Set((await ctx.skills.snapshot({})).skills.filter(isModelInvocable).map((skill) => skill.name))
+      assert.equal(modelSet.has(entry.skill), !entry.expectHiddenFromModel,
+        entry.expectHiddenFromModel
+          ? `${label}：改完之后模型侧目录里不该再有它（否则模型仍会自动调用它）`
+          : `${label}：改完/恢复之后模型侧目录里必须有它`)
+      notChecked.delete('模型侧目录')
+
+      // ⑥ 宿主重扫的是**整个根**，不是只补被 RPC 碰过的那一条：②里那次「盘上已改、目录还旧」
+      //    的旁观技能，现在必须在目录里也已经是新描述。它与被 RPC 改的那条技能毫无关系——
+      //    只有整根重扫才会一起更新。
+      assert.equal(await catalogDescription(BYSTANDER), described,
+        `${label}：invalidation 之后连**旁观的、没被 RPC 碰过**的那条技能也要反映到新描述，`
+        + '说明宿主重扫了整个根，而不是只补了被改的那一行')
+      notChecked.delete('全量重扫')
+    }
+    assert.deepEqual([...notChecked], [], `这些判据一次都没跑到：${[...notChecked].join('、')}`)
+  } finally {
+    await fiber.dispose?.()
     await rm(base, { recursive: true, force: true })
   }
 })

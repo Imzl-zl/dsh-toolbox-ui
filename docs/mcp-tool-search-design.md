@@ -329,3 +329,34 @@ DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四�
 
 **第六轮（O1 终验）**：用户要求把剩下那个未决项也验掉。新增 `test/real-host-include.test.mjs`，用**真** `@deepseek-ai/cordis-plugin-include`（为此把它加进 devDependencies）复现生产形状，并且真的"重启"——dispose 整个 cordis Context、用同一对 `cordis.yml` / `cordis.patch.yml` 重新起一个宿主。这一轮同时产出三样东西：① 正向证据（`add()` 根部创建后 base 配置一字节不动、重启后无重复条目、`removeServer()` 后无残留）；② 反向证据（走 `ctx.loader.remove()` 会"既没删掉、又把 patch 条目烙进 base 配置"，两个后果同时发生）；③ 一条不许回退的闸门（产品代码改回 `ctx.loader.remove()` 立刻红）。
 
+### 12.4 第七轮：O2 终验（skills 三个 RPC 的投递机制）
+
+OPEN-ITEMS 的 O2 一直写着「三个变更 RPC 的运行中生效性没实测，投递机制是读码推断」。本轮把它验掉：
+**推断成立，三个 RPC 都在运行中生效，投递机制就是宿主 watcher → `control.invalidate` → registry 重扫**。
+新增一条用例 `test/skills-host.test.mjs` 的 `the three mutating RPCs take effect in the running host,
+not only on disk`（夹具 = 临时技能根 × 真 `SkillRegistry` × 真 `dsh-skill-filesystem`，`watch: true`；
+引用取自面板自己的 `listSkillViews`，不手写 wire 形状）。
+
+| # | 被推翻 / 遗漏的事实 | 证据 | 改动 |
+|---|---|---|---|
+| 27 | **「三个 RPC 只写盘、运行中不生效」是未验证的推断，实际成立**。`removeSkill` 是三者里唯一**零覆盖**的一条，而它也是唯一不可逆、且 watcher 侧走 `unlinkDir`（与启停的 `change` 不是同一条代码路径） | 真夹具：启/停、模型面关/开、捆绑停用、捆绑删除（`unlinkDir`）、扁平删除（`unlink`）七条 RPC 全部 `changed:true`，且宿主**新会话视图**（`snapshot()` + `get()`）在 200–300ms 内收敛到盘面（watcher 的 `stabilityThreshold: 200ms` 支配）；删除后目录里真的消失 | 产品代码**不需要改**——原先担心的"只写盘所以要点重启"不成立。用例进 `test/skills-host.test.mjs`，并带三样东西：① 正向七条；② 负对照（同格前后各读一次：旧描述 → 改盘 → 自己翻成新描述，证明探针读的是宿主缓存且缓存会被作废）；③ 反证（`watch:false` 复跑：三个 RPC 都报 `changed:true` 而 registry 永远不变，`removeSkill(bundle)` 目录删掉 3 秒后目录里还报得出那条技能） |
+| 28 | **「可以用一个 watcher 判据之外的静默改动做负对照」是错的**。原计划拿「只改技能文件里的描述」当作宿主不会作废缓存的那类事件 | 实测 `isRelevantWatchEvent`（`dsh-skill-filesystem/lib/index.js:541`）收得极宽：根下 `*.md` 的 `add`/`unlink`、一级的 `addDir`/`unlinkDir`、两层以内的 `SKILL.md` 的 `add`/`change`/`unlink` **全算**。改描述这条手工编辑立刻被宿主发现（第一版负对照当场红） | 负对照改成「同一格前后各读一次目录」，不再依赖任何"宿主看不见"的假设 |
+| 29 | **宿主的发现缓存只在**目录**一侧陈旧，`get()` 永远是盘上最新的** | 探针实测：刚写完文件，同一刻 `snapshot()` 报旧描述，而 `ctx.skills.get('x').description` 已是新描述（`get()` 每次回 provider 重读正文，`dsh-skill/lib/index.js:250-263`） | 陈旧性断言一律取 `snapshot()` 侧（也正是「模型自动调用哪些技能」依据的那一侧）。拿 `get()` 的量做负对照会恒真——本条用例第一版就是在那里翻车的 |
+| 30 | **扁平技能的 wire `entry` 带扩展名**（`probe-flat.md`，不是 `probe-flat`），手写引用会让 RPC 直接抛 `SkillNotFoundError` | 用例第一版手写 `{ entry: 'probe-flat', kind: 'flat' }` → `resolveSkillTarget` 抛「找不到技能条目 probe-flat」；条目名来自 `locateSkill` 的 `matchFlatEntry`（按 realpath 匹配后返回**根下条目名**） | 三条 RPC 的引用改从 `listSkillViews` 现取。这是 §12.1 那条教训的又一例：手写 wire 形状测的是"我以为的契约" |
+| 31 | **「watcher 起不来时 provider 的 `complete:false` 会让每次读都重扫」是错的**（写 §12.4 时自己写的结论，随后读码核对时推翻）。缓存命中路径根本不看 provider 的 complete | `SkillRegistry.collect()`（`dsh-skill/lib/index.js:265-297`）：`const cached = this.collectCache.get(key); if (cached !== undefined) return { entries: cached, cacheable: true }` ——**先返回**；`collectFresh` / `collectLayer` 的 `cacheable=false` 只在未命中那条路上产生 | 残留说明改成两段式：**首次读取之前**失败 → 不缓存、真会重扫；**先有过一次可缓存读取、随后 watcher 失效** → 缓存留着、`complete:false` 到不了判定点，消费者**永久**读到陈旧目录。这条是读码结论、仍**未实测** |
+
+**O2 残留（本轮明确没验，不许当成已验）**：
+- **生效性的硬前置**是 filesystem provider 的 watcher 真的起来了。它不由挂载触发，而由 `provider.list()` 里的
+  `observeRoots()` 拉起（`dsh-skill-filesystem/lib/index.js:93-108`）。所以「某个根上的第一次读取」是这三个 RPC
+  在该根上生效的前提。
+  ⚠️ **provider 的 `complete:false` 兜不住这件事**（本条第一版写成「退化成每次重扫」，读码核对后推翻）：
+  `SkillRegistry.collect()`（`dsh-skill/lib/index.js:265-297`）在缓存命中时**直接返回**
+  `{ entries: cached, cacheable: true }`，而 `cacheable=false` 只在**未命中**那条路上由 `collectFresh` /
+  `collectLayer` 产生。于是分两种：首次读取之前 watcher 就失败 → 不缓存、每次重扫（`complete:false` 有效）；
+  **先有过一次可缓存读取、随后 watcher 失效** → 缓存条目留着、`complete:false` 到不了判定点，消费者可以
+  **永久**读到陈旧目录。**读码结论，本轮没实测**（要实测得让 watcher 中途死掉，夹具里没有现成触发手段）。
+- **watcher 中途失效后的行为没测**（`handleWatcherError` / `scheduleRewatch`；失效这个动作本身会调
+  `queueInvalidation`，所以不是静默的，但之后没有后续文件事件就不会自愈——结合上一条即永久陈旧）。
+- 没走隔离 profile 的 UI toggle → 新会话 `/` 列表那条最小路径：程序化夹具拿到的证据更强（直接读 `ctx.skills` 目录，
+  而 UI 只能看见渲染结果），且 UI 路径的每一段都已被这条用例覆盖（同一 RPC 入口、同一 `listSkillViews`、同一宿主）。
+
