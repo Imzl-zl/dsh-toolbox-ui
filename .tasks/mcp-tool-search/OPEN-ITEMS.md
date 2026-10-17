@@ -13,8 +13,35 @@
 > **第八轮（独立复核）之后的变化**：修掉三条产品缺陷 + 一处测试空守卫，细节见
 > `docs/mcp-tool-search-design.md` §12.5 与文末表格。**新增三条遗留项 O6 / O7 / O8**，
 > 都是"需要先定方案再动手"的，不是"忘了做"。
+>
+> **第九轮（O6/O7/O8 方案调研，只调研不改代码）之后的变化**：O6 **推翻了两条旧定性**
+> （不是"半失效"、遮罩不是"打在另一条投影上"）并**把方案定为"裁 `tools:sdk` 文本"**
+> （实测：PTC 会话从倒贴 3181 字符变成真省 3688 字符）；O7 补到**四条**失效路径、
+> 查清**两道门槛都不是官方做法**、拿到**官方中文术语证据**并定了面板语义；O8 三条**都定了结论**。
+> ⚠️ 本轮**没有改任何产品代码**（`git status` 干净、738 绿）——方案已定，实现留给下一轮。
+> **第九轮的完整证据、我踩的坑、以及"未验证"清单都在 O6 条目的各小节里，动 O6 之前请全读一遍。**
+> 下一轮的交接提示词见 `.tasks/mcp-tool-search/NEXT-SESSION.md`。
+>
 > ⚠️ **本文档的轮次编号有缺口**：§12.3 自称"第五轮"、§12.4 自称"第七轮"，中间没有第六轮小节
 > （第六轮内容散在 §12.3 正文里）。**不要靠编号推断时间顺序**，按内容判断。
+>
+> ## 🔴 第十轮（独立复核 + 方案定稿）：先读 `DECISIONS.md`
+>
+> 第十轮把第九轮的结论**逐条实测复验**，发现**第九轮有一条断言是错的**，而它是"方案"的地基：
+>
+> - ❌ 第九轮写「`SDK_RENDERERS` / 渲染器**不在公开面**上」→ **错**。`renderToolsSdk` /
+>   `renderToolsSdkPy` / `jsonSchemaToTs` / `jsonSchemaToPy` **都导出**（`dsh-tools:3714`）。
+> - 因此 **O6「方案（首选）」里的裁剪器实现细节整段作废**（别再去抠生成物、别数花括号、
+>   别给 Python 另写判据）——直接把子集喂给官方渲染器重渲染。**实测逐字节相等。**
+> - **O6「更干净的正解（宿主需求，主动权不在我们手里）」整段作废**：不需要求官方。
+> - **O8 第 1 条「改注释不改判据」被取代**：两道门槛整个删掉，`applyServerFloor` 成为死代码。
+> - **O7「误导的只有面板」对 PTC 不成立**：`deferring=false` 时 `tool_search` 仍可见且返回
+>   空结果 + 指向不存在的目录段（已实测）。
+> - 第九轮「未验证」里的**最后一个缺口已补上**：真 `dsh-ptc-runtime-node` 跑真程序，
+>   守卫拒 → `tool_search` → 调通，闭环成立。
+>
+> **所有最终决策、证据编号、受影响清单、验证计划、以及被推翻的中间立场，见
+> `.tasks/mcp-tool-search/DECISIONS.md`。动 O6 之前先读它。**
 
 ---
 
@@ -146,12 +173,42 @@ toggle[aria-checked=true]    = rgb(249,250,251)
 
 ---
 
-## O6【缺陷，已实测，未修｜需先定方案】PTC 组合下插件"半失效"：遮罩打在一条投影上，而模型看的是另一条
+## O6【缺陷，已实测，方案已定｜未修】PTC 组合下插件**净亏**——不是"半失效"，而且**能真解决**（裁 `tools:sdk`）
 
-**现象**：部署默认 `native`（插件照装）时，如果某个 agent 被 preset 设成 `ptc`，那个 agent 处在一个自相矛盾的状态——
+> **第九轮重做了这条**：推翻旧定性的两条、把伤害量成数字、把方案从"整体闭嘴"改成"裁 SDK 手册"。
+> 被推翻的旧结论留在下面的「旧记录错在哪」。「证据（第八轮实测）」小节**原始输出仍然有效**，
+> 但**它支持的那个结论已被推翻**——别照着旧结论做方案。
+>
+> ⚠️ **第九轮自己踩的坑也要看**（在「方案（首选）」的"代价与坑"里）：第一版裁剪器**静默失败**
+> 却报"自检通过"。那一节写的自检要求是拿真金白银换来的，不是理论。
+
+### 旧记录错在哪
+
+1. **"半失效（模型看着完整 schema 却调用即错）"不成立。** PTC 下模型的**原生函数清单里只有 `run_code` 一个**
+   （`wireSchemas` 在 ptc 下 `schemas.filter(name === RUN_CODE_NAME)`，`dsh-tools:2840-2843`）——它**没有机会**
+   发出 model-direct 的 mcp 调用，`collapses` 那条"调用即错"的拒绝路径**在真实使用里不可达**。
+   第八轮测的是**直调**，而直调在 PTC 下**不是模型的可用动作**。
+2. **"遮罩生效了，只是遮的是另一条投影"不准确。** 遮罩是 **no-op**：装/不装插件，`assembly.tools` 都是
+   `[run_code]`、mcp 数都是 0。它**没有可作用的对象**（`wireSchemas` 早就把 mcp 全滤掉了）。
+
+### 真正的伤害：净亏（第九轮实测，真宿主，PTC 会话 + 30 个延迟工具全未发现）
+
+| | 未装插件 | 装了插件 | 净差 |
+|---|---|---|---|
+| `renderPrompt` | **9003 字符** | **12184 字符** | **倒贴 +3181** |
+| `assembly.tools` 里的 mcp 数 | 0 | 0 | 遮罩 no-op |
+| `tools:sdk` section | 8820（推算） | **9533** | +713（`tool_search` 自己也被塞进 SDK）|
+
+多出来的是：目录 2409 + 引导段 359 + `tool_search` 的 SDK 签名 ~713。**外加**：模型每次首次用一个延迟
+工具，我们的 guard 会拒一次（"is deferred; call tool_search…"）——**白绕一圈**
+（嵌套派发绕过 `collapses` 但**不绕过 guard**，已实测）。
+
+旧记录下面的四条"现象"**仍然真实，但不是模型的真实处境**，原文保留供对照：
+
+**旧的"现象"段**：部署默认 `native`（插件照装）时，如果某个 agent 被 preset 设成 `ptc`，那个 agent 处在一个自相矛盾的状态——
 
 - 它的 `tools:sdk` section 里 **30/30 个 mcp 工具 schema 全在**（含 `tool_search` 自己）；
-- 而 `assembly.tools` 里被遮到 0 个（遮罩"生效"了，但遮的是另一条投影）；
+- 而 `assembly.tools` 里被遮到 0 个（~~遮罩"生效"了，但遮的是另一条投影~~ —— **已推翻：遮罩是 no-op**，见上）；
 - 直调 `tool_search` → `isError:true`：「only `run_code` is callable directly」；
 - 同进程对照的 native agent → `isError:false`。
 
@@ -178,23 +235,116 @@ CONTROL native agent 调 tool_search -> isError = false
 是按 `layers.chainLayers(scope)` 解析的，`:3090-3094` 的注释明说这个组合正是
 `dsh-agent-tool-presentation` 存在的理由（该包 `:47` 调 `presentAs`）。
 
-**为什么停在这里（不是忘了）**：修法要动 `installToolSearchRuntime` 的**装配结构**——
-`ctx.tools.register` / `ctx.tools.guard` 都是全局一次的，而"该不该生效"是 per-agent 的。
-两条候选路线的取舍我判断不了，需要先做方案调研：
+### 可达性（第九轮实测，Q1 的答案）：**出货功能，Web GUI 两步可达**
 
-1. **装配照旧，三个入口各自按 agent 短路**：`assemble` / `guard` / `execute` 里判 `modeFor(agent)`，
-   PTC agent 直接放行（不遮、不拒、引导段摘掉）。`tool_search` 仍全局注册。
-   好处：不动装配结构、不改 RPC。风险：`tool_search` 对 PTC agent 仍"存在"（虽不可调），
-   语义上比"整体不装"模糊；且要在三处各加一次判据 = 三处可能漂移。
-2. **装配前遍历现存 agent**：装配时若有任何 agent 是 ptc 就不装。好处：保持"全或全不装"。
-   风险：agent 是**动态**的（新会话才出现 PTC agent），装配时看不到未来；这正是 `modeFor(scope)`
-   与 `defaultMode` 分开的原因。
-3. **补 SDK section 整形**（参考实现的 `shapeSdkSection`）：把延迟工具也挡在 `tools:sdk` 外。
-   好处：唯一根治、PTC 下功能也能用。代价：碰 `tools:sdk` 投影，与插件"只做 assembly"的
-   架构决策（决策 8①）冲突，要重新论证。
+**不是"只有手写 preset 才会"**，所以结论是**改行为**，不是"把限制写清楚 + 启动日志报出来"。
 
-**要修需要什么**：先在真宿主里确认 `sdkSchemas` / `wireSchemas` 对 ptc scope 的**完整**行为
-（本轮只测了 `sdkSection` 文本与 `collapses`），再定上面三条里走哪条，然后补真宿主回归用例（先红后绿）。
+| 证据 | 内容 |
+|---|---|
+| `dsh-web-app/presets/ptc.patch.yml`（出货） | 内含 `tool-presentation` 行、`mode: ptc` |
+| `dsh-web-app/package.json` 的 `dsh.bundle.patch` | 列了 `./presets/ptc.patch.yml` → 每个 web 部署都声明它 |
+| `dsh-base/cordis.patch.yml:310` | 组合 `dsh-ptc-runtime-node` → 该 preset **挂载得起来**（否则 registry 拒挂） |
+| `dsh-client-ui-agent-preset` | Settings 里有 roster 卡片 +「Set as new task default」；客户端带 `ptc` 的**出厂帮助文案** |
+| 真 `--dump-config`（隔离 profile，**实测**） | `preset-ptc`（`id: ptc`）+ `tool-presentation.mode: ptc` + `ptc-runtime` 全在；`tools` 行是 `mode: !!js process.env.DSH_TOOLS_MODE`（不设 → schema 默认 `native`，`dsh-tools:2670`）|
+
+### 行为规格（第九轮实测，Q2 的答案——旧记录只测了 `sdkSection` 文本与 `collapses`）
+
+30 工具、真宿主、同一进程三个 agent 对照：
+
+| 观测 | native | **ptc** | both |
+|---|---|---|---|
+| `modeFor(agent)` | native | ptc | both |
+| `wireSchemas(agent).schemas` | 31 | **1（只有 `run_code`）** | 32 |
+| `sdkSchemas(agent)` | 31 | 31（mcp 30，带 output schema） | 31 |
+| `assembly.tools`（mcp 数） | 1（0） | 1（**0**） | 2（0） |
+| `tools:sdk` section | 不存在 | 7763 字符，含全部 30 | 7763 |
+| 直调 `tool_search` | ✅ | ❌ `only run_code is callable directly` | ✅ |
+| **嵌套**（`parent` = 真 run_code execution token）调 `tool_search` | ✅ | **✅ 能用** | ✅ |
+| 嵌套调未发现的延迟工具 | ❌ 我们的 guard 拒 | **❌ 我们的 guard 拒** | ❌ |
+| 发现后嵌套再调 | ✅ 执行 | **✅ 执行** | ✅ |
+
+**两个关键读数**：
+- PTC 下模型的**原生函数清单只有 `run_code`**，所以"直调即错"这条路径**不可达**；
+- **嵌套派发绕过 `collapses` 但走完整管线（含我们的 guard）**（`dsh-tools:1306` 的 `parent: exec.token`，
+  再进 `prepareExecution` → `guardReason`）。也就是说 **PTC 下插件的完整闭环其实是通的**——
+  `tool_search` 能调、guard 能自愈、发现后能执行。**唯一失效的是"省地方"**，而那正是本功能的目的。
+
+### 方案
+
+**首选：裁 `tools:sdk` 的文本（第九轮实测可行，收益最大）**
+
+原理：`tools:sdk` 与 `mcp:<server>` 指令段在**同一个 `assembly.sections` 数组**里，而插件**本来就在改这个数组**
+（清空指令段 / 追加目录段 / 清空引导段）。把它的 `text` 换成"只含已加载工具"的版本，**结构上是同一招**。
+
+**实测数字**（PTC 会话、30 个延迟工具全未发现、保留 `tool_search`）：
+
+| | `renderPrompt` |
+|---|---|
+| 不装插件 | 9003 字符 |
+| 装了插件（现状） | 12184 字符 ← **倒贴 3181** |
+| **装了插件 + 裁 SDK** | **5315 字符** ← **真省 3688** |
+
+`tools:sdk` 从 9533 → 2664 字符（只剩固定说明 + 空壳类型 + `tool_search` 一条）。
+
+**代价与坑（第九轮亲手踩的，别重踩）**
+
+1. **`renderKey` 两种形态**：合法 TS 标识符**不加引号**（`mcp__srv__t0:`），含连字符等的才 `JSON.stringify`
+   （`"defer-me-x":`）。按"都带引号"写 → **删了 0 个**。
+2. **第一版自检和裁剪器犯了同一个错误假设**，于是"删了 0 个"却报"自检通过"——**正是本项目禁止的
+   "看着成功其实没生效"**。自检必须**不依赖键的形态**。
+3. **别用"数花括号"切块**：第三方描述里一个不配对的花括号就能带偏计数。可靠判据是
+   **行首第 0 列的 `}`** 做 map 收尾、**`^ {2}` + 键形态**做条目起点。
+   宿主把 `description` 用 `\s+` collapse 成**单行**且转义 `*/`（`docLines`），所以描述既不跨行、也撑不破注释。
+4. **两个 map 必须同步删**：`ToolName = keyof ToolOutputMap` 而 `tools[K]` 取 `ToolArgsMap[K]`。
+5. **自检必须强制，失败要退回兜底**，不是打日志。任何一条不过就**放弃裁剪**（用原文）。这是这条路的
+   安全阀：最坏情况 = 退化成"兜底方案"，**绝不会把坏文本发给模型**。
+
+**自检要覆盖（不依赖形态）**：① 两个 map 的剩余条目数**相等**且 = 期望；
+② 被删名字不得以任何形态（裸 / 引号）残留；③ 结构锚点还在（`declare const tools:`、结尾 ```` ``` ````）。
+
+**兜底（也是裁剪失败时的落点）：per-agent inert view**
+
+在 `viewFor` / `buildToolSearchView` 里读 **`agent.ctx.tools.modeFor(agent)`**，ptc scope 返回 inert view。
+`deferring` **已经是三个入口唯一的闸门**（`assemble` / `guard` / `execute` 都判它），所以这
+**不是"三处各加一次判据"**——旧记录担心的"三处可能漂移"**不成立**。
+代价：`mode` 要进 `viewRevision`；`tool-search-wiring` 的 stub
+（`modeFor: () => toolsMode`）**忽略实参，表达不了"部署 native + agent ptc"**，必须升级
+（这也是为什么现有的 `装配：PTC 模式下不启用 ToolSearch` 只覆盖了**部署级** ptc）。
+残留：`tool_search` 仍全局注册 → PTC 的 SDK 里仍有它（~713 字符），描述在 PTC 下是假话，
+调用会拿到空匹配 + 指向一个不存在的目录段 → **必须改成指名显式错误**（纪律 3）。
+
+**否掉：装配前遍历现存 agent。** (a) agent 动态，安装期看不到；(b) **"遍历现存 agent"这个能力不存在**
+——`discoveredStates` / `viewCache` 都是 WeakMap，宿主也没给插件 agent 注册表；(c) "每次 assemble 现算"
+就等于 inert view。
+
+**未决（需拍板）：`both` 部署要不要一并启用。** 安装期判据是 `modeFor() === "native"`，于是 `both` **完全不装**
+——而实测 `both` 下遮罩**有效**（mcp 30 → 0）。放宽成 `!== "ptc"` + inert view 就顺带打开。
+代价：`both` 下 SDK 仍列全量（**SDK 也要一起裁**），且该通路从没在生产跑过。
+
+**更干净的正解（宿主需求，主动权不在我们手里）**：让 `sdkSchemas` / `sdkSection` 支持 per-scope 隐藏集，
+或公开一个可传 schema 子集的 SDK 渲染器（`SDK_RENDERERS` 现在**不导出**）。有它就不用解析生成物。
+
+### 未验证（第九轮没做，别当成已验）
+
+- **裁剪后模型能否真写出程序并调通**：需装真 `dsh-ptc-runtime-node`，让程序里 `await tools.mcp__srv__t5(...)`。**最后一个缺口。**
+- **Python 渲染器 `renderToolsSdkPy`（`dsh-tools:2432`）没读**。裁剪器的判据（2 空格缩进 / 行首 `}`）
+  **只对 TS 渲染器验证过**。若运行时 `language === 'python'`，要么另写判据、要么**按语言门控**（只裁 TS）。
+- **发现工具后 SDK 恢复**这条状态转移没测（实现上是 `remove = managed − discovered`，与 `filterManagedTools` 同构）。
+- **`both` 模式下 SDK 的裁剪**没测。
+- **子 agent / `complete section` 部署**下裁 SDK 的交互没测（`complete section` 会吞掉所有 section，
+  裁了也没用——但那种部署下目录段本来也被吞）。
+- **真机 UI**：没在跑起来的 web 实例里点过 preset 卡片（隔离实例 8917 返回 401 需鉴权）。
+  可达性证据是**出货文件 + 真 dump-config + 客户端 roster 代码**，不是 UI 点击。
+
+### 要补的回归用例（先红后绿，真宿主）
+
+1. **PTC agent 的 `tools:sdk` 不得含未发现的延迟工具**；已发现的必须在里面（含 `tool_search`）。
+2. 两个 map 的条目数一致；自检的三种坏形态（键形态假设错 / map 只删一个 / 缩进判据失效）**各自能被抓到**。
+3. **同进程 native agent 对照**：遮罩 / guard / 目录 / SDK 全照旧（防回归）。
+4. 夹具级：stub 的 `modeFor` 必须区分 `modeFor()` 与 `modeFor(agent)`，断言"部署 native 时仍然安装"。
+5. `both` 部署（若决定启用）：遮罩与 SDK 裁剪同时生效。
+
+**反证（撤掉改动看红）**：撤掉裁剪 → 用例 1 红；撤掉 per-agent 判据 → 兜底路径的用例红。
 
 ---
 
@@ -212,29 +362,99 @@ CONTROL native agent 调 tool_search -> isError = false
 
 **更隐蔽的一层（第八轮新发现，比上一条重要）**：uiprobe（**12 工具**，过得了 per-server 下限）
 的预告是"该服务器 12 个工具，将经 tool_search 按需加载"——**看着完全正常**。
-但同一 profile 此刻 `managed = 12 < threshold 15` → `deferring = false`，**机制整体没开**：
-这批工具全部常驻、`tool_search` 一次都不会被引导去调。
+但同一 profile 此刻 `managed = 12 < threshold 15` → `deferring = false`，**机制整体没开**。
 
-**未达阈值时的实际行为（实测，非推断）**：`tool_search` **仍注册且可见**、引导段文本被清空、
-无目录段、12 个工具全量可见。所以这一层**不误导模型**，**误导的只有面板**——
-面板断言的"状态"实际只是"配置标记"，两道门槛（per-server > 10、会话级 ≥ 15）都可能让它不成立，
-而 UI 没有任何地方说这件事。`lib/client.js:2778-2781` 附近有注释承认"会话级聚合阈值行级看不到，
-说了就是假话"，但没说"那么徽标该叫什么"。
+**"效果断言"有四条独立失效路径（第九轮补到四条，原记录只有两条）**：
 
-**术语（用户提过）**：整仓同一概念两个词——徽标/按钮用「延迟」「全部延迟」，
-tooltip/预告/工具描述用「按需加载」「按需搜索」。官方叫法有据：功能名 **Tool Search**、
-开关字段 **`defer_loading`**、Claude Code MCP 文档一节标题 **"Defer a server's tools"**
-（`platform.claude.com` 的 `defer_loading` 页、`code.claude.com` 的 mcp-servers 文档）。
-宿主侧英文渲染实测为 `Deferred` / `Undefer all` / `Tool deferral`，对得上官方 Defer。
-**未验证**：官方中文文档把 `defer_loading` 译成什么（中文页 302 跳到 anthropic.com，没跟上）——别编。
-建议统一到「按需加载」（徽标两字可用「按需」），英文保留官方 Defer/Deferred。
+| | 门槛 | 证据 |
+|---|---|---|
+| (a) | per-server：工具数 **≤ 10** 不参与 | 【第九轮实测】8 工具 → `assemblyMcp=8`、无目录、无引导段、指令段原样 |
+| (b) | 会话级：可延迟工具 **< 15** 整套不开 | 【第九轮实测】**12 工具** → `assemblyMcp=12`、无目录、无引导段、`tool_search` 仍可见、指令段原样 |
+| (c) | **全局开关 `DSH_MCP_TOOL_SEARCH=off`**（第九轮新发现，第三道闸） | 【读码】`deferServersOf` 直接返 `[]`（`tool-search-config.js:50`）；全仓 grep 该变量**只在 runtime/config/npm test 里**，**面板从不读它** → 用户自己拉了总闸，每一行仍报「已开启」 |
+| (d) | **PTC agent 收益为零**（见 O6） | 【第九轮实测】倒贴 3181 字符 |
 
-**为什么停在这里**：三条候选路线的代价差一个量级，得先定：
-① **只改文案**——零接口改动，但"机制没启用"仍然看不到；
-② 徽标 `title` 写清两道门槛——仍是"配置标记"语义，没消除歧义；
-③ **Host 暴露视图状态**（`deferring` + 每服务器有效工具数）给面板——唯一能消除歧义的做法，
-但要动 RPC/接口。**关键约束**：若走 ③，面板现有的 `defer` 字段（"配置标记"）
-与新的"生效状态"必须**是两个字段**，不能合并——合并只是把一个歧义换成另一个。
+**"机制没开"时运行时的真实行为（实测，非推断）**：`tool_search` **仍注册且可见**、引导段被清空、
+无目录段、工具全量可见、指令段原样。所以这几层**不误导模型**，**误导的只有面板**。
+
+### 门槛的出处（第九轮查证，Q1 的答案）：**官方没有这两道门槛**
+
+官方中文文档（第九轮亲手抓，`code.claude.com/docs/zh-CN/mcp`）原话：
+
+> **工具搜索默认启用**：MCP 工具被延迟并按需发现。
+> 表格「(未设置)」→ **所有 MCP 工具延迟并按需加载。**
+
+官方**唯一**的阈值模式是按**体积**，不是按个数：
+
+> `auto` —— 阈值模式：预先加载它本来会延迟的工具，**同时它们的定义总计少于上下文窗口的 10%**，
+> 一旦达到 10% 就延迟所有工具。
+
+官方的"免除延迟"是**用户按服务器手动指定**（`alwaysLoad: true`），**不是按数量自动豁免**。
+
+| 本仓的门槛 | 真实出处 | 是主流吗 |
+|---|---|---|
+| `minServerTools: 10` | 官方**博客**一句 "less beneficial"（**程度判断，不是边界**），数字**我们自己定的** | ❌ 官方没这个门槛 |
+| `threshold: 15` | 抄**社区实现** lordqyxz 的数字（设计文档 §3.3） | ❌ 不是官方的 |
+
+**两道门槛是我们自己加的保守闸，而且是叠加的**——这就是断层：装 1 台 30 工具的会启用，
+装 1 台 12 工具的**啥也没有**。
+
+**一处内部不一致（值得单独看）**：F4 当初**删掉了 token 估算**，理由写得很好——"个数不能代表体积，
+3 个工具带几千字描述 vs 50 个工具每个一句话"。**可门槛本身还在用个数当判据。** 15 与 10 的差别，
+跟那个被否掉的理由是同一类不可靠。
+
+### 面板要"真"到什么程度（Q2 的答案）
+
+**配置页该显示"配置成什么"，不该显示"会话里现在怎样"。** 论证：
+- `deferring` 是 **per-agent**，面板是 **per-config**，**面板里没有会话身份**。要显示效果必须先回答
+  "哪个会话"——"最近一个 / 当前一个 / 全部"都是**新的产品定义**，不是措辞改动。
+- 插件**连现存 agent 都枚举不出来**（`discoveredStates` / `viewCache` 都是 WeakMap），
+  宿主也没给插件 agent 注册表 → 完整的"暴露生效状态"**目前没有数据来源**，
+  做了只是把一个假话换成另一个假话（关于一个用户没在看的会话）。
+- 所以 `client.js:2778-2779` 那条权衡**是对的，要延续**：面板**内部已经有过一次正确取舍**，
+  是徽标 / 详情行 / 按钮文案**违反了它**（表单预告只给真实数据 + per-server 规则，并明说
+  "会话级聚合阈值行级看不到，说了就是假话"；而详情行 `已开启（{count} 工具经 tool_search 按需加载）`
+  用的是配置数据却说效果话）。
+- **但"如果现在开一个会话会怎样"里有一部分是配置可判定的**：全局开关（进程级，无需会话）
+  与 per-server 工具数（行内已有 `toolCount`）。这两块**能说真话**，应该显示。
+
+### 术语（Q4 的答案）：官方中文**自己就是两词并用**，不用强行统一
+
+官方中文（`code.claude.com/docs/zh-CN/mcp` 与 `platform.claude.com/docs/zh-CN/.../tool-search-tool`，**第九轮实测抓取**）：
+
+| 英文 | 官方中文 |
+|---|---|
+| Tool Search（功能名） | **「工具搜索」**（platform 页标题作「工具搜索工具」）|
+| `defer_loading`（字段名） | **不翻译**，保留代码字面量 |
+| 概念（状态/开关） | **「延迟」/「延迟工具加载」**（小节标题）、「非延迟」「延迟工具」 |
+| 概念（机制效果） | **「按需加载」**（动词短语）|
+| "Defer a server's tools"（小节标题） | **「延迟服务器的工具」**；相邻有「豁免服务器不延迟」「将工具标记为预先加载或保持延迟」「配置工具搜索」 |
+
+**→ 官方把「状态」叫延迟、把「效果」叫按需加载。OPEN-ITEMS 旧建议"统一到按需加载"方向是错的**
+（会离开官方**小节标题**用词，而徽标正是"状态"）。
+
+**建议映射（一个词一个意思，不是砍词）**：
+- 功能/工具标识：`Tool search` / `tool_search`（不译）；
+- **状态**（徽标、checkbox、详情行"已开启"）：**延迟**（英文 `Deferred`，与宿主渲染一致）；
+- **效果**（tooltip、引导语、承诺句）：**按需加载**（英文 on demand）。
+- 现在的毛病：`延迟加载工具（ToolSearch 按需搜索）` 把两词塞进一个标签；
+  `已开启（N 工具经 tool_search 按需加载）` 用状态数据说效果话。
+- 代价：字典中英两侧都要改，`i18n-parity`（缺英文 + 死词条两向）会强制同步——这是好事。
+
+### 方案（第九轮定案）
+
+**① 修文案（做）**：徽标只当"配置标记"；详情行不再断言效果，改成"配置标记 + 真实工具数 + per-server 规则"。
+**② 加一条能说真话的横幅（做，无需新 RPC）**：`summarize` 已带 `defer` 与 `toolCount`（`index.js:486-487`），
+只需把 `toolSearchDisabled()` 的结果作为**一个服务端布尔**带给列表页，顶部横幅说明"总开关已关，所有服务器都不延迟"。
+**③ 完整"暴露生效状态"（暂不做）**：需要 ① 可枚举的 per-agent 效果值（现在没有）、② 会话身份进 RPC、
+③ 一个**会话级**展示位。三条都是产品决定。
+
+**门槛去留（需拍板，三选一）**：
+- **(a)** 保留门槛，面板说实话（= 上面的 ①②）；
+- **(b)** 只留一道门槛（去 per-server，或去会话级）；
+- **(c)** 学官方：**用户勾了就生效，不做自动豁免**——把判断权还给用户，面板只负责讲清
+  "真实工具数"与"会多一次往返"。
+
+第九轮倾向 **(c) 或 (b)**：`(a)` 是"保留一个我们自己也解释不清的自动决定，然后诚实地把它展示出来"。
 
 ---
 
@@ -258,6 +478,40 @@ tooltip/预告/工具描述用「按需加载」「按需搜索」。官方叫�
    不是判定规则的分歧。可行修法：`uniqueOwner` 提到 `mcp-registry` 一处导出、三处各自消费
    （per-schema 早退还更快）。**代价**：改的是"判定"不是"消费"，`ambiguous` 的集合语义不能顺手改。
    注：`tool-search-runtime.js:97-98` 的注释已写"与…同一条规则"——**注释承认了、代码没合并**。
+
+### 第九轮结论（三条都定了，不用再讨论）
+
+1. **改注释 / 名字，不改判据。**
+   **新证据**：这条边界**已经被一条专门的用例钉住**——`test/tool-search-runtime.test.mjs:51`
+   （夹具 `small=10` / `big=11`，`minTools=10`，断言只保留 11）。**变异复验**：`>` 改 `>=` →
+   **1 条红**（`applyServerFloor: 工具数不超过下限的服务器整体不延迟`，actual 21 / expected 11）。
+   所以 `≤10 不延迟` 是**四处**共同编码的语义（代码 + 用例名与断言 + UI 文案 + 设计文档 §5 决策 2 正文），
+   只有 `DEFAULTS` 的括号引用与参数名读起来像 `>=`。官方原话是 "less beneficial"（**程度判断**），
+   当前取值**比官方保守一档**，是合理选择。
+   **代价**：改 `DEFAULTS.minServerTools` 的 docstring，写明"**严格大于**才保留（exclusive floor）"
+   并记下"比官方保守一档"。**零行为变更、零测试变更。**
+   （若要坚持官方字面：1 个运算符 + UI 文案 `client.js:2782` 的 `≤ 10` + 设计文档 + **反转那条用例**，
+   且要论证"10 个工具也值得延迟"。名字 `minServerTools` 建议只在 doc 里点明，不为此做 API churn
+   ——它是导出的 `DEFAULTS` 键 + 配置键，`resolveRuntimeConfig:76` 的报错文案也带它。）
+2. **改兜底文案**（docstring 描述的是意图，文案是那个"不可用指令"本身）。
+   被截断的正是**名字没列出来**的那批，而兜底句让模型 `use "select:<exact name>" once you know the name`
+   ——**对它自己点名的对象不可用**。改法：兜底句只留关键词查询；`select:` 的指引留在**正文那句**
+   （那里名字确实列着）。
+   **代价**：1 处产品字符串 + 1 处注释。**测试不会红**——`test/tool-search-runtime.test.mjs:196`
+   只断言 `'2 more deferred tools are not listed here'` 前缀，没钉整句，所以这条改动**当前无回归网**：
+   要么顺手把断言补到能区分（例如断言不再含 `select:`），要么接受"改文案无网"。
+   目录正文是模型面英文文本，不走 i18n，无字典改动。
+3. **合并到 `ownersOf`，别动 `ambiguous`。**
+   三处：`tool-search-runtime.js:103-111`（函数，二次命中早退）、`mcp-registry.js:32-36`
+   （内联 `filter`，`length===1`，`>1` 时把**全部** owner 记进 `ambiguous`）、`workspace-runtime.js:977-979`。
+   形状：`mcp-registry` 导出 `ownersOf(schemaName, serverNames) => string[]`；
+   `uniqueOwner` = `owners.length === 1 ? owners[0] : null`；另两处直接用数组。
+   **`ambiguous` 的集合语义原样保留**——这正是不能把 `ownersOf` 塌成 `uniqueOwner` 的原因。
+   依赖方向**无新边**（`workspace-runtime.js:5` 已 import `mcp-registry`；`tool-search-runtime.js` 已 import `revisionOf`）。
+   **代价**：1 个新导出 + 3 处调用点；`ownersOf` 恒分配数组而现版早退——只在视图重建时跑一次
+   （735 工具重建本就 52.8ms），影响可忽略但要写进注释。
+   **若不合并**：可接受，但**必须把 `tool-search-runtime.js:97-98` 那句"与…同一条规则"改掉**
+   （它现在暗示存在一个不存在的共享实现）。**别两边都不动。**
 
 ---
 

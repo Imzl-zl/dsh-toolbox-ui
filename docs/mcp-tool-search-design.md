@@ -177,7 +177,10 @@ DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四�
 | 5 | **BM25 本地实现，不引依赖** | 仓库依赖极简（smol-toml/yaml/zod），BM25 约百行；匹配字段 name+description 是官方明确约定 | 引 bm25 库：依赖治理成本；embeddings：v1 过度 |
 | 6 | **引导双通道：静态总则 section + 活库存目录 section（主）+ 工具描述（辅）** | **两条通道都已验证**：① `ctx.systemPrompt.section({ name, order, text })`（`dsh-system-prompt/lib/index.js:240-243`）注册静态总则（"是什么/怎么用/未加载不可调用"）；② 活库存目录在 `system-prompt/assemble` waterfall 里追加（`text` 可以是函数、每次组装求值——`typeof section.text === "function" ? section.text(context)`），因为它必须按**本 agent 的可见集**渲染，全局 section 做不到。名字级 token 成本（比 schema 便宜一个量级）、落在系统提示缓存前缀上（库存不变则字节稳定——行序用 code-unit 比较保证，见 §12 #3）。工具描述退居"是什么/怎么用"，不承载库存。**两条通道都必须 `interpolate:false`**：目录正文嵌第三方 MCP 描述（见 §9） | 只放静态描述（本设计早期方案）：库存常新做不到、`select:` 教不了真名 |
 | 7 | ~~面具戴在既有有界等待之后~~ **已作废** | 原方案用 `restrict({deny})` 遮罩，才需要"等连接就绪再戴面具"的时序安排（复用 `waitForConnectionReady` 的 5s 预算）。改走 assembly 过滤后（决策 8）**每次组装都过滤**，晚连服务器的工具在它首次出现的那次组装里就被滤掉，根本没有"先放行后补遮罩"的窗口，也就不需要这个时序安排 | — |
-| 8 | **遮罩做在 assembly 过滤层，不做 registry restrict** | 参考实现（lordqyxz/dsh-tool-search `src/index.ts`）采用的机制更优，已采用：① **两族一机制**——`system-prompt/assemble` waterfall 里过滤 `resolved.tools`，全局族与项目族（scoped 注册）通吃，restrict 对 scope-local 抛错的问题不存在；② **窗口不存在**——每次组装都过滤，晚连服务器的工具在它首次出现的那次组装里就被滤掉，无"先放行后补遮罩"；③ **自愈有指令**——工具不 restrict（保持可解析），`tools.guard` 对"未发现的延迟工具"返回带指引的拒绝（"call tool_search with the exact name 'X'"），比 UNKNOWN_TOOL 裸错好。**修正（审查后）**：早前此处称"DSH 对不可见工具在 guard 之前就返回 UNKNOWN_TOOL"是错的——`prepareExecution` 的 `guardReason`（dsh-tools:3241）跑在 `dispatchToolBody` 抛 `ToolNotFoundError`（:3308；早前写的 :3307 是 `resolveExecution` 那一行）之前，且 `createExecution` 对不可见工具返回 `kind:"ready"`（:3188）。也就是说 restrict 路线**同样**能拿到 guard 自愈；本条的真实优势只有 ①②④⑤，不含 ③；④ **索引源简单**——`schemas(agent)` 即全量（没被 restrict 掉），不需要全局视图+连接视图的绕路；⑤ 与 exclude 天然取交集——exclude 滤掉的工具不在 agent 可见集里，不进 catalog，本机制当它不存在。代价：遮罩完备性依赖"assembly 是唯一模型可见面"（主路径已验证：agent-loop L907 → buildRequest）；**PTC 模式下不成立**——`tools:sdk` section 是独立投影路径（dsh-tools `sdkSection`→`sdkSchemas`），遮罩与 guard 双失效，故 PTC 部署下本功能**整体不装配**（见 §12） | registry restrict（原设计）：两族两机制、有晚连窗口 |
+| 8 | **遮罩做在 assembly 过滤层，不做 registry restrict** | 参考实现（lordqyxz/dsh-tool-search `src/index.ts`）采用的机制更优，已采用：① **两族一机制**——`system-prompt/assemble` waterfall 里过滤 `resolved.tools`，全局族与项目族（scoped 注册）通吃，restrict 对 scope-local 抛错的问题不存在；② **窗口不存在**——每次组装都过滤，晚连服务器的工具在它首次出现的那次组装里就被滤掉，无"先放行后补遮罩"；③ **自愈有指令**——工具不 restrict（保持可解析），`tools.guard` 对"未发现的延迟工具"返回带指引的拒绝（"call tool_search with the exact name 'X'"），比 UNKNOWN_TOOL 裸错好。**修正（审查后）**：早前此处称"DSH 对不可见工具在 guard 之前就返回 UNKNOWN_TOOL"是错的——`prepareExecution` 的 `guardReason`（dsh-tools:3241）跑在 `dispatchToolBody` 抛 `ToolNotFoundError`（:3308；早前写的 :3307 是 `resolveExecution` 那一行）之前，且 `createExecution` 对不可见工具返回 `kind:"ready"`（:3188）。也就是说 restrict 路线**同样**能拿到 guard 自愈；本条的真实优势只有 ①②④⑤，不含 ③；④ **索引源简单**——`schemas(agent)` 即全量（没被 restrict 掉），不需要全局视图+连接视图的绕路；⑤ 与 exclude 天然取交集——exclude 滤掉的工具不在 agent 可见集里，不进 catalog，本机制当它不存在。代价：遮罩完备性依赖"assembly 是唯一模型可见面"（主路径已验证：agent-loop L907 → buildRequest）；**PTC 模式下不成立**——`tools:sdk` section 是独立投影路径（dsh-tools `sdkSection`→`sdkSchemas`），**遮罩是 no-op**，故当时的处置是 PTC 部署下本功能**整体不装配**（见 §12）。
+**第九轮修订（重要）**：① 当时写的"遮罩与 guard **双失效**"**只有一半对**——实测 PTC 下 `run_code` 的**嵌套派发**（`parent: exec.token`，dsh-tools:1306）**绕过 `collapses` 但走完整管线含 `guardReason`**，所以 guard 与 `tool_search` 在 PTC 下**都是活的**；真正失效的只有"省上下文"这一项（那正是本功能的目的）。
+② 装配判据读 `ctx.tools.modeFor()`（**不传 scope = 部署默认层**），所以"整体不装配"**只覆盖"整个部署是 ptc"**；`dsh-agent-tool-presentation` 让 preset **按 agent** 声明 ptc，于是"部署 native + 某 agent ptc"会**照装**（出货 preset `dsh-web-app/presets/ptc.patch.yml`，Web 设置里两步可达）→ 实测**倒贴 3181 字符/请求**。
+③ 修法已定为**裁 `tools:sdk` 文本**（实测 `tools:sdk` 9533→2664，整体真省 3688），失败时兜底退成 per-agent inert view。全套证据见 `.tasks/mcp-tool-search/OPEN-ITEMS.md` 的 O6 与 §12.6 | registry restrict（原设计）：两族两机制、有晚连窗口 |
 | 9 | **活库存走 assemble waterfall 追加的目录 section，静态总则走 `systemPrompt.section`** | 目录必须按**本 agent 的可见集**渲染，所以它在 `system-prompt/assemble` waterfall 里追加（`prepend:true` 保证我们的过滤有最终发言权）；静态总则与可见集无关，走普通 `section()` 注册即可。`select:` 所需的真名由目录直接列出。complete-section 部署下目录会被吞（宿主规则：存在 effective complete section 时它成为唯一 prompt section，`dsh-system-prompt:356-361`，**读码确认**——grep 全 test/ 没有覆盖 complete section 的用例，早前写的"已实测"没有支撑），那时模型至少还能靠工具描述主动查 | 库存变化时 dispose+重注册 `tool_search`：工具定义变动触发 `toolsChanged`/新 series（缓存失效），且重注册瞬间的调用会 UNKNOWN_TOOL——风险大于收益 |
 | 10 | **loaded 集变更的临界区必须同步** | DSH 支持并行工具调用（agent-loop 并行调度器 `DEFAULT_MAX_PARALLEL_TOOL_CALLS = 10`）；两步 `tool_search` 同轮执行时，若 read-discovered 与 write-discovered 之间有 await，后写覆盖先写 → 前一次搜索命中的工具被重新遮罩（结果文本说"已可用"、工具列表里却没有）。约束：execute 里从取视图到写 discovered 全程无 await（配置读取已由活配置 getter 前置掉） | 加锁/队列：DSH 无现成 per-session 锁原语，自己造轮子；纯同步临界区零成本且足够 |
 | 11 | **自愈走 guard 指引拒绝，不走 UNKNOWN_TOOL 观测** | 采用参考实现的机制：工具保持可解析（不 restrict），`ctx.tools.guard` 注册单调守卫——对"在延迟目录里但未被发现"的直调返回拒绝并附指引（"call tool_search with the exact name 'X' as the query, then call it directly"）。已发现的工具直接放行；其他策略（exclude）拒掉的工具不在 catalog 里，守卫不置词——取交集不放宽。**guard 内自动掀罩已评估并否决**：guard 是任意函数，本可以在拒绝前把该名字加进 discovered（"模型都报出确切名字了，替它省一轮搜索"）。否掉的理由是 Claude Code 在拥有远超我们的模型调优经验下，仍然选择"拒绝 + 指引先搜索"（其 system-reminder 原文："calling them directly will fail with InputValidationError. Use ToolSearch with query 'select:<name>…'"）。默认拒绝；若将来要为弱模型开放自动掀罩，应做成显式开关而不是悄悄改默认 | 观测 UNKNOWN_TOOL 结果自愈：需要验证事件可达性，且拒绝信息不可定制。**guard 内自动掀罩**：与 Claude Code 的既定行为相反，且会让"凭记忆幻觉调用"直接变成加载 |
@@ -230,7 +233,8 @@ DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四�
 
 - **resume 状态恢复（已解决）**：发现状态事件源化——`tool_search` 的结果在 **presentation meta** 里带累积发现列表（`protocol: 'dsh-tool-search/v1'` + `allDiscoveredTools`），render 时剥掉（不泄露进提示词）；重建的 agent 从会话日志恢复。**恢复走受支持的 `session.deriveMessages()`**（扫 `role==='tool'` 消息里的 protocol JSON），不用 `snapshotEvents()`——后者在 dsh-session 上标注 `@deprecated … new calls are prohibited`（:1358/:1370）。两条路径已用真 Session 验证等价，且派生消息方案更短：不需要 tool/call↔tool/result 配对，也没有 ptc-dispatch 特例。上限淘汰用 `maxDiscovered`（最旧先让位，≥ maxResults），但**淘汰下限会抬到本次返回的名字数**——`select:` 一次能返回任意多个名字，硬按 `maxDiscovered` 砍会把这一批里靠前的工具当场重新遮罩，而结果里的 `instruction` 正写着"按名字直接调"（第七轮独立审查实测复现，见 §12.3 #32）
 - **子 agent 独立**：子 agent 继承同一 assembly 过滤（waterfall 按 assembly 的 context.agent 跑），发现集独立——它用到的工具自己搜一遍
-- **PTC 模式**：assembly 遮罩需同步整形 `tools:sdk` section（参考实现的 `shapeSdkSection`）。**未补，因此 PTC 部署下本功能整体不装配**并在日志明说——半失效（模型看着完整 schema 却调用即错，`collapses` 直接拒 model-direct 调用）比不装更坏。
+- **PTC 模式**：assembly 遮罩需同步整形 `tools:sdk` section（参考实现的 `shapeSdkSection`）。**未补，因此 PTC 部署下本功能整体不装配**并在日志明说。
+  **第九轮修订（推翻本条的两处论据）**：① "半失效（模型看着完整 schema 却调用即错）"**不成立**——PTC 下模型的**原生函数清单里只有 `run_code`**（`wireSchemas` 过滤到一条），模型**没有机会**发出 model-direct 调用；而 `run_code` 内的**嵌套派发**（`parent: exec.token`）**绕过 `collapses` 却走完整管线含 guard**，所以 `tool_search` 与 guard 在 PTC 下**都能用**。真正坏的只有"省上下文"这一项。② "PTC 部署下整体不装配"只覆盖**部署级** ptc（判据读 `modeFor()` 不传 scope）；preset 可以**按 agent** 声明 ptc，那种组合会**照装并倒贴**（实测 +3181 字符/请求，出货 preset 两步可达）。修法见 §12.6 与 OPEN-ITEMS 的 O6：**裁 `tools:sdk` 文本**（实测整体真省 3688 字符），失败兜底退成 per-agent inert view。
 - **`agent/created` 监听器必须吞错**：宿主把该串行监听器的抛错当作否决这次会话创建（dsh-agent:472）。**已通过删订阅解决**——预热是冗余的（assemble 必定早于第一次模型请求，guard 必定早于第一次工具执行），删掉它比给它加 try/catch 更彻底。剩下的 assemble / guard / execute 三个入口共用同一个 fail-open 边界：视图算不出来就退回全量可见并记账，绝不让抛错逃进宿主。
 - **`tool_search` 作为新全局工具的审批面**：某些权限模式下首次调用可能弹审批；描述里写清用途可降低困扰。
 - **模型不搜就调**：DSH 是模型无关的 harness（DeepSeek 及第三方模型），指令遵循弱的模型可能无视搜索、凭记忆调延迟工具。缓解：guard 拒绝里带**确切查询串**（模型照抄即可）+ 目录里列出全部真名；**默认开启前必须用真实模型阵容实测**；观测靠工具调用日志。
@@ -282,7 +286,7 @@ DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四�
 | 8 | 用了宿主标注"new calls are prohibited"的 `snapshotEvents()` | dsh-session:1358/1370 双处 `@deprecated` | 改走受支持的 `deriveMessages()`，扫 protocol JSON。真 Session 验证两条路径等价，且净减代码（去掉配对与 ptc-dispatch 特例） |
 | 9 | 目录无体积上界、每次组装全量重渲染 | 实测 735 工具：`catalogSectionText` 11.1ms/次、正文 100,914 字符 | 加 `maxCatalogLines`（默认 300）+ "另有 N 个" 提示；视图按 revision 缓存（实测 revision 3.08ms vs 重建 52.8ms） |
 | 10 | `estimateSchemaTokens` 的 chars/4 对中文低估 2.7–4× | 算术推断（本机无 DeepSeek tokenizer），但方向确定 | 改 CJK 感知：CJK 字符按 1、其余按 `charactersPerToken`；纯 ASCII 走快路径，数值与旧版一致。**⚠️ 这条已被 §12.3 #23 推翻并作废**：估算器整套撤除， chars/4 与 CJK 粗估都不再存在。留下的判断材料是真实数据（工具数）与 per-server 规则 |
-| 11 | PTC 模式下遮罩与 guard **双失效**，设计只承认前者 | `tools:sdk` 是独立投影路径（dsh-tools `sdkSection`→`sdkSchemas`）；且 `collapses` 直接拒 model-direct 调用，guard 根本不跑 | PTC 部署下**整体不装配**并在日志明说。要支持需先补 `shapeSdkSection`，那是另一个改动 |
+| 11 | PTC 模式下遮罩与 guard **双失效**，设计只承认前者 | `tools:sdk` 是独立投影路径（dsh-tools `sdkSection`→`sdkSchemas`）；且 `collapses` 直接拒 model-direct 调用，guard 根本不跑 | PTC 部署下**整体不装配**并在日志明说。要支持需先补 `shapeSdkSection`，那是另一个改动。**⚠️ 第十轮已推翻本条的后半**：guard **没有**失效——`run_code` 的嵌套派发（`dsh-tools:1306` 的 `parent: exec.token`）绕过 `collapses` 但走完整管线含 `guardReason`，真 token 实测四向对照通过；"整体不装配"也被取代（改为 per-agent 判据 + 裁 `tools:sdk`）。见 §12.7 与 `.tasks/mcp-tool-search/DECISIONS.md` |
 | 12 | 决策 8③/11 引的"UNKNOWN_TOOL 先于 guard"是错的 | `prepareExecution` 的 `guardReason`（dsh-tools:3241）在 `dispatchToolBody` 抛 `ToolNotFoundError`（:3308；早前写的 :3307 是 `resolveExecution` 那一行，复核时按安装包逐行核对）之前；`createExecution` 对不可见工具返回 `kind:"ready"`（:3188） | 改文档论据。结论不变（assembly 过滤仍是对的），但真实优势只剩 ①②④⑤ |
 | 13 | 决策 6/9 引的"Claude Code 不用总则"是以偏概全 | Agent SDK 官方文档明确推荐 "add a system prompt section listing available tool categories" | 改文档论据。实现两者都有，与官方建议一致 |
 | 14 | §3.3 "与 lordqyxz 高度收敛"言过其实 | 粒度不同：我们 per-server defer，它全延迟 + `alwaysVisible` 白名单（连内置工具一起延迟） | 改为逐条列真实差异 |
@@ -388,4 +392,58 @@ not only on disk`（夹具 = 临时技能根 × 真 `SkillRegistry` × 真 `dsh-
 **仍未实测、也不许当成已验证的两项**：
 - **PTC 组合（已实测，缺陷确认）**：部署默认 `native` 时插件照装（装配判据读的是 `ctx.tools.modeFor()`，**不传 scope = 部署默认层**），而 `dsh-agent-tool-presentation` 会给某个 agent preset 的 scope 调 `presentAs('ptc')`。真宿主探针（`ctx.provide('ptcRuntime', { language: 'typescript' })` 最小 stub + 真 `presentAs('ptc')`）：该 agent 的 `tools:sdk` 段里 **30/30 个 mcp 工具 schema 全在**（含 `tool_search` 自己），而 `assembly.tools` 里 0 个——**遮罩对它是 no-op**；直调 `tool_search` → `isError:true`「only `run_code` is callable directly」；对照同进程 native agent → `isError:false`。即"半失效比不装更坏"这条判断在**跨 scope 组合**下真实发生。修法方向：装配判据改成按 agent 判 `agent.ctx.tools.modeFor(agent)`（装配时读一次全局默认做不到），但 `installToolSearchRuntime` 目前是全局装配、`assemble`/`guard` 里才拿得到 agent，要动装配结构——**本轮只取证、未改**。
 - **`update()` 改连接字段走 `entry.update()` 重连那条路没有覆盖**：`test/tool-search-wiring.test.mjs` 的注释称"真 loader 上的重连效果由手动探针 `scripts/probe-live-defer.mjs` 覆盖"，但那支探针只跑 `setDeferAll`（**刻意不重连**），而 `test/real-host-loader.test.mjs` 的 7 条用例覆盖的是 `add` / `removeServer` / `installBuiltins` / env 表达式 / 回滚，**没有 `update()`**。注释承诺了不存在的覆盖。另外该探针只 `console.log` PASS/FAIL、**不设非零退出码**，自动化里读不到它的结论。
+
+### 12.6 第九轮：O6/O7/O8 方案调研（只调研，未改代码）
+
+一轮纯调研（真宿主探针 + 真 `--dump-config` + 官方文档抓取 + 变异复验），产出是选型而不是补丁。
+**产品代码零改动**（`git status` 干净、738 绿）。完整证据与未验证清单已写进
+`.tasks/mcp-tool-search/OPEN-ITEMS.md` 的 O6/O7/O8 条目；下一轮交接提示词在
+`.tasks/mcp-tool-search/NEXT-SESSION.md`。下面只记**被推翻的论据**与**方法教训**。
+
+| # | 被推翻 / 遗漏的事实 | 证据 | 结论 |
+|---|---|---|---|
+| 36 | **O6 的定性"半失效（模型看着完整 schema 却调用即错）"不成立** | 真宿主三 agent 对照：PTC 下 `wireSchemas(agent).schemas` **只有 `run_code` 一条**（`dsh-tools:2840-2843`）——模型**没有机会**发出 model-direct 调用，`collapses` 那条拒绝路径**在真实使用里不可达**。第八轮测的是"直调"，而直调在 PTC 下不是模型的可用动作 | 定性改为**净亏**：不装插件 9003 字符 / 装了 12184（**倒贴 3181**）/ 装了+裁 SDK **5315（真省 3688）** |
+| 37 | **"遮罩生效了，只是遮的是另一条投影"不准确** | 装/不装插件，PTC 下 `assembly.tools` 都是 `[run_code]`、mcp 数都是 0——遮罩**没有可作用的对象** | 遮罩是 **no-op**，不是"打错投影" |
+| 38 | **"插件够不到 `tools:sdk`"是过度断言**（第九轮自己先写、又自己推翻） | `tools:sdk` 与 `mcp:<server>` 指令段在**同一个 `assembly.sections` 数组**里，而插件**本来就在改这个数组**。实测裁剪：`tools:sdk` 9533 → 2664 字符，自检通过 | O6 首选方案从"整体闭嘴"改为**裁 SDK 文本**，"闭嘴"降级为**裁剪失败时的兜底** |
+| 39 | **"两道门槛是照官方抄的"是错的** | 官方中文文档原话：「工具搜索默认启用：MCP 工具被延迟并按需发现」「(未设置) → **所有 MCP 工具延迟并按需加载**」；官方唯一的阈值模式是按**体积**（`auto`：定义总计 ≥ 上下文窗口 10% 才延迟），免除方式是**用户手动 `alwaysLoad: true`** | `minServerTools: 10` 源自官方博客一句 "less beneficial"（**程度判断**），`threshold: 15` 抄自社区实现 lordqyxz——**都不是官方做法**，且两道**叠加**造成断层 |
+| 40 | **术语"统一到按需加载"方向是错的** | 官方中文**自己两词并用**且分立方式与本仓一致：状态/小节标题用「延迟」（「延迟服务器的工具」），机制效果用「按需加载」 | 改为**一个词一个意思**（状态=延迟 / 效果=按需加载），不是砍词 |
+| 41 | **O7 的"两道门槛"少算了一道** | `DSH_MCP_TOOL_SEARCH=off` 时 `deferServersOf` 直接返 `[]`（`tool-search-config.js:50`），而全仓 grep 该变量**只在 runtime/config/npm test 里**——**面板从不读它** | 效果断言有**四条**失效路径（per-server / 会话级 / 全局开关 / PTC） |
+
+**本轮的方法教训（比上表更值钱）**：第 38 条那次"过度断言"的根因是**只读了源码就下结论、没去试最显然的那一招**。
+而真正去试的时候，第一版裁剪器**静默失败**了——`renderKey` 对合法标识符**不加引号**
+（`mcp__srv__t0:`）、只对含连字符的加（`"defer-me-x":`），我按"都带引号"写 → **删了 0 个**；
+**而我的自检也按引号写 → 报"自检通过"**。两个错误假设互相掩护，正是本项目禁止的
+"看着成功其实没生效"。教训有两条：
+1. **"做不到"这类否定结论，必须真的试过再下**——读码推断只能得出"这条路不清楚"，不能得出"这条路不通"。
+2. **自检不能和被测代码共享同一个假设**。第一版自检依赖"键带引号"这个形态假设；
+   改成**不依赖形态的条目计数对账**（两个 map 剩余数相等且 = 期望 + 名字残留 + 结构锚点）之后，
+   同一个错误立刻变红。（第二处坑：用"数花括号"切块会被第三方描述里不配对的花括号带偏；
+   换成"行首第 0 列的 `}`"判据即免疫，因为宿主把 `description` 用 `\s+` collapse 成单行。）
+
+---
+
+## 12.7 第十轮：独立复核推翻第九轮的地基
+
+第十轮对第九轮的全部断言做了逐条实测复验。**结论：第九轮的"伤害量化"和"PTC 下闭环是通的"
+两类定性都成立，但它选的实现路线建立在一个错误断言上。**
+
+| # | 被推翻的事实 | 证据 | 结论 |
+|---|---|---|---|
+| 42 | **「`SDK_RENDERERS` / 渲染器不在公开面上」** —— 第九轮据此把"裁剪"设计成**解析生成物**，并提出"要正解得求官方" | `dsh-tools:3714` 的 `export` 列表含 `renderToolsSdk`、`renderToolsSdkPy`、`jsonSchemaToTs`、`jsonSchemaToPy`；`lib/types/ts-types.d.ts:36`、`py-types.d.ts:48` 有类型声明 | **直接调官方渲染器重渲染子集**，不解析生成物；**不需要向官方提需求**。实测 `renderToolsSdk(sdkSchemas(agent))` 与宿主生成的 `tools:sdk` 段**逐字节相等** |
+| 43 | 第 38 条"裁 SDK 文本"的实现细节（`renderKey` 裸标识符 / 别数花括号 / 两个 map 同步删 / 三条自检 / Python 另写判据） | 第 42 条成立后，这些都变成"解析生成物"路线的副产物 | **全部作废**。自检改为一条更强的不变量：`renderToolsSdk(全集) !== 原文 → 退回原文`，最坏 = 现状 |
+| 44 | **O8 #1「`applyServerFloor` 改注释不改判据」** | 第十轮定：两道门槛整个删掉（官方没有这两道，且它们制造"勾了没效果"的断层） | `applyServerFloor` / `minServerTools` 成为**死代码，整删除**，连那条 `>` 变异用例一起改写 |
+| 45 | **O7「这几层不误导模型，误导的只有面板」** | 12 工具探针（`deferring=false`）：`tool_search` 仍可见，返回 `matches:[]` + `instruction:"...or consult the deferred tool catalog section of the prompt."` ——**指向一个不存在的段** | 对 **PTC** 不成立（原生会话看不见 `tool_search`，受害面仅 PTC）。改成"没东西可搜时明确报错" |
+| 46 | 第九轮「未验证」里的**最后一个缺口**：裁剪后模型能否真写程序并调通 | 挂真 `dsh-ptc-runtime-node` + 真 Session，跑真程序：P1 未发现→守卫拒 / P2 `tool_search` / P3 调通 / P4 直调被 `collapses` 拒 | **闭环成立**。PTC 下唯一失效的仍然是"省地方" |
+| 47 | **O6「更干净的正解（宿主需求，主动权不在我们手里）」整段** | 第 42 条成立 | **作废**。官方已导出渲染函数，我们自己做得到 |
+
+### 12.7.1 第十轮的方法教训
+
+- **"够不到"和"够得到"两类断言都必须试。** 第九轮学会了"否定结论要真试"，但**肯定结论**
+  （"只能解析生成物"）同样需要试——它导致多写一整套脆弱的文本裁剪器，而真正该做的是**先查一眼导出了什么**。
+- **"优化"不能只算省不省字。** 第十轮初版方案盯着"最小改动"，漏掉了"装配判据是进程级的，
+  而插件状态本来就是 per-agent 的"这个错配——它才是缺陷本体。
+- **成本估算要落到具体钩子上。** 一度断言"LRU 要挂进执行管线、成本高"，实际
+  `tools.guard` 就是每次调用都经过的现成钩子，记录使用几乎零成本。
+
+**所有最终决策见 `.tasks/mcp-tool-search/DECISIONS.md`。**
 
