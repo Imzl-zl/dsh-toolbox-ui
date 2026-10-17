@@ -42,6 +42,34 @@
 >
 > **所有最终决策、证据编号、受影响清单、验证计划、以及被推翻的中间立场，见
 > `.tasks/mcp-tool-search/DECISIONS.md`。动 O6 之前先读它。**
+>
+> ## 🟢 第十一轮（实施）：S1–S9 已落地，O6/O7/O8 的主体闭合
+>
+> 按 `IMPLEMENT-PLAN.md` 的 S1→S10 实施。**S1–S9 全部完成并提交**，每个阶段都有自己的
+> 提交边界与"撤掉改动看红"记录（见提交信息）。落地后的状态：
+>
+> | 条目 | 状态 |
+> |---|---|
+> | O6（PTC 净亏） | ✅ **已修**：装配时裁 `tools:sdk`（`lib/tool-search-sdk.js` + runtime 的 `trimSdkSections`）。只在 `mode === 'ptc'` 且 `requireDiscovery` 时裁；前提自检失败一律沿用原文 |
+> | O7（面板自相矛盾 / 门槛） | ✅ 门槛整删（`applyServerFloor` / `minServerTools` / `threshold` 连配置键一起，写进来显式报错）；面板预告不再承诺"≤10 不参与延迟" |
+> | O8（三条小项） | ✅ 全部按第九轮结论落地（判据删掉而不是改注释） |
+> | F18（PTC 无法恢复发现集） | ✅ 已修：`sessionProjections` 内部投影；真服务探针上 fold / unregister / restore 三项全过 |
+> | F15（全部发现后仍说"stay deferred"） | ✅ 已修：三处统一到 `D = managed − discovered` |
+> | F16（空搜索也淘汰） | ✅ 已修：只在本次有新发现时淘汰（B10） |
+> | F10（`tool_search` 空结果） | ✅ 已修：`managed = ∅` 时明确报错（B13） |
+>
+> ### 仍未做的（本轮确实没做，不要当成已验）
+>
+> 1. **S10 真机 UI（`dsh web` + token URL）没跑**。原因不是"做不到"，是**上下文预算**：
+>    隔离 `DSH_HOME` 里要把**本地工作树**装进 profile（`dsh plugin --profile web add`）才会
+>    加载本轮的改动，而那一步会触发一次真实依赖安装；本轮剩余预算不足以做完并验证干净。
+>    现在的替代证据是：面板文案改动由 `test/client-i18n.test.mjs`（中英 parity，含"死词条"反向
+>    检查）与 `package-artifact` 覆盖；"PTC 会话在 UI 里被真正启用"这条**没有真机证据**。
+>    下一轮补这条时，先把本地包装进临时 `DSH_HOME` 再走 token URL，别复用用户的 `web` profile。
+> 2. **`both` 模式下的新行为**：仍然零行为（B4）。0.2.1 起该模式已被删除，别为它写代码。
+> 3. **面板参数表单（C2）**：下一轮的事。`ctx.agents.list()` 可用这件事没变（F21），
+>    "显示真实生效状态"仍可做。
+> 4. **`complete section` 部署下裁手册**：仍未验（那种部署会吞掉所有 section）。
 
 ---
 

@@ -447,3 +447,68 @@ not only on disk`（夹具 = 临时技能根 × 真 `SkillRegistry` × 真 `dsh-
 
 **所有最终决策见 `.tasks/mcp-tool-search/DECISIONS.md`。**
 
+---
+
+## 12.8 第十一轮：实施（S1–S9 落地，S10 未做）
+
+按 `IMPLEMENT-PLAN.md` 的 S1→S10 实施。**S1–S9 全部落地并各有独立提交**，
+`node --test` 从 738 涨到 **793 全绿**；S10（真机 UI）因上下文预算未做，记在
+`OPEN-ITEMS.md` 的第十一轮小节里。
+
+### 12.8.1 结构变化（这轮真正的改动）
+
+| 新模块 | 职责 | 为什么拆出来 |
+|---|---|---|
+| `lib/tool-search-host.js` | 宿主能力探测（`probeHost` / `warnOnce`）、`chooseToolName`（G4 重名换名）、`inferMode`（`modeFor` 缺席时的公开退化判据） | 两个 private API 依赖要 feature-detect 并**只记一次**日志；塞进 600 行的 runtime 里没人会去读 |
+| `lib/tool-search-state.js` | 发现集 LRU（`evict` 的 B9 公式）、`foldEvent` + `discoveryProjection`（C4）、协议与解析器 | 协议 + 解析器 + fold 必须同时改，落单就是静默失败；`parseDiscoveredMeta` / `discoveredFromMessages` 从 runtime 迁到这里（runtime 再导出以保留既有引用） |
+| `lib/tool-search-sdk.js` | `trimSdkText`（唯一正确的顺序 + 前提自检）、`readSdkSchemas`（公开 API 优先）、`rendererFor` | 纯决策，可单测；runtime 只负责"取数 + 替换段" |
+
+### 12.8.2 五处不变量（本轮的核心）
+
+1. **`D = managed − discovered` 是唯一集合**（B11）。遮蔽函数清单、遮 `mcp:<server>` 指令段、
+   目录段、SDK 裁剪、守卫五处全部从它派生。`deferring` 一个布尔身兼两义的写法没了，
+   换成 `hasDeferredServers`（`managed.size > 0`）与 `hasDeferredWork`（`D.size > 0`）。
+   **`D = ∅` 时目录段与引导段一起消失**——那是 F15 那句"The tools below stay deferred"的来源。
+2. **目录只过滤显示，不重建索引**（B11 修正）。索引仍建在 `managed`（可按 revision 缓存），
+   显示文本按 `(revision, versionOf(state))` 单独缓存两个 slot。缓存键去掉 `version`
+   会让发现后的目录停在旧字节——这条有专门的反证。
+3. **裁手册四道门，顺序即正确性**：段非空 → `requireDiscovery` → 有 `ptcRuntime` →
+   能拿到原输入。`tools:sdk` 段存在但文本为空是常态（PTC 部署下的 native agent），
+   先短路才不至于每次组装白跑一次全集重渲染。
+4. **装配判据 per-agent**（B4/§11.4）：`native` 与 `ptc` 都启用，**只有 `both` 是 inert**。
+   写成"非 native 就 inert"会把 PTC 整个关掉——这条有专门的护栏用例。
+5. **投影只当恢复种子**（C4）：`apply` 恒返回状态对象、没有新名字返回同一引用、状态有界；
+   运行期状态仍是 per-agent `WeakMap`。
+
+### 12.8.3 这轮新拿到的实测证据
+
+| # | 结论 | 证据 |
+|---|---|---|
+| 48 | **内部投影能从 `installToolSearchRuntime` 内部注册**，并在**真** `dsh-session-projection` 上工作 | 一次性探针（已删）：真 `dsh-session` + 真 `dsh-session-projection`，`PASS-fold`（真 `tool/ptc-dispatch` 事件被 eager drive 喂进 `apply`）/ `PASS-unregister`（cleanup 注销键）/ `PASS-restore`（第二次装配、新 agent、同一 session，发现集被还原）三项全过 |
+| 49 | **公开 API 重建的 SDK 输入与快路径逐字节等价**，且两条路都排除 `run_code` | `test/tool-search-sdk.test.mjs`：`renderToolsSdk(public) === renderToolsSdk(sdkSchemas)` |
+| 50 | **PTC 下"发现集恢复"这条闭环现在有真实路径** | 同上 + `test/tool-search-runtime.test.mjs` 的投影恢复用例（真事件形状 + 契约级假注册表） |
+| 51 | **去门槛之后 1 个工具的服务器也真启用** | 集成用例：遮罩 / 目录 / 守卫三处同时生效（旧行为是 ≤10 整台不参与） |
+
+### 12.8.4 反证（撤掉改动看红）逐条真跑
+
+`IMPLEMENT-PLAN.md` §6 的九条全部跑过，每条都在提交信息里。要点：
+
+- 撤掉"最多踢一半" → 收敛表用例红（21→1 / 31→11 / 100→50→25→20）。
+- 撤掉"发现即播种 `lastUsed`" → touch 用例与 B8 用例同时红（**注意**：最初那版 B8 用例
+  在"播种全为 0"的变异下仍然绿——因为稳定排序让插入序恰好等于新旧序；改成"先 touch 几个旧工具"
+  之后才真正有区分力。**测不到的断言等于没写**）。
+- 撤掉前提自检 / 不转发 `programFormat` / 不按模式门控签名 / 投影不当种子 / 不做重名预检 /
+  探测恒为 true —— 各自对应用例都红。
+- 重新引入一个"数量门槛" → 纯函数层与装配层共 4 条红。
+
+### 12.8.5 本轮的方法记录
+
+- **先写"能区分"的用例，再写实现**：B8 那条第一次写出来是**假守卫**（变异照样绿），
+  发现之后才补了"touch 让新旧序与插入序分离"的构造。这和第九轮"自检与被测代码共享假设"
+  是同一类错误，只是这次在测试侧。
+- **夹具的保真度决定用例的价值**：SDK 裁剪的用例最初让夹具只返回测试清单里的工具，
+  于是"搜索工具自己必须留在手册里"没有对手（真宿主的 `schemas(scope)` 必然包含它）。
+  改成"注册之后才出现在 `schemas()` 里"（真宿主语义）之后，那条断言才有内容。
+- **`both` 的 inert 必须显式早退**，而不是靠"managed 为空"自然发生：两者在组装层的
+  差别是"引导段摘不摘"，而摘了就不是 inert 了。
+
