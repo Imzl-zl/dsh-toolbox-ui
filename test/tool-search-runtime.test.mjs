@@ -7,7 +7,9 @@ import {
   applyServerFloor,
   buildToolSearchView,
   catalogSectionText,
+  deferredTools,
   discoveredFromMessages,
+  filterCatalog,
   filterManagedTools,
   guardDecision,
   installToolSearchRuntime,
@@ -146,23 +148,24 @@ test('viewRevision: 内容不变 revision 不变，内容或配置变则变', ()
 })
 
 test('buildToolSearchView: 纯函数，聚合阈值与 per-server 下限都生效', () => {
+  // 视图里的 `managed` 是**生效的**受管集合：阈值未达时为空，于是遮罩/目录/引导/裁剪
+  // 全部自然关闭（不需要第二个"机制是否启用"的布尔——B14 之后那是第三个真相源）。
   const many = Array.from({ length: 16 }, (_, i) => ({ name: `mcp__jshook__t${i}`, description: 'd', parameters: null }))
   const config = resolveRuntimeConfig({ deferServers: ['jshook'], serverNames: ['jshook'] })
   const view = buildToolSearchView(many, config)
-  assert.equal(view.deferring, true)
   assert.equal(view.managed.size, 16)
   assert.deepEqual([...activeMaskedServers(view, new Set())], ['mcp:jshook'], '被延迟的服务器指令段要一并遮掉')
 
-  // 聚合阈值未达：整体惰性。
+  // 聚合阈值未达：受管集为空 ⇒ hasDeferredServers 为假 ⇒ 整套惰性。
   const few = many.slice(0, 14)
-  assert.equal(buildToolSearchView(few, config).deferring, false)
+  assert.equal(buildToolSearchView(few, config).managed.size, 0, '低于阈值时受管集必须是空的（否则遮罩会照做）')
 
   // **边界**：恰好等于阈值必须启用。旧用例只有 16 与 14，两者在 `>=` / `>` 下同结果，
   // 于是把 `>= threshold` 写成 `> threshold` 全量仍绿——边界这个数正是最容易写错的地方。
   // 用 DEFAULTS.threshold 而不是字面量 15：阈值调优时这条跟着走，不会静默失去区分力。
   const exactly = Array.from({ length: DEFAULTS.threshold }, (_, i) => ({ name: `mcp__jshook__t${i}`, description: 'd', parameters: null }))
-  assert.equal(buildToolSearchView(exactly, config).deferring, true, '恰好达到阈值就必须启用（>= 语义）')
-  assert.equal(buildToolSearchView(exactly.slice(1), config).deferring, false, '差一个就不启用（> 语义会在这里错）')
+  assert.equal(buildToolSearchView(exactly, config).managed.size, DEFAULTS.threshold, '恰好达到阈值就必须启用（>= 语义）')
+  assert.equal(buildToolSearchView(exactly.slice(1), config).managed.size, 0, '差一个就不启用（> 语义会在这里错）')
 
   // 聚合阈值已过，但其中一个服务器太小：per-server 下限只摘掉它，大服务器照常延迟。
   // （官方 "<10 tools less beneficial"：小工具集每轮必付一次搜索往返，纯赔。）
@@ -171,9 +174,29 @@ test('buildToolSearchView: 纯函数，聚合阈值与 per-server 下限都生�
     ...Array.from({ length: 8 }, (_, i) => ({ name: `mcp__tiny__t${i}`, description: 'd', parameters: null })),
   ]
   const mixedView = buildToolSearchView(mixed, resolveRuntimeConfig({ deferServers: ['jshook', 'tiny'], serverNames: ['jshook', 'tiny'] }))
-  assert.equal(mixedView.deferring, true, '聚合 24 ≥ 15，机制照常启用')
   assert.equal(mixedView.managed.size, 16, '≤ minServerTools 的 tiny 整体不参与延迟')
   assert.deepEqual([...activeMaskedServers(mixedView, new Set())], ['mcp:jshook'], '不延迟就不遮 tiny 的指令段')
+})
+
+test('deferredTools: D = managed − discovered，未被发现的才算"还有活要干"', () => {
+  const managed = new Map(['a', 'b', 'c'].map((name) => [name, { name }]))
+  assert.deepEqual([...deferredTools(managed, new Set())], ['a', 'b', 'c'])
+  assert.deepEqual([...deferredTools(managed, new Set(['b']))], ['a', 'c'])
+  assert.deepEqual([...deferredTools(managed, new Set(['a', 'b', 'c']))], [], '全部发现后 D = ∅')
+  // 发现集是 LRU Map（不是 Set）时同样能吃——两处共用同一个定义。
+  assert.deepEqual([...deferredTools(managed, new Map([['a', 1]]))], ['b', 'c'])
+})
+
+test('filterCatalog + catalogSectionText: 目录只列还没被发现的工具', () => {
+  const schemas = Array.from({ length: 16 }, (_, i) => ({ name: `mcp__jshook__t${i}`, description: `tool ${i}`, parameters: null }))
+  const view = buildToolSearchView(schemas, resolveRuntimeConfig({ deferServers: ['jshook'], serverNames: ['jshook'] }))
+  const discovered = new Set(['mcp__jshook__t0', 'mcp__jshook__t5'])
+  const deferred = deferredTools(view.managed, discovered)
+  const text = catalogSectionText(filterCatalog(view.catalog, deferred), resolveRuntimeConfig()).text
+  assert.equal(text.includes('mcp__jshook__t0'), false, '已发现的工具不该还在"延迟目录"里（F15 的假话）')
+  assert.equal(text.includes('mcp__jshook__t5'), false)
+  assert.ok(text.includes('mcp__jshook__t1'), '未发现的必须还在目录里')
+  assert.ok(text.includes('mcp__jshook__t15'))
 })
 
 test('activeMaskedServers: 全部发现后指令段恢复', () => {
@@ -427,6 +450,60 @@ test('引导段跟着活状态显隐：同一进程里翻 defer，不用重装',
     defer = true
     const back = await assemble(fixture, assembly)
     assert.equal(back.sections.find((section) => section.name === 'tool-search:guidance').text, 'GUIDANCE', '再打开必须回来（不能只摘不补）')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('D = ∅（全部发现）：目录段、引导段、指令段遮罩一起消失', async () => {
+  // B11/B14 的验收，也是 F15 的复发闸门：修复前目录列的是 `managed` 全集、引导看的是
+  // `deferring`，所以"全部发现"之后模型仍会读到「The tools below stay deferred」与
+  // 「Some tools are deferred」——两句话都是假的。
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  try {
+    const assembly = {
+      tools: BIG_SCHEMAS.map((schema) => ({ name: schema.name })),
+      sections: [
+        { name: 'tool-search:guidance', text: 'GUIDANCE' },
+        { name: 'mcp:jshook', text: 'JSHOOK INSTRUCTIONS' },
+      ],
+    }
+    const before = await assemble(fixture, assembly)
+    assert.ok(before.sections.some((section) => section.name === 'tool-search:catalog'), '有未发现的工具时目录在')
+    assert.equal(before.sections.find((section) => section.name === 'mcp:jshook').text, '')
+
+    // 全部发现。
+    const tool = fixture.registered.get('tool_search')
+    await tool.execute({ query: `select:${BIG_SCHEMAS.map((schema) => schema.name).join(',')}` }, { agent: fixture.agent })
+
+    const after = await assemble(fixture, assembly)
+    assert.equal(after.sections.some((section) => section.name === 'tool-search:catalog'), false, 'D = ∅ 时不得再注入目录段')
+    assert.equal(after.sections.find((section) => section.name === 'tool-search:guidance').text, '', 'D = ∅ 时引导段也必须摘掉')
+    assert.equal(after.sections.find((section) => section.name === 'mcp:jshook').text, 'JSHOOK INSTRUCTIONS', '全部发现后指令段恢复')
+    assert.deepEqual(after.tools.map((entry) => entry.name), assembly.tools.map((entry) => entry.name), '工具全部回到清单')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('目录只列还没被发现的工具，且按 (revision, discoveredVersion) 缓存', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  try {
+    const assembly = { tools: [], sections: [] }
+    const first = (await assemble(fixture, assembly)).sections.find((section) => section.name === 'tool-search:catalog').text
+    const again = (await assemble(fixture, assembly)).sections.find((section) => section.name === 'tool-search:catalog').text
+    assert.equal(first, again, '同一状态下目录必须是同一份字节（缓存命中，前缀稳定）')
+
+    const tool = fixture.registered.get('tool_search')
+    await tool.execute({ query: 'select:mcp__jshook__tool_0' }, { agent: fixture.agent })
+    const afterDiscover = (await assemble(fixture, assembly)).sections.find((section) => section.name === 'tool-search:catalog').text
+    assert.equal(afterDiscover.includes('mcp__jshook__tool_0'), false, '已发现的工具必须离开目录（D 过滤）')
+    assert.ok(afterDiscover.includes('mcp__jshook__tool_1'))
+
+    // LRU 刷新（touch）不改成员 ⇒ 目录文本不该失效（versionOf 不动），字节必须完全一致。
+    fixture.guards[0]({ name: 'mcp__jshook__tool_0', agent: fixture.agent })
+    const afterTouch = (await assemble(fixture, assembly)).sections.find((section) => section.name === 'tool-search:catalog').text
+    assert.equal(afterTouch, afterDiscover, 'touch 不该让目录文本缓存失效')
   } finally {
     fixture.cleanup()
   }
