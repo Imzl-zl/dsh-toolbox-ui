@@ -270,7 +270,7 @@ test('resolveRuntimeConfig: 缺省、maxDiscovered 下限抬到 maxResults、非
 
 // ── 装配集成（高保真夹具：契约如实，ctx 与 agent 分离）──
 
-function createFixture({ schemas = [], events = [], messages = [], config = {}, throwOnSchemas = false, toolsMode, ptcRuntime } = {}) {
+function createFixture({ schemas = [], events = [], messages = [], config = {}, throwOnSchemas = false, toolsMode, ptcRuntime, projections } = {}) {
   const handlers = new Map()
   const guards = []
   const sections = []
@@ -334,6 +334,7 @@ function createFixture({ schemas = [], events = [], messages = [], config = {}, 
     get: (name) => {
       if (name === 'systemPrompt') return ctx.systemPrompt
       if (name === 'ptcRuntime') return ptcRuntime
+      if (name === 'sessionProjections') return projections
       return undefined
     },
     on: (name, handler) => {
@@ -678,6 +679,155 @@ test('裁手册：已发现的工具必须留在手册里', async () => {
   }
 })
 
+// ── S8：明确报错（B13）/ 签名（C1）/ 投影恢复（C4）──
+
+/** 严格照 `ctx.sessionProjections` 的契约造假：register 的单元在**每条已提交事件**上跑 apply。 */
+function fakeProjections() {
+  const units = new Map()
+  const cells = new WeakMap()
+  return {
+    units,
+    register: (definition) => {
+      units.set(definition.key, definition)
+      return () => units.delete(definition.key)
+    },
+    /** 会话事件流：宿主在每条事件提交后 eager drive 每个单元（apply 必须同一个引用才不产生下游工作）。 */
+    commit(session, event) {
+      let perSession = cells.get(session)
+      if (perSession === undefined) {
+        perSession = new Map()
+        cells.set(session, perSession)
+      }
+      for (const definition of units.values()) {
+        const state = perSession.get(definition.key) ?? definition.init({}, 0)
+        perSession.set(definition.key, definition.apply(state, event))
+      }
+    },
+    stateOf(session, key) {
+      if (!units.has(key)) return undefined
+      return cells.get(session)?.get(key)
+    },
+  }
+}
+
+/** 宿主记录一条 native 工具结果事件时，落进日志的正是 render 出来的文本。 */
+const toolResultEvent = (definition, value) => ({
+  type: 'tool/result',
+  seq: 1,
+  time: 0,
+  data: {
+    turn: 0,
+    step: 0,
+    message: {
+      role: 'tool',
+      toolCallId: 'c1',
+      isError: false,
+      source: { kind: 'tool', callId: 'c1' },
+      content: definition.output.render({}, value),
+    },
+  },
+})
+
+test('tool_search：没有延迟服务器时明确报错，全部发现后再搜一次仍正常返回（B13）', async () => {
+  // 两个"空"含义不同：managed = ∅（用户全关/总开关 off）→ 明确报错；
+  // managed ≠ ∅ 但 D = ∅（都发现了）→ 正常返回。写成 D = ∅ 会把后者误判成错误。
+  const idle = createFixture({ schemas: BIG_SCHEMAS, config: { deferServers: [], serverNames: ['jshook'] } })
+  try {
+    await assert.rejects(
+      idle.registered.get('tool_search').execute({ query: 'browser' }, { agent: idle.agent }),
+      /no MCP server is set to deferred loading/,
+    )
+  } finally {
+    idle.cleanup()
+  }
+
+  const busy = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  try {
+    const tool = busy.registered.get('tool_search')
+    await tool.execute({ query: `select:${BIG_SCHEMAS.map((entry) => entry.name).join(',')}` }, { agent: busy.agent })
+    const again = await tool.execute({ query: 'browser work' }, { agent: busy.agent })
+    assert.equal(again.protocol, 'dsh-tool-search/v1', '全部发现之后再搜一次必须正常返回（不是错误）')
+    assert.deepEqual(again.discoveredTools, [], '没有新发现而已')
+  } finally {
+    busy.cleanup()
+  }
+})
+
+test('tool_search：PTC 下补签名（参数 + 返回类型），native 下不给（C1）', async () => {
+  // PTC 的手册本来就给这两样；搜索结果只还参数 = 比不延迟时更少 = 半失效。
+  const ptc = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, toolsMode: 'ptc', ptcRuntime: PTC_RUNTIME })
+  try {
+    const value = await ptc.registered.get('tool_search').execute({ query: 'select:mcp__jshook__tool_3' }, { agent: ptc.agent })
+    const signature = value.matches[0].signature
+    assert.equal(typeof signature, 'string', 'PTC 下必须带签名')
+    // 参数与返回类型都要在里面：两者分别来自 parameters 与 output.schema。
+    assert.ok(signature.includes('args:'), `签名缺参数类型：${signature}`)
+    assert.ok(signature.includes('Promise<'), `签名缺返回类型：${signature}`)
+    assert.ok(signature.includes('value?: number'), `返回类型必须是 OUTPUT schema 渲染出来的：${signature}`)
+    assert.ok(signature.includes('arg?: string'), `参数类型必须来自 parameters：${signature}`)
+    assert.equal(signature.includes('\n'), false, '签名必须是一行（模型在程序里照写，不是读文档）')
+  } finally {
+    ptc.cleanup()
+  }
+
+  const native = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, toolsMode: 'native', ptcRuntime: PTC_RUNTIME })
+  try {
+    const value = await native.registered.get('tool_search').execute({ query: 'select:mcp__jshook__tool_3' }, { agent: native.agent })
+    assert.equal('signature' in value.matches[0], false, 'native 下不给签名（原生调用没有"返回类型"这个契约）')
+    assert.deepEqual(value.matches[0].parameters, BIG_SCHEMAS[3].parameters, '既有字段一个不动（协议向后兼容）')
+  } finally {
+    native.cleanup()
+  }
+})
+
+test('恢复：发现集经投影跨 agent 还原（PTC 与 native 同一条路径）', async () => {
+  // PTC 下搜索发生在程序内部，`deriveMessages()` 返回 0 条（F18 实测），所以这是**唯一**
+  // 能证明"发现不丢"的路径。这里用真契约的假注册表 + 真事件形状：
+  // ① 第一个 agent 搜索 → 宿主把结果记进会话 → ② 新装配（模拟 resume）看发现集是否还原。
+  const session = { id: 's1' }
+  const registry = fakeProjections()
+
+  const first = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, projections: registry })
+  assert.ok(registry.units.has('toolSearchDiscoveries'), '安装时必须注册发现集投影')
+  try {
+    const tool = first.registered.get('tool_search')
+    const value = await tool.execute({ query: 'select:mcp__jshook__tool_7' }, { agent: { ...first.agent, session } })
+    registry.commit(session, toolResultEvent(tool, value))
+    assert.deepEqual(registry.stateOf(session, 'toolSearchDiscoveries').discovered, ['mcp__jshook__tool_7'],
+      '投影必须从 tool/result 折出发现集')
+  } finally {
+    first.cleanup()
+  }
+  assert.equal(registry.units.size, 0, 'cleanup 必须注销投影（否则 HMR 后键会一直挂在注册表上）')
+
+  // resume：新装配、新 agent、同一个 session。派生消息给空（PTC 的真实形状）。
+  const second = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, projections: registry, messages: [] })
+  try {
+    const resumed = { ...second.agent, session }
+    const assembly = { tools: BIG_SCHEMAS.map((entry) => ({ name: entry.name })), sections: [] }
+    const result = await assemble(second, assembly, resumed)
+    assert.ok(result.tools.some((tool) => tool.name === 'mcp__jshook__tool_7'), '投影恢复的发现必须直接可见')
+    assert.equal(result.tools.some((tool) => tool.name === 'mcp__jshook__tool_8'), false, '没发现的仍要被遮')
+  } finally {
+    second.cleanup()
+  }
+})
+
+test('恢复：投影缺席时退回派生消息（native 有效，PTC 降级但不炸）', async () => {
+  const messages = [{
+    role: 'tool',
+    isError: false,
+    content: [{ type: 'text', text: JSON.stringify({ protocol: 'dsh-tool-search/v1', discoveredTools: ['mcp__jshook__tool_2'] }) }],
+  }]
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, messages })
+  try {
+    const result = await assemble(fixture, { tools: BIG_SCHEMAS.map((entry) => ({ name: entry.name })), sections: [] })
+    assert.ok(result.tools.some((tool) => tool.name === 'mcp__jshook__tool_2'), '无投影时仍要从派生消息恢复')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
 test('fail-open：宿主视图抛错时退回全量可见，不炸会话', async () => {
   // ToolSearch 是优化不是正确性机制。算不出视图就回到 feature 前的行为并记账，
   // 而不是让 assemble/guard 抛错——那会否决建会话或让 agent loop 每步失败。
@@ -692,9 +842,12 @@ test('fail-open：宿主视图抛错时退回全量可见，不炸会话', async
   // fail-open 视图的 deferring 是 false，所以引导段同样摘掉——此时确实没有任何工具被延迟。
   assert.equal(result.sections.find((section) => section.name === 'tool-search:guidance').text, '')
   assert.equal(fixture.guards[0]({ name: 'mcp__jshook__tool_0', agent: fixture.agent }), undefined)
-  const value = await fixture.registered.get('tool_search').execute({ query: 'browser' }, { agent: fixture.agent })
-  assert.deepEqual(value.matches, [])
-  assert.ok(value.instruction.includes('No tool matched'))
+  // 搜索工具此时必须**明确报错**（B13）：视图算不出来 ⇒ 受管集为空 ⇒ 没东西可搜。
+  // 注意报错要能区分两种"空"——视图坏了 vs 一个延迟服务器都没有，混成一句话就是误导。
+  await assert.rejects(
+    fixture.registered.get('tool_search').execute({ query: 'browser' }, { agent: fixture.agent }),
+    /unavailable in this session/,
+  )
   fixture.cleanup()
 })
 
