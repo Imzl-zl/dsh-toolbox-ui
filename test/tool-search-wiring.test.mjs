@@ -450,12 +450,32 @@ test('装配：没有 defer 条目时守卫不置词（零干预）', async () =
   }
 })
 
-test('装配：PTC 模式下不启用 ToolSearch（遮罩在 tools:sdk 那条路径上无效）', async () => {
-  // 半失效比不装更坏：模型看着完整 schema 却调用即错（collapses 直接拒 model-direct 调用）。
+test('装配：PTC 模式下**也**启用 ToolSearch（判据是 per-agent 的，不是进程级的）', async () => {
+  // 这条旧断言钉的是「PTC 下不装」（F12）。第十轮改了：装配点只知道**部署默认层**的模式，
+  // 而模式是 per-agent 的（preset 的 presentAs 可以覆盖）。PTC 下 `assembly.tools` 遮罩
+  // 确实是 no-op，但目录段 / 引导段 / 守卫 / 手册裁剪在 PTC 下**反而**是唯一有效的那部分：
+  // 手册是模型唯一的工具索引（F1）。
   const mounted = await mountPlugin([{ serverName: 'deferme', transport: 'stdio', command: 'x', defer: true }], { toolsMode: 'ptc' })
   try {
-    assert.equal(mounted.registered.includes('tool_search'), false, 'PTC 下不得注册 tool_search')
-    assert.equal(mounted.guards.length, 0, 'PTC 下不得注册守卫')
+    assert.ok(mounted.registered.includes('tool_search'), 'PTC 下必须注册 tool_search')
+    assert.equal(mounted.guards.length, 1, 'PTC 下必须注册守卫')
+    // 守卫按 per-agent 模式取值：PTC agent 的未发现直调被拒（嵌套派发实测走完整管线，F7）。
+    const denial = mounted.guards[0]({ name: 'mcp__deferme__tool_1', agent: createAgent() })
+    assert.equal(typeof denial, 'string')
+    assert.ok(denial.includes('tool_search'))
+  } finally {
+    await mounted.dispose()
+  }
+})
+
+test('装配：both 模式 inert——注册但一笔不动（唯一 inert 的取值）', async () => {
+  // B4/§11.4：`both` 下两条投影都有效，插件不介入。守卫必须放行（managed 被换成空视图），
+  // 这正是"inert"与"半失效"的分界：**不是因为判不出而放行**，是因为这个模式选择不介入。
+  const mounted = await mountPlugin([{ serverName: 'deferme', transport: 'stdio', command: 'x', defer: true }], { toolsMode: 'both' })
+  try {
+    assert.ok(mounted.registered.includes('tool_search'), '注册是无条件的（tool_search 可直调并给出明确说明）')
+    assert.equal(mounted.guards.length, 1)
+    assert.equal(mounted.guards[0]({ name: 'mcp__deferme__tool_1', agent: createAgent() }), undefined, 'both 下守卫必须放行')
   } finally {
     await mounted.dispose()
   }

@@ -637,6 +637,45 @@ test('裁手册：段文本为空时短路，不白跑一次全集重渲染', as
   }
 })
 
+test('both 模式：全 inert——不遮罩、不加目录、不摘引导、不裁手册', async () => {
+  // B4/§11.4：`both` 是**唯一** inert 的取值。技术上皮革在这里完全能生效（遮罩有效、手册可裁），
+  // 不做的理由只有一条：0.2.1 已删除该模式（V1），为将死的功能写行为不划算。
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, toolsMode: 'both', ptcRuntime: PTC_RUNTIME })
+  try {
+    const hostText = fixture.hostSdkText()
+    const assembly = {
+      tools: [{ name: 'run_code' }, ...BIG_SCHEMAS.map((entry) => ({ name: entry.name }))],
+      sections: [{ name: 'tools:sdk', text: hostText }, { name: 'tool-search:guidance', text: 'GUIDANCE' }],
+    }
+    const result = await assemble(fixture, assembly)
+    assert.equal(result, assembly, 'both 下必须**原样返回同一个对象**（一处都不碰）')
+    assert.equal(sdkTextOf(result), hostText, '手册不得被裁')
+    assert.equal(result.tools.length, assembly.tools.length, '工具不得被遮')
+    assert.equal(fixture.guards[0]({ name: 'mcp__jshook__tool_0', agent: fixture.agent }), undefined, '守卫必须放行')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('ptc 模式：必须启用（把 inert 判据写成"非 native"会在这里红）', async () => {
+  // 这条是 S6 的护栏：正确判据是"只有 both 才 inert"。写成 `mode !== 'native'` 会让 PTC
+  // 会话连目录/引导/守卫都没有——那等于把这个功能最大的受益面关掉。
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, toolsMode: 'ptc', ptcRuntime: PTC_RUNTIME })
+  try {
+    const assembly = {
+      tools: [{ name: 'run_code' }],
+      sections: [{ name: 'tools:sdk', text: fixture.hostSdkText() }, { name: 'tool-search:guidance', text: 'GUIDANCE' }],
+    }
+    const result = await assemble(fixture, assembly)
+    assert.ok(result.sections.some((section) => section.name === 'tool-search:catalog'), 'ptc 下必须追加目录段')
+    assert.equal(result.sections.find((section) => section.name === 'tool-search:guidance').text, 'GUIDANCE', 'ptc 下有活要干，引导段保留')
+    assert.notEqual(sdkTextOf(result), fixture.hostSdkText(), 'ptc 下必须裁手册')
+    assert.equal(typeof fixture.guards[0]({ name: 'mcp__jshook__tool_0', agent: fixture.agent }), 'string', 'ptc 下守卫必须生效')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
 test('裁手册：已发现的工具必须留在手册里', async () => {
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
   try {
