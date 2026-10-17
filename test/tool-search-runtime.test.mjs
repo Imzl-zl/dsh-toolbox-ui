@@ -1,12 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import {
   DEFAULTS,
   activeMaskedServers,
   applyServerFloor,
   buildToolSearchView,
   catalogSectionText,
-  clampDiscovered,
   discoveredFromMessages,
   filterManagedTools,
   guardDecision,
@@ -21,6 +21,8 @@ import {
 } from '../lib/tool-search-runtime.js'
 
 // ── 纯决策函数 ──
+
+const runtimeSource = await readFile(new URL('../lib/tool-search-runtime.js', import.meta.url), 'utf8')
 
 test('uniqueOwner: 唯一前缀才算归属', () => {
   assert.equal(uniqueOwner('mcp__jshook__browser_launch', new Set(['jshook', 'firecrawl'])), 'jshook')
@@ -90,12 +92,11 @@ test('guardDecision: 只管未发现的被管理工具', () => {
   assert.equal(guardDecision('mcp__a__x', state, off), undefined)
 })
 
-test('clampDiscovered: 最旧先淘汰，新发现存活', () => {
-  const discovered = new Set(['a', 'b', 'c'])
-  clampDiscovered(discovered, 2)
-  assert.deepEqual([...discovered], ['b', 'c'])
-  clampDiscovered(discovered, 5)
-  assert.deepEqual([...discovered], ['b', 'c'])
+test('clampDiscovered: 迁到 tool-search-state（LRU）——淘汰不再按插入序', () => {
+  // 旧实现在这里：`Set` 的迭代序当插入序，无条件淘汰。第十轮换成 `Map<name, tick>` +
+  // 「最多踢一半」，公式与收敛表在 test/tool-search-state.test.mjs 里逐行钉住。
+  // 这条只留一句提示：**别再往 runtime 里加一份淘汰实现**（第二真相源）。
+  assert.equal(runtimeSource.includes('clampDiscovered'), false, 'runtime 不得再有自己的淘汰实现')
 })
 
 test('parseDiscoveredMeta: 协议不符不认，累积列表与 matches 兜底', () => {
