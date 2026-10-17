@@ -83,7 +83,7 @@ test('guardDecision: 只管未发现的被管理工具', () => {
   const config = resolveRuntimeConfig({ deferServers: ['a'], serverNames: ['a'] })
   const state = { managed: new Set(['mcp__a__x']), discovered: new Set() }
   assert.equal(guardDecision('mcp__a__x', state, config).includes('is deferred'), true)
-  assert.equal(guardDecision('mcp__a__x', { managed: state.managed, discovered: new Set(['mcp__a__x']) }, state, config), undefined)
+  assert.equal(guardDecision('mcp__a__x', { managed: state.managed, discovered: new Set(['mcp__a__x']) }, config), undefined)
   assert.equal(guardDecision('Read', state, config), undefined)
   assert.equal(guardDecision('tool_search', state, config), undefined)
   const off = resolveRuntimeConfig({ requireDiscovery: false, deferServers: ['a'], serverNames: ['a'] })
@@ -138,6 +138,10 @@ test('viewRevision: 内容不变 revision 不变，内容或配置变则变', ()
   assert.notEqual(viewRevision(schemas, config), viewRevision(edited, config), '描述变了必须换 revision')
   const otherConfig = resolveRuntimeConfig({ deferServers: ['jshook', 'firecrawl'], serverNames: ['jshook', 'firecrawl'] })
   assert.notEqual(viewRevision(schemas, config), viewRevision(schemas, otherConfig), 'defer 集变了必须换 revision')
+  // serverNames 是**活输入**：项目 MCP 连接晚连时会多出名字，归属判定（uniqueOwner）随之改变，
+  // 所以它必须进 revision。defer 集把 serverNames 一起改了会掩盖这一点，单独变一次才测得准。
+  const moreServers = resolveRuntimeConfig({ deferServers: ['jshook'], serverNames: ['jshook', 'firecrawl'] })
+  assert.notEqual(viewRevision(schemas, config), viewRevision(schemas, moreServers), 'serverNames 变了必须换 revision')
 })
 
 test('buildToolSearchView: 纯函数，聚合阈值与 per-server 下限都生效', () => {
@@ -151,6 +155,13 @@ test('buildToolSearchView: 纯函数，聚合阈值与 per-server 下限都生�
   // 聚合阈值未达：整体惰性。
   const few = many.slice(0, 14)
   assert.equal(buildToolSearchView(few, config).deferring, false)
+
+  // **边界**：恰好等于阈值必须启用。旧用例只有 16 与 14，两者在 `>=` / `>` 下同结果，
+  // 于是把 `>= threshold` 写成 `> threshold` 全量仍绿——边界这个数正是最容易写错的地方。
+  // 用 DEFAULTS.threshold 而不是字面量 15：阈值调优时这条跟着走，不会静默失去区分力。
+  const exactly = Array.from({ length: DEFAULTS.threshold }, (_, i) => ({ name: `mcp__jshook__t${i}`, description: 'd', parameters: null }))
+  assert.equal(buildToolSearchView(exactly, config).deferring, true, '恰好达到阈值就必须启用（>= 语义）')
+  assert.equal(buildToolSearchView(exactly.slice(1), config).deferring, false, '差一个就不启用（> 语义会在这里错）')
 
   // 聚合阈值已过，但其中一个服务器太小：per-server 下限只摘掉它，大服务器照常延迟。
   // （官方 "<10 tools less beneficial"：小工具集每轮必付一次搜索往返，纯赔。）
@@ -496,6 +507,27 @@ test('maxDiscovered 上限：无界发现被最旧淘汰', async () => {
   }
   assert.equal(value.discoveredCount, 3)
   assert.deepEqual(value.allDiscoveredTools, ['mcp__jshook__tool_2', 'mcp__jshook__tool_3', 'mcp__jshook__tool_4'])
+  fixture.cleanup()
+})
+
+test('maxDiscovered 上限：单批 select 超过上限时不得淘汰本批', async () => {
+  // 与上一条互补：上一条一次加一个名字（cap 正常生效），这条一次加 5 个（> cap=3）。
+  // 淘汰下限必须抬到本批长度，否则本批靠前的名字在**同一条结果里**就被淘汰，
+  // discoveredCount 会小于 discoveredTools.length，模型按 instruction 直调必被守卫拒。
+  const fixture = createFixture({
+    schemas: BIG_SCHEMAS,
+    config: { ...DEFER_CONFIG, maxResults: 2, maxDiscovered: 3 },
+  })
+  const tool = fixture.registered.get('tool_search')
+  const batch = [0, 1, 2, 3, 4].map((index) => `mcp__jshook__tool_${index}`)
+  const value = await tool.execute({ query: `select:${batch.join(',')}` }, { agent: fixture.agent })
+  assert.equal(value.discoveredTools.length, batch.length)
+  assert.equal(value.discoveredCount, batch.length, '本批不得被自己的上限淘汰')
+  // 下一次搜索按正常上限回落（淘汰最旧），上限仍然是"长期常驻"的护栏。
+  // 6 个名字、cap 3 → 淘汰 3 个最旧的（tool_0..tool_2），剩下的照常存活。
+  const after = await tool.execute({ query: 'select:mcp__jshook__tool_9' }, { agent: fixture.agent })
+  assert.equal(after.discoveredCount, 3, '下一批按 cap 回落')
+  assert.deepEqual(after.allDiscoveredTools, ['mcp__jshook__tool_3', 'mcp__jshook__tool_4', 'mcp__jshook__tool_9'])
   fixture.cleanup()
 })
 

@@ -19,11 +19,9 @@ const { default: SystemPrompt, renderPrompt } = await import(systemPromptUrl)
 
 const TEST_TIMEOUT_MS = 60_000
 
-const DEFER_CONFIG = { deferServers: ['deferme'], serverNames: ['deferme'] }
-
-/** 16 个全局族工具（模拟 profile patch 里的 mcp 条目）。名字跟着 serverName 走——含连字符的
- *  服务器名（内置目录 11/47 个）是 `+<server>` 约束的关键用例，用无连字符的名字测等于没测。 */
-const globalTools = (server) => Array.from({ length: 16 }, (_, index) => ({
+// 32 个全局族工具（模拟 profile patch 里的 mcp 条目）。名字跟着 serverName 走——含连字符的
+// 服务器名（内置目录 11/47 个）是 `+<server>` 约束的关键用例，用无连字符的名字测等于没测。
+const globalTools = (server, count = 16) => Array.from({ length: count }, (_, index) => ({
   name: `mcp__${server}__g${index}`,
   description: `global deferred tool number ${index} for browser work`,
   parameters: { type: 'object', properties: { arg: { type: 'string' } } },
@@ -36,7 +34,7 @@ const OWN_TOOLS = Array.from({ length: 12 }, (_, index) => ({
   parameters: { type: 'object', properties: { arg: { type: 'string' } } },
 }))
 
-async function createHost({ descriptionOf, hyphenated = false, deferNothing = false } = {}) {
+async function createHost({ descriptionOf, hyphenated = false, deferNothing = false, globalToolCount = 16 } = {}) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
@@ -46,7 +44,7 @@ async function createHost({ descriptionOf, hyphenated = false, deferNothing = fa
   const server = hyphenated ? 'defer-me' : 'deferme'
 
   // 全局族：从根 ctx 注册 → 全局层。
-  for (const schema of [...globalTools(server), ...OWN_TOOLS]) {
+  for (const schema of [...globalTools(server, globalToolCount), ...OWN_TOOLS]) {
     const description = descriptionOf?.(schema.name) ?? schema.description
     tools.register({
       name: schema.name,
@@ -267,6 +265,35 @@ test('real host: +约束对含连字符的服务器名生效', TEST_TIMEOUT_MS, 
     // 不匹配的约束词返回空，而不是误伤全部候选。
     const none = JSON.parse((await host.call('tool_search', { query: '+nope g3' })).content[0].text)
     assert.deepEqual(none.matches, [])
+  } finally {
+    await host.dispose()
+  }
+})
+
+test('real host: select: 返回的每个工具都能直接调，即使一批超过 maxDiscovered', TEST_TIMEOUT_MS, async () => {
+  // 回归：`select:` 是目录 section 指明的"知道名字就用它"的路径，**不受 maxResults 限制**，
+  // 一次返回请求的全部名字；而 maxDiscovered 的淘汰在整批加入**之后**执行，于是同一批里靠前
+  // 的工具被立刻重新遮罩。模型的处境自相矛盾：结果里同时写着 discoveredTools=30 与
+  // discoveredCount=20、instruction 说"按名字直接调"，而其中 10 个下一次调用必被守卫拒。
+  // 这就是项目纪律里的"看起来成功了其实没生效"。
+  const count = DEFAULTS.maxDiscovered + 10
+  const host = await createHost({ globalToolCount: count })
+  try {
+    const names = globalTools('deferme', count).map((schema) => schema.name)
+    const value = JSON.parse((await host.call('tool_search', { query: `select:${names.join(',')}` })).content[0].text)
+
+    assert.equal(value.matches.length, names.length, 'select: 按请求原样回报全部名字')
+    // 自洽性：报告的发现总数不能小于本次刚发现的数目。
+    assert.ok(value.discoveredCount >= value.discoveredTools.length,
+      `discoveredCount(${value.discoveredCount}) 不得小于本次新发现数(${value.discoveredTools.length})`)
+
+    // 承诺的可执行性：instruction 说了"按名字直接调"，那就必须每个都能调。
+    const denied = []
+    for (const name of names) {
+      const out = await host.call(name)
+      if (out.isError) denied.push(name)
+    }
+    assert.deepEqual(denied, [], '刚返回 schema 的工具不得在下一次调用被拒绝')
   } finally {
     await host.dispose()
   }

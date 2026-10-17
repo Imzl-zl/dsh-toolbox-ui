@@ -9,6 +9,12 @@
 > **第五轮（独立审查后的整改）之后的变化**：O1 已修完并真机验证（见 §12.3 #24）。
 > O3 定性为"非产品缺陷、但是隔离环境 UI 结论不可信的方法论警示"。
 > **第七轮：O2 已终验（见下）**。剩下的未验证项是 **O5**；O1 的终验缺口（O1R）已在第六轮补上。
+>
+> **第八轮（独立复核）之后的变化**：修掉三条产品缺陷 + 一处测试空守卫，细节见
+> `docs/mcp-tool-search-design.md` §12.5 与文末表格。**新增三条遗留项 O6 / O7 / O8**，
+> 都是"需要先定方案再动手"的，不是"忘了做"。
+> ⚠️ **本文档的轮次编号有缺口**：§12.3 自称"第五轮"、§12.4 自称"第七轮"，中间没有第六轮小节
+> （第六轮内容散在 §12.3 正文里）。**不要靠编号推断时间顺序**，按内容判断。
 
 ---
 
@@ -140,7 +146,121 @@ toggle[aria-checked=true]    = rgb(249,250,251)
 
 ---
 
-# 已修完（防重做，细节见 `docs/mcp-tool-search-design.md` §12）
+## O6【缺陷，已实测，未修｜需先定方案】PTC 组合下插件"半失效"：遮罩打在一条投影上，而模型看的是另一条
+
+**现象**：部署默认 `native`（插件照装）时，如果某个 agent 被 preset 设成 `ptc`，那个 agent 处在一个自相矛盾的状态——
+
+- 它的 `tools:sdk` section 里 **30/30 个 mcp 工具 schema 全在**（含 `tool_search` 自己）；
+- 而 `assembly.tools` 里被遮到 0 个（遮罩"生效"了，但遮的是另一条投影）；
+- 直调 `tool_search` → `isError:true`：「only `run_code` is callable directly」；
+- 同进程对照的 native agent → `isError:false`。
+
+即 §12 自己写的判据「半失效（模型看着完整 schema 却调用即错）比不装更坏」**在跨 scope 组合下真实发生**了。
+
+**证据（第八轮实测，真宿主）**：真 cordis + 真 SystemPrompt + 真 ToolRuntime + 真 dsh-scope；
+`ctx.provide('ptcRuntime', { language: 'typescript' })` 最小 stub（`requirePtcRuntime` 只检查服务存在 +
+language 命中 `SDK_RENDERERS`，与运行时实现无关）+ 真 `agent.ctx.tools.presentAs('ptc')`。原始输出：
+
+```
+deployment default mode = native
+plugin installed (deployment default is native)
+agent mode = ptc  (deployment default still native)
+(a) tools:sdk 段含全部 30 个 schema？ true
+    tools:sdk 段含 tool_search？ true
+    assembly.tools 里 mcp 工具数 = 0
+(b) PTC agent 调 tool_search -> isError = true :: Error: unknown tool "tool_search": only `run_code` is callable directly — ...
+    PTC agent 直调 mcp 工具 -> isError = true :: ... only `run_code` is callable directly ...
+CONTROL native agent 调 tool_search -> isError = false
+```
+
+**根因（读码 + 实测一致）**：装配判据在 `lib/index.js:1131` 读的是**部署默认层**
+（`ctx.tools.modeFor()` 不传 scope）。而宿主 `dsh-tools/lib/index.js:2767-2774` 的 `modeFor(scope)`
+是按 `layers.chainLayers(scope)` 解析的，`:3090-3094` 的注释明说这个组合正是
+`dsh-agent-tool-presentation` 存在的理由（该包 `:47` 调 `presentAs`）。
+
+**为什么停在这里（不是忘了）**：修法要动 `installToolSearchRuntime` 的**装配结构**——
+`ctx.tools.register` / `ctx.tools.guard` 都是全局一次的，而"该不该生效"是 per-agent 的。
+两条候选路线的取舍我判断不了，需要先做方案调研：
+
+1. **装配照旧，三个入口各自按 agent 短路**：`assemble` / `guard` / `execute` 里判 `modeFor(agent)`，
+   PTC agent 直接放行（不遮、不拒、引导段摘掉）。`tool_search` 仍全局注册。
+   好处：不动装配结构、不改 RPC。风险：`tool_search` 对 PTC agent 仍"存在"（虽不可调），
+   语义上比"整体不装"模糊；且要在三处各加一次判据 = 三处可能漂移。
+2. **装配前遍历现存 agent**：装配时若有任何 agent 是 ptc 就不装。好处：保持"全或全不装"。
+   风险：agent 是**动态**的（新会话才出现 PTC agent），装配时看不到未来；这正是 `modeFor(scope)`
+   与 `defaultMode` 分开的原因。
+3. **补 SDK section 整形**（参考实现的 `shapeSdkSection`）：把延迟工具也挡在 `tools:sdk` 外。
+   好处：唯一根治、PTC 下功能也能用。代价：碰 `tools:sdk` 投影，与插件"只做 assembly"的
+   架构决策（决策 8①）冲突，要重新论证。
+
+**要修需要什么**：先在真宿主里确认 `sdkSchemas` / `wireSchemas` 对 ptc scope 的**完整**行为
+（本轮只测了 `sdkSection` 文本与 `collapses`），再定上面三条里走哪条，然后补真宿主回归用例（先红后绿）。
+
+---
+
+## O7【缺陷，已实测，未修｜需先定方案】面板三处自相矛盾，且"机制整体没启用"在 UI 上看不见
+
+**现象**（真渲染实测，隔离实例 1468×880，DOM 直读）：长名服务器 `abcdefghijklmnopqrstuvwxyz012345`（0 工具）
+同一屏上同时存在四个说法：
+
+```
+行徽标        : "延迟"
+详情行        : "工具延迟加载" → "已开启（0 工具经 tool_search 按需加载）"
+编辑表单复选框: "延迟加载工具（ToolSearch 按需搜索）"  checked: true
+紧邻的预告    : "该服务器仅 0 个工具，不参与延迟（工具数 ≤ 10 时每轮必多一次搜索往返，不划算）"
+```
+
+**更隐蔽的一层（第八轮新发现，比上一条重要）**：uiprobe（**12 工具**，过得了 per-server 下限）
+的预告是"该服务器 12 个工具，将经 tool_search 按需加载"——**看着完全正常**。
+但同一 profile 此刻 `managed = 12 < threshold 15` → `deferring = false`，**机制整体没开**：
+这批工具全部常驻、`tool_search` 一次都不会被引导去调。
+
+**未达阈值时的实际行为（实测，非推断）**：`tool_search` **仍注册且可见**、引导段文本被清空、
+无目录段、12 个工具全量可见。所以这一层**不误导模型**，**误导的只有面板**——
+面板断言的"状态"实际只是"配置标记"，两道门槛（per-server > 10、会话级 ≥ 15）都可能让它不成立，
+而 UI 没有任何地方说这件事。`lib/client.js:2778-2781` 附近有注释承认"会话级聚合阈值行级看不到，
+说了就是假话"，但没说"那么徽标该叫什么"。
+
+**术语（用户提过）**：整仓同一概念两个词——徽标/按钮用「延迟」「全部延迟」，
+tooltip/预告/工具描述用「按需加载」「按需搜索」。官方叫法有据：功能名 **Tool Search**、
+开关字段 **`defer_loading`**、Claude Code MCP 文档一节标题 **"Defer a server's tools"**
+（`platform.claude.com` 的 `defer_loading` 页、`code.claude.com` 的 mcp-servers 文档）。
+宿主侧英文渲染实测为 `Deferred` / `Undefer all` / `Tool deferral`，对得上官方 Defer。
+**未验证**：官方中文文档把 `defer_loading` 译成什么（中文页 302 跳到 anthropic.com，没跟上）——别编。
+建议统一到「按需加载」（徽标两字可用「按需」），英文保留官方 Defer/Deferred。
+
+**为什么停在这里**：三条候选路线的代价差一个量级，得先定：
+① **只改文案**——零接口改动，但"机制没启用"仍然看不到；
+② 徽标 `title` 写清两道门槛——仍是"配置标记"语义，没消除歧义；
+③ **Host 暴露视图状态**（`deferring` + 每服务器有效工具数）给面板——唯一能消除歧义的做法，
+但要动 RPC/接口。**关键约束**：若走 ③，面板现有的 `defer` 字段（"配置标记"）
+与新的"生效状态"必须**是两个字段**，不能合并——合并只是把一个歧义换成另一个。
+
+---
+
+## O8（Minor，读码结论，未修｜语义二选一）三条"改判据还是改注释"的小项
+
+三条都不是 bug（代码/单测/UI 三者自洽），但会误导后人。每条只需选一边，**别两边都不动**：
+
+1. **`applyServerFloor` 的 `> minTools` 与被引用的官方原话差一档**（`lib/tool-search-runtime.js:150`）。
+   代码用 `(counts.get(owner) ?? 0) > minTools` 才保留，而 `DEFAULTS.minServerTools` 的注释引的是官方
+   "<10 tools less beneficial"（按该原话 10 个工具是"值得"的），参数名 `minServerTools`（最小工具数）
+   读起来也是 `>=`。选一个：改判据，或改注释+参数名明确写成 exclusive。
+2. **`DEFAULTS.maxCatalogLines` 的 docstring 与实现不同**（`lib/tool-search-runtime.js:48`）：
+   注释写"超出部分提示模型改用关键词/`select:` 查询"，而 `catalogSectionText` 的兜底文案是
+   "…or use `select:<exact name>` **once you know the name**"——但被截断的正是名字没列出来的那批，
+   模型无从知道那个名字。措辞可改（影响很小：名字可从工具列表/别处得知）。
+3. **`uniqueOwner` 与 `toolInventory` / `applyWorkspaceRestrict` 是同一规则的两种写法**
+   （`lib/tool-search-runtime.js:100-108` vs `lib/mcp-registry.js:33-35` / `lib/workspace-runtime.js:978-979`）。
+   后两者是同一个内联惯用法（`names.filter(startsWith).length`），字面重复；新的那支是独立函数。
+   **语义已实测等价**（`owners.length === 1` ⇔ `uniqueOwner !== null`）。服务器全集确实不同
+   （前两者只取全局 loader 条目，新的取"全局 + 项目共享连接"），但那是**消费侧的输入差异**，
+   不是判定规则的分歧。可行修法：`uniqueOwner` 提到 `mcp-registry` 一处导出、三处各自消费
+   （per-schema 早退还更快）。**代价**：改的是"判定"不是"消费"，`ambiguous` 的集合语义不能顺手改。
+   注：`tool-search-runtime.js:97-98` 的注释已写"与…同一条规则"——**注释承认了、代码没合并**。
+
+---
+
 
 | # | 问题 | 修法 |
 |---|---|---|
@@ -150,5 +270,11 @@ toggle[aria-checked=true]    = rgb(249,250,251)
 | F4 | token 估算是假精确感（我们不知道用户装了什么 MCP，schema 大小差一个量级） | 整套删除：两个估算函数、两处计算、三处渲染、4 个单测。徽标只剩「延迟」，表单预告只留工具数与 per-server 规则。第五轮修掉永假守卫与 i18n 缺口（补 6 条 EN、删 8 条死词条、parity 扩到 `t()` 调用点） |
 | O1 | `add` / `removeServer` / `installBuiltins` 只写盘，运行中进程不生效 | 第五轮修好：writePatch 之后在**运行中的进程**里创建/停掉 loader 条目（根部创建 + `entry.parent.remove`），共用同一个失败回滚形状。`test/real-host-loader.test.mjs` 用真 Loader + 真 mcp-client + 真 stdio 子进程覆盖。剩一条终验缺口见 O1R |
 | O2 | skills 三个变更 RPC 的运行中生效性未实测 | **不是缺陷，是未验证**：第七轮搭真夹具验掉了（临时技能根 × 真 SkillRegistry × 真 dsh-skill-filesystem `watch:true`）。三个 RPC 都在运行中生效，投递机制就是宿主的 watcher → `control.invalidate` → registry 重扫。反证：`watch:false` 复跑时三个 RPC 都报 `changed:true` 而 registry 永远不变（删掉的技能 3 秒后还在目录里）。细节见上面 O2 条目 |
+| #32 | `select:` 一次取超过 `maxDiscovered` 时，本批靠前的工具被当场重新遮罩，而结果自己写着"按名字直接调" | 淘汰下限抬到本批长度（`Math.max(resolved.maxDiscovered, discoveredNow.length)`），`clampDiscovered` 返回值改为淘汰数。**真宿主先红后绿**：`test/tool-search-real-host.test.mjs` 真 dispatcher 逐个直调 30 个工具断言无一被拒；夹具级用例 `test/tool-search-runtime.test.mjs` 钉"本批不被自己淘汰、下一批按 cap 回落"。变异复验：回退即红。代价（已写进注释）：单次超量 `select` 让累积集临时超上限，但那批 schema 本就已经在提示词里 |
+| #33 | **唯一的**"发现即放行"纯函数断言恒为真（`test/tool-search-runtime.test.mjs` 给 3 参函数传了 4 个实参，`state` 落进 `config` → `!requireDiscovery` 早退） | 改成 3 参调用。变异复验（删 `guardDecision` 里 `discovered.has(name)` 短路）：修复前 fail 2 且**不含**这条 → 修复后 fail 4 **含**这条 |
+| #34 | `serverDeferTable` 全局族是"后写覆盖"，与注释承诺的 OR 矛盾 → 同名条目的 defer 结论取决于 `loader.entries()` 顺序（用户改不了也看不见） | 全局族改 OR，与项目族同一条合并规则。新增"顺序无关"用例（`[false,true]` 与 `[true,false]` 必须同结论），变异回"后写覆盖"立刻红。**实测推翻一个担心**：同名**不会**让 `uniqueOwner` 歧义（`serverDeferTable` 是 Map，`serverNamesOf` 天然去重） |
+| — | `test/tool-search-real-host.test.mjs` 顶部 `const DEFER_CONFIG` 声明后从未使用 | 删除；`globalTools(server, count = 16)` 参数化以支撑 #32 的 30 工具夹具 |
+| — | 四处覆盖缺口：`NAME_BONUS`、平手 tie-break、`threshold` 边界、`serverNames` 进 revision（改坏后全量仍绿） | 逐条补"能区分"的夹具并逐条变异复验（全部转红）：查询词不能等于裸工具名（否则走 `isExactName` 的 `Infinity` 短路）；平手 fixture 输入序要**与期望序相反**；阈值边界用 `DEFAULTS.threshold` 现取；`serverNames` 单独变一次。**不补** `descriptionChars`/`maxCatalogLines`/`threshold` 的 revision：安装期固定值，会话内不可能变，补了只会造恒真守卫 |
+
 
 **F1 的那个讽刺**（第五轮复查后改写）：`test/typert-manifest.test.mjs` 原有 `assert.equal(mcp.length, 34)` 的精确计数，在 `setDeferAll` 缺失时 manifest 恰好还是 34 条——**这条断言把缺口固化成了"正确值"**。已改成 35 并加注释。但第五轮的变异实验进一步证明：即使计数改对，**三边同序比对对"三边同时缺"仍然失明**（那条用例绿，只有计数红）——所以真正补的是第四边。

@@ -192,10 +192,28 @@ test('searchCatalog: select 精确取，缺失也回报，保序去重', () => {
   assert.equal(matches[2].name, 'mcp__firecrawl__firecrawl_scrape')
 })
 
-test('searchCatalog: 名字命中压过描述命中', () => {
-  const catalog = buildCatalog(SCHEMAS)
-  const matches = searchCatalog(catalog, 'screenshot', 5)
-  assert.equal(matches[0].name, 'mcp__jshook__browser_screenshot')
+test('searchCatalog: 名字命中压过描述命中（非精确名形态）', () => {
+  // M3 的闸门：**查询词不能等于工具全名/裸名**。等名形态会走 isExactName 的 Infinity 分支，
+  // 把 NAME_BONUS 短路掉——旧的 'screenshot' 用例正是这样，于是 NAME_BONUS 12→0 时全量仍绿。
+  // 这里两个文档命中同一个词，只有名字命中侧拿 bonus：
+  //   mcp__srv__browser_launch 描述里没有 "browser"，名字里有 → nameHit
+  //   mcp__srv__page_open      名字里没有 "browser"，描述里密集出现 → tf 再高也不能翻盘
+  const catalog = buildCatalog([
+    { name: 'mcp__srv__browser_launch', description: 'Start a new instance of the application under test.', parameters: null },
+    { name: 'mcp__srv__page_open', description: 'Open a browser page. The browser context decides browser behaviour.', parameters: null },
+  ])
+  assert.equal(searchCatalog(catalog, 'browser', 5)[0].name, 'mcp__srv__browser_launch',
+    '名字命中必须压过纯描述命中——没有 NAME_BONUS 时 tf 更密的那条会反超')
+})
+
+test('searchCatalog: 多词查询里名字命中同样压过参数/描述命中', () => {
+  // 命中的是参数文本里的词，而名字恰好含 "encode" 的那条连 query 都没碰上，
+  // 却因名字命中拿 bonus——两条路径都得压住，否则参数文本权重一高就反超。
+  const catalog = buildCatalog([
+    { name: 'mcp__srv__encode', description: 'Convert a document into a compact form.', parameters: { properties: { format: { type: 'string', description: 'Output format.' } } } },
+    { name: 'mcp__srv__doc_convert', description: 'Convert a document into a compact form.', parameters: { properties: { encoding: { type: 'string', description: 'Text encoding.' } } } },
+  ])
+  assert.equal(searchCatalog(catalog, 'encode document', 5)[0].name, 'mcp__srv__encode')
 })
 
 test('searchCatalog: 关键词 top-N 限制生效', () => {
@@ -226,12 +244,20 @@ test('searchCatalog: +约束对含连字符/下划线的服务器名生效', () 
   assert.deepEqual(searchCatalog(catalog, '+nope snapshot', 5), [])
 })
 
+test('searchCatalog: 整条查询恰是工具全名时确定性置顶', () => {
+  const catalog = buildCatalog(SCHEMAS)
+  const matches = searchCatalog(catalog, 'screenshot', 5)
+  assert.equal(matches[0].name, 'mcp__jshook__browser_screenshot')
+})
+
 test('searchCatalog: 平手按 code-unit 序（locale 无关，目录字节稳定）', () => {
   // localeCompare 对混合大小写给出与 code-unit 不同的序，目录因此不是字节稳定的，
   // 也与宿主自己的工具排序（dsh-system-prompt compareToolNames）不一致。
+  // **输入序刻意与期望序相反**：两条分数严格相等，没有 tie-break 时 V8 的稳定排序
+  // 会原样保留输入序，用例就变成恒真（旧 fixture 的 alpha 在前正是这个形状）。
   const catalog = buildCatalog([
-    { name: 'mcp__srv__Beta', description: 'identical description text', parameters: null },
     { name: 'mcp__srv__alpha', description: 'identical description text', parameters: null },
+    { name: 'mcp__srv__Beta', description: 'identical description text', parameters: null },
   ])
   assert.deepEqual(searchCatalog(catalog, 'identical description text', 5).map((m) => m.name), ['mcp__srv__Beta', 'mcp__srv__alpha'])
 })
