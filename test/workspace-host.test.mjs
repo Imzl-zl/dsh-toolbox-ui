@@ -21,6 +21,15 @@ async function createHostFixture(patchContent = '[]\n', registryWorkspaces = [],
     extraWorkspaces[name] = path
   }
   const entries = [{ options: { id: 'include', name: 'cordis:include', config: { path: pathToFileURL(rootConfig).href } } }, ...extraEntries]
+  // entry.parent.remove(id) 是 loader 里"停掉并移除一个条目"的原语，removeServer 走它
+  // （不走 ctx.loader.remove——那条对 include 子树条目是静默 no-op，见 lib/index.js 的注释）。
+  const group = {
+    remove: async (id) => {
+      const index = entries.findIndex((entry) => entry.options.id === id)
+      if (index >= 0) entries.splice(index, 1)
+    },
+  }
+  for (const entry of entries) entry.parent = group
   const registry = {
     list: () => [
       ...registryWorkspaces.map((ws) => ({ ...ws, path: ws.path || wsRoot })),
@@ -28,7 +37,18 @@ async function createHostFixture(patchContent = '[]\n', registryWorkspaces = [],
     ],
   }
   const ctx = {
-    loader: { entries: () => entries },
+    // create/remove 是 add / removeServer / installBuiltins 在运行中的进程里增删 loader
+    // 条目的入口（旧行为只写盘）。桩上做同一份 entries 数组上的增删——稳定引用、可观测，
+    // 与 entries() 同一个真相源；真正的连接效果由 test/real-host-loader.test.mjs 覆盖。
+    loader: {
+      entries: () => entries,
+      create: async (options) => {
+        const entry = { options: { ...options }, parent: group, update: async (next) => { Object.assign(entry.options, next ?? {}) } }
+        entries.push(entry)
+        return options.id
+      },
+      remove: async (id) => group.remove(id),
+    },
     tools: { schemas: () => [] },
     logger: { warn: () => {}, error: () => {}, info: () => {} },
     get(name) {
@@ -239,6 +259,58 @@ test('updateWorkspaceServer and removeWorkspaceServer mutate the project file', 
       McpManagerGateway.prototype.removeWorkspaceServer.call(gateway, { wsPath: fixture.wsRoot, name: 'db' }),
       /该项目中没有此 MCP/,
     )
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('setDeferAll 在项目作用域改 .dsh/mcp.json，不动 profile patch', async () => {
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const fixture = await createHostFixture('[]\n', [{ title: 'proj-a' }])
+  try {
+    const gateway = { ctx: fixture.ctx }
+    await mkdir(join(fixture.wsRoot, '.dsh'), { recursive: true })
+    await writeFile(configPath(fixture.wsRoot), JSON.stringify({
+      mcpServers: { db: { command: 'psql' }, web: { type: 'http', url: 'https://x.test/mcp' } },
+      exclude: ['db'],
+    }, null, 2))
+
+    const on = await McpManagerGateway.prototype.setDeferAll.call(gateway, { wsPath: fixture.wsRoot, defer: true })
+    assert.equal(on.changed, 2)
+    const parsed = JSON.parse(await readFile(configPath(fixture.wsRoot), 'utf8'))
+    assert.equal(parsed.mcpServers.db.defer, true)
+    assert.equal(parsed.mcpServers.web.defer, true)
+    // 原有字段与 exclude 都不能丢。
+    assert.equal(parsed.mcpServers.db.command, 'psql')
+    assert.equal(parsed.mcpServers.web.url, 'https://x.test/mcp')
+    assert.deepEqual(parsed.exclude, ['db'])
+
+    // 反向不留残影。
+    await McpManagerGateway.prototype.setDeferAll.call(gateway, { wsPath: fixture.wsRoot, defer: false })
+    const back = JSON.parse(await readFile(configPath(fixture.wsRoot), 'utf8'))
+    assert.equal(back.mcpServers.db.defer, false)
+    assert.equal(back.mcpServers.web.defer, false)
+    assert.deepEqual(back.exclude, ['db'])
+    assert.equal(back.mcpServers.db.command, 'psql', '关掉时同样不能丢字段')
+
+    // profile patch 完全没被碰（全局与项目两条写路径必须分开）。
+    assert.match(await readFile(fixture.patchPath, 'utf8'), /^\[\]/)
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('setDeferAll 在项目没有 MCP 时返回 0 且不写文件', async () => {
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const fixture = await createHostFixture('[]\n', [{ title: 'proj-a' }])
+  try {
+    const gateway = { ctx: fixture.ctx }
+    await mkdir(join(fixture.wsRoot, '.dsh'), { recursive: true })
+    await writeFile(configPath(fixture.wsRoot), JSON.stringify({ mcpServers: {}, exclude: [] }, null, 2))
+    const before = await readFile(configPath(fixture.wsRoot), 'utf8')
+    const result = await McpManagerGateway.prototype.setDeferAll.call(gateway, { wsPath: fixture.wsRoot, defer: true })
+    assert.equal(result.changed, 0)
+    assert.equal(await readFile(configPath(fixture.wsRoot), 'utf8'), before, '空项目不得重写文件')
   } finally {
     await fixture.cleanup()
   }

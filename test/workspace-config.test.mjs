@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -273,4 +273,25 @@ test('toMcpClientConfig rejects empty resolved command/url', () => {
     () => toMcpClientConfig({ name: 'broken', transport: 'streamable-http', url: '!!js process.env.DSH_MCP_UNDEFINED_URL_XYZ' }, '/ws'),
     /url 求值为空/,
   )
+})
+
+// ── defer 字段往返（插件自有的 ToolSearch 开关，同 idleTimeoutMs 待遇） ──
+
+test('specToMcpEntry: defer 原样往返，缺省不落键', () => {
+  assert.equal(specToMcpEntry({ name: 'a', transport: 'stdio', command: 'x', defer: true }).defer, true)
+  assert.equal(specToMcpEntry({ name: 'a', transport: 'stdio', command: 'x', defer: false }).defer, false)
+  assert.equal('defer' in specToMcpEntry({ name: 'a', transport: 'stdio', command: 'x' }), false)
+})
+
+test('defer: 写盘再读回不丢（面板每次保存都走这条路）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-defer-'))
+  try {
+    const servers = [{ name: 'jshook', transport: 'stdio', command: 'npx jshook', defer: true }]
+    await writeWorkspaceConfig(dir, { servers }, writeFile, (path) => mkdir(path, { recursive: true }))
+    const config = await readWorkspaceConfig(dir, readFile)
+    assert.equal(config.error, '')
+    assert.equal(config.servers[0].defer, true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

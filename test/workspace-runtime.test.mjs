@@ -4,8 +4,37 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { installAgentRuntime } from '../lib/workspace-runtime.js'
+import { projectMcpServers } from '../lib/workspace-runtime.js'
 // 把一份 session 展开成真实 setup 契约的两个参数：setup(agentCtx, agent)。
 const spawn = (s) => [s, s.sessionAgent]
+
+test('project MCP defer flag reaches the ToolSearch config bridge', async () => {
+  // 项目级共享连接是 `connectionCtx.plugin(...)` 建出来的，**不进 loader 树**，所以
+  // allMcpEntries(ctx) 看不见它。ToolSearch 的"已知服务器 + defer 标志"因此必须有第二个
+  // 来源，否则 UI 上项目服务器的"延迟加载"复选框是个静默 no-op。
+  const { installAgentRuntime: install } = await import('../lib/workspace-runtime.js')
+  const { deferServersOf, serverNamesOf } = await import('../lib/tool-search-config.js')
+  const fixture = await createRuntimeFixture({
+    deferTools: false,
+    extraServers: { deferred: { command: 'run-deferred', defer: true }, plain: { command: 'run-plain' } },
+  })
+  try {
+    install(fixture.ctx)
+    const created = await fixture.agentsService.create({ setup: undefined })
+    await created.setup(...spawn(fixture.agentCtx))
+
+    assert.deepEqual(projectMcpServers(fixture.ctx).sort((a, b) => a.name.localeCompare(b.name)), [
+      { name: 'db', defer: false },
+      { name: 'deferred', defer: true },
+      { name: 'plain', defer: false },
+    ])
+    // 全局族（loader 条目）与项目族（共享连接）合并成同一张表。
+    assert.deepEqual(serverNamesOf(fixture.ctx).sort(), ['db', 'deferred', 'exa', 'github', 'plain'])
+    assert.deepEqual(deferServersOf(fixture.ctx), ['deferred'])
+  } finally {
+    await fixture.cleanup()
+  }
+})
 
 /** 轮询等待一个条件成立（空闲回收这类计时器行为需要它）。 */
 async function waitFor(predicate, timeoutMs = 2000) {

@@ -51,6 +51,15 @@ test('详情页签在窄屏换行展示，不靠隐藏滚动条藏内容', () =>
   assert.equal(declOf(strip, 'overflow'), 'visible', '页签条自己不该成为滚动容器')
 })
 
+test('ListFooter 的死 action 槽位连样式一起删干净', () => {
+  // 曾经 ListFooter 有一个 `action` 槽位 + 四条 .dsh-mcp-foot-action 规则，而两个调用点
+  // （MCP 面、技能面）都不传它——纯死代码。更糟的是 docstring 还写着这个槽是给「全部延迟」
+  // 用的，与"唯一入口在过滤器行"自相矛盾，等于指示下一个往里加第二个入口。
+  // 只删槽位不删 CSS 的话，那个人会发现样式居然还在，于是死代码又长回来。
+  const dead = rules.filter((rule) => rule.selectors.some((selector) => selector.includes('dsh-mcp-foot-action')))
+  assert.deepEqual(dead.map((rule) => rule.selectors), [], '底栏动作槽位的样式必须一起删掉')
+})
+
 test('页签隐藏规则压得过组件自身的 display', () => {
   // 一个详情页签元素身上可能同时挂着这些类，所以它们之间的 display 规则会互相竞争。
   const PANE_CLASSES = new Set(['dsh-mcp-pane-off', 'dsh-mcp-card', 'dsh-mcp-d-diag', 'dsh-mcp-detail', 'dsh-mcp-d-body'])

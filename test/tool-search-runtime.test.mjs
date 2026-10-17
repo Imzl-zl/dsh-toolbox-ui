@@ -1,0 +1,587 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  DEFAULTS,
+  activeMaskedServers,
+  applyServerFloor,
+  buildToolSearchView,
+  catalogSectionText,
+  clampDiscovered,
+  discoveredFromMessages,
+  filterManagedTools,
+  guardDecision,
+  installToolSearchRuntime,
+  maskGuidanceSection,
+  maskInstructionSections,
+  parseDiscoveredMeta,
+  partitionSchemas,
+  resolveRuntimeConfig,
+  uniqueOwner,
+  viewRevision,
+} from '../lib/tool-search-runtime.js'
+
+// ── 纯决策函数 ──
+
+test('uniqueOwner: 唯一前缀才算归属', () => {
+  assert.equal(uniqueOwner('mcp__jshook__browser_launch', new Set(['jshook', 'firecrawl'])), 'jshook')
+  assert.equal(uniqueOwner('Read', new Set(['jshook'])), null)
+  // serverName 含 __ 时的歧义：mcp__a__b__x 同时像 a 与 a__b 的工具——不断言归属（稳定侧）。
+  assert.equal(uniqueOwner('mcp__a__b__x', new Set(['a', 'a__b'])), null)
+})
+
+test('partitionSchemas: 只管理列入 defer 的服务器，搜索工具自身永稳定', () => {
+  const sets = { toolName: 'tool_search', serverNames: new Set(['jshook', 'firecrawl']), deferServers: new Set(['jshook']) }
+  const { managed, stable, ownerOf } = partitionSchemas([
+    { name: 'mcp__jshook__browser_launch', description: 'launch', parameters: null },
+    { name: 'mcp__firecrawl__scrape', description: 'scrape', parameters: null },
+    { name: 'tool_search', description: 'search', parameters: null },
+    { name: 'Read', description: 'read', parameters: null },
+    { name: 'mcp__a__b__x', description: 'ambiguous', parameters: null },
+  ], sets)
+  assert.deepEqual([...managed.keys()], ['mcp__jshook__browser_launch'])
+  assert.ok(stable.has('mcp__firecrawl__scrape'))
+  assert.ok(stable.has('tool_search'))
+  assert.ok(stable.has('Read'))
+  assert.ok(stable.has('mcp__a__b__x'), '归属歧义的工具落稳定侧，不延迟')
+  // ownerOf 让 per-server 计数不必再跑一遍 uniqueOwner。
+  assert.equal(ownerOf.get('mcp__jshook__browser_launch'), 'jshook')
+  assert.equal(ownerOf.get('Read'), undefined)
+})
+
+test('applyServerFloor: 工具数不超过下限的服务器整体不延迟', () => {
+  // Anthropic 原话 "<10 tools less beneficial"：小工具集每轮必搜一次，纯赔。
+  const names = (server, n) => Array.from({ length: n }, (_, i) => `mcp__${server}__t${i}`)
+  const ownerOf = new Map()
+  const managed = new Map()
+  for (const name of [...names('small', 10), ...names('big', 11)]) {
+    managed.set(name, { name, description: 'd', parameters: null })
+    ownerOf.set(name, name.startsWith('mcp__small__') ? 'small' : 'big')
+  }
+  const kept = applyServerFloor(managed, ownerOf, 10)
+  assert.equal(kept.managed.size, 11, '只有超过下限的服务器被延迟')
+  assert.deepEqual([...kept.droppedServers], ['small'])
+  assert.ok(!kept.managed.has('mcp__small__t0'))
+  assert.ok(kept.managed.has('mcp__big__t10'))
+})
+
+test('filterManagedTools: 只摘被管理未发现的，外来工具原样保留', () => {
+  const tools = [
+    { name: 'Read' },
+    { name: 'mcp__a__x' },
+    { name: 'mcp__a__y' },
+    { name: 'mcp__other__z' },
+    { name: 'tool_search' },
+  ]
+  const managed = new Set(['mcp__a__x', 'mcp__a__y'])
+  const discovered = new Set(['mcp__a__x'])
+  assert.deepEqual(filterManagedTools(tools, managed, discovered).map((tool) => tool.name), ['Read', 'mcp__a__x', 'mcp__other__z', 'tool_search'])
+  // 未知来源的工具（不在注册表视图里）绝不被误删——这是黑名单而非白名单的原因。
+  assert.deepEqual(filterManagedTools([{ name: 'plugin_x__custom' }], managed, discovered).map((tool) => tool.name), ['plugin_x__custom'])
+})
+
+test('guardDecision: 只管未发现的被管理工具', () => {
+  const config = resolveRuntimeConfig({ deferServers: ['a'], serverNames: ['a'] })
+  const state = { managed: new Set(['mcp__a__x']), discovered: new Set() }
+  assert.equal(guardDecision('mcp__a__x', state, config).includes('is deferred'), true)
+  assert.equal(guardDecision('mcp__a__x', { managed: state.managed, discovered: new Set(['mcp__a__x']) }, state, config), undefined)
+  assert.equal(guardDecision('Read', state, config), undefined)
+  assert.equal(guardDecision('tool_search', state, config), undefined)
+  const off = resolveRuntimeConfig({ requireDiscovery: false, deferServers: ['a'], serverNames: ['a'] })
+  assert.equal(guardDecision('mcp__a__x', state, off), undefined)
+})
+
+test('clampDiscovered: 最旧先淘汰，新发现存活', () => {
+  const discovered = new Set(['a', 'b', 'c'])
+  clampDiscovered(discovered, 2)
+  assert.deepEqual([...discovered], ['b', 'c'])
+  clampDiscovered(discovered, 5)
+  assert.deepEqual([...discovered], ['b', 'c'])
+})
+
+test('parseDiscoveredMeta: 协议不符不认，累积列表与 matches 兜底', () => {
+  assert.deepEqual(parseDiscoveredMeta({ protocol: 'dsh-tool-search/v1', allDiscoveredTools: ['x', 'y'] }), ['x', 'y'])
+  assert.deepEqual(parseDiscoveredMeta({ protocol: 'dsh-tool-search/v1', discoveredTools: ['z'] }), ['z'])
+  assert.deepEqual(parseDiscoveredMeta({ protocol: 'dsh-tool-search/v1', matches: [{ name: 'm' }, { name: 'bad', found: false }] }), ['m'])
+  assert.deepEqual(parseDiscoveredMeta({ protocol: 'dsh-tool-search/v1' }), [])
+  assert.equal(parseDiscoveredMeta({ protocol: 'someone-else/v1', allDiscoveredTools: ['x'] }), undefined)
+  assert.equal(parseDiscoveredMeta(null), undefined)
+  assert.equal(parseDiscoveredMeta('text'), undefined)
+})
+
+test('discoveredFromMessages: 从派生消息还原发现集，非本工具/错误结果不认', () => {
+  const toolMsg = (id, value, isError = false) => ({
+    role: 'tool',
+    toolCallId: id,
+    isError,
+    source: { kind: 'tool', callId: id },
+    content: [{ type: 'text', text: JSON.stringify(value) }],
+  })
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    toolMsg('c1', { protocol: 'dsh-tool-search/v1', discoveredTools: ['mcp__a__x', 'mcp__a__y'] }),
+    toolMsg('c2', { protocol: 'dsh-tool-search/v1', discoveredTools: ['mcp__a__nope'] }, true),
+    toolMsg('c3', { protocol: 'someone-else/v1', discoveredTools: ['mcp__a__ghost'] }),
+    toolMsg('c4', 'not json at all'),
+    toolMsg('c5', { protocol: 'dsh-tool-search/v1', matches: [{ name: 'mcp__a__m' }, { name: 'mcp__a__bad', found: false }] }),
+    { role: 'assistant', content: [] },
+  ]
+  const discovered = discoveredFromMessages(messages)
+  assert.deepEqual([...discovered].sort(), ['mcp__a__m', 'mcp__a__x', 'mcp__a__y'])
+})
+
+test('viewRevision: 内容不变 revision 不变，内容或配置变则变', () => {
+  const config = resolveRuntimeConfig({ deferServers: ['jshook'], serverNames: ['jshook'] })
+  const schemas = [{ name: 'mcp__jshook__a', description: 'a', parameters: { type: 'object' } }]
+  const again = [{ name: 'mcp__jshook__a', description: 'a', parameters: { type: 'object' } }]
+  const edited = [{ name: 'mcp__jshook__a', description: 'a2', parameters: { type: 'object' } }]
+  assert.equal(viewRevision(schemas, config), viewRevision(again, config), '等价输入必须同 revision')
+  assert.notEqual(viewRevision(schemas, config), viewRevision(edited, config), '描述变了必须换 revision')
+  const otherConfig = resolveRuntimeConfig({ deferServers: ['jshook', 'firecrawl'], serverNames: ['jshook', 'firecrawl'] })
+  assert.notEqual(viewRevision(schemas, config), viewRevision(schemas, otherConfig), 'defer 集变了必须换 revision')
+})
+
+test('buildToolSearchView: 纯函数，聚合阈值与 per-server 下限都生效', () => {
+  const many = Array.from({ length: 16 }, (_, i) => ({ name: `mcp__jshook__t${i}`, description: 'd', parameters: null }))
+  const config = resolveRuntimeConfig({ deferServers: ['jshook'], serverNames: ['jshook'] })
+  const view = buildToolSearchView(many, config)
+  assert.equal(view.deferring, true)
+  assert.equal(view.managed.size, 16)
+  assert.deepEqual([...activeMaskedServers(view, new Set())], ['mcp:jshook'], '被延迟的服务器指令段要一并遮掉')
+
+  // 聚合阈值未达：整体惰性。
+  const few = many.slice(0, 14)
+  assert.equal(buildToolSearchView(few, config).deferring, false)
+
+  // 聚合阈值已过，但其中一个服务器太小：per-server 下限只摘掉它，大服务器照常延迟。
+  // （官方 "<10 tools less beneficial"：小工具集每轮必付一次搜索往返，纯赔。）
+  const mixed = [
+    ...many,
+    ...Array.from({ length: 8 }, (_, i) => ({ name: `mcp__tiny__t${i}`, description: 'd', parameters: null })),
+  ]
+  const mixedView = buildToolSearchView(mixed, resolveRuntimeConfig({ deferServers: ['jshook', 'tiny'], serverNames: ['jshook', 'tiny'] }))
+  assert.equal(mixedView.deferring, true, '聚合 24 ≥ 15，机制照常启用')
+  assert.equal(mixedView.managed.size, 16, '≤ minServerTools 的 tiny 整体不参与延迟')
+  assert.deepEqual([...activeMaskedServers(mixedView, new Set())], ['mcp:jshook'], '不延迟就不遮 tiny 的指令段')
+})
+
+test('activeMaskedServers: 全部发现后指令段恢复', () => {
+  const schemas = Array.from({ length: 16 }, (_, i) => ({ name: `mcp__jshook__t${i}`, description: 'd', parameters: null }))
+  const view = buildToolSearchView(schemas, resolveRuntimeConfig({ deferServers: ['jshook'], serverNames: ['jshook'] }))
+  const all = new Set(view.managed.keys())
+  assert.deepEqual([...activeMaskedServers(view, all)], [], '服务器工具全部被发现后，它的指令段不再占上下文')
+})
+
+test('catalogSectionText: 按 code-unit 名序、截断、体积上限带"另有 N 个"', () => {
+  const config = resolveRuntimeConfig({ descriptionChars: 10, maxCatalogLines: 3 })
+  const catalog = new Map(
+    ['b', 'a', 'C', 'd', 'e'].map((k) => [`mcp__${k}__x`, { name: `mcp__${k}__x`, description: 'a very long description here' }]),
+  )
+  const { text, truncated } = catalogSectionText(catalog, config)
+  const lines = text.split('\n')
+  assert.equal(lines[0], '## Deferred tool catalog')
+  assert.equal(truncated, 2)
+  const toolLines = lines.filter((line) => line.startsWith('- '))
+  assert.deepEqual(toolLines, ['- mcp__C__x — a very lo…', '- mcp__a__x — a very lo…', '- mcp__b__x — a very lo…'], '超出上限的名字被截掉')
+  assert.ok(text.includes('2 more deferred tools are not listed here'), '截断必须提示还有多少，模型才知道要改用关键词查询')
+  // code-unit 序：大写 C 在小写字母之前。
+  assert.ok(lines.indexOf('- mcp__C__x — a very lo…') < lines.indexOf('- mcp__a__x — a very lo…'))
+})
+
+test('maskInstructionSections: 只清空被延迟服务器的指令段，且不改原对象', () => {
+  const sections = [
+    { name: 'harness:identity', text: 'identity' },
+    { name: 'mcp:jshook', text: 'JSHOOK INSTRUCTIONS' },
+    { name: 'mcp:firecrawl', text: 'FIRECRAWL INSTRUCTIONS' },
+    { name: 'tool-search:catalog', text: 'CATALOG' },
+  ]
+  const masked = maskInstructionSections(sections, new Set(['mcp:jshook']))
+  assert.equal(masked[0], sections[0], '无关段原对象复用')
+  assert.equal(masked[1].text, '', '被延迟服务器的指令段清空')
+  assert.notEqual(masked[1], sections[1], '必须是新对象——assembly 的段对象可能被别处共享')
+  assert.equal(sections[1].text, 'JSHOOK INSTRUCTIONS', '原对象绝不被 mutate')
+  assert.equal(masked[2].text, 'FIRECRAWL INSTRUCTIONS')
+  assert.equal(masked[3].text, 'CATALOG')
+})
+
+test('maskGuidanceSection: 只清空引导段，段里没有它时原样返回', () => {
+  // "没事情可做就不碰 assembly"这条惯例的可测形式：没有引导段时必须返回**同一个**
+  // 数组，调用方才谈得上零干预（低于阈值的组装本来就不该被本功能改一个字节）。
+  const sections = [
+    { name: 'harness:identity', text: 'identity' },
+    { name: 'tool-search:guidance', text: 'Some tools are deferred…' },
+    { name: 'tool-search:catalog', text: 'CATALOG' },
+  ]
+  const masked = maskGuidanceSection(sections)
+  assert.equal(masked[0], sections[0], '无关段原对象复用')
+  assert.equal(masked[1].text, '', '引导段清空')
+  assert.notEqual(masked[1], sections[1], '必须是新对象——段对象可能被别处共享')
+  assert.equal(sections[1].text, 'Some tools are deferred…', '原对象绝不被 mutate')
+  assert.equal(masked[2], sections[2], '目录段不受影响')
+
+  const without = [{ name: 'harness:identity', text: 'identity' }]
+  assert.equal(maskGuidanceSection(without), without, '没有引导段时原样返回（零干预）')
+  const empty = []
+  assert.equal(maskGuidanceSection(empty), empty, '空列表同理')
+})
+
+test('resolveRuntimeConfig: 缺省、maxDiscovered 下限抬到 maxResults、非法值抛错', () => {
+  const config = resolveRuntimeConfig()
+  assert.equal(config.toolName, DEFAULTS.toolName)
+  assert.equal(config.threshold, DEFAULTS.threshold)
+  assert.equal(config.minServerTools, DEFAULTS.minServerTools)
+  assert.equal(config.maxCatalogLines, DEFAULTS.maxCatalogLines)
+  // 这两个也对齐 DEFAULTS 而不是复述字面量：字面量一改就红，却证明不了"缺省取自 DEFAULTS"
+  // 这件本用例唯一想守的事（同 L207-210 的模式）。
+  assert.equal(config.maxResults, DEFAULTS.maxResults)
+  assert.equal(config.maxDiscovered, DEFAULTS.maxDiscovered)
+  assert.equal(resolveRuntimeConfig({ maxResults: 5, maxDiscovered: 2 }).maxDiscovered, 5)
+  assert.throws(() => resolveRuntimeConfig({ threshold: 0 }), /threshold/)
+  assert.throws(() => resolveRuntimeConfig({ maxResults: 1.5 }), /maxResults/)
+  assert.throws(() => resolveRuntimeConfig({ minServerTools: 0 }), /minServerTools/)
+})
+
+// ── 装配集成（高保真夹具：契约如实，ctx 与 agent 分离）──
+
+function createFixture({ schemas = [], events = [], messages = [], config = {}, throwOnSchemas = false } = {}) {
+  const handlers = new Map()
+  const guards = []
+  const sections = []
+  const registered = new Map()
+  let currentSchemas = schemas
+  let schemasCalls = 0
+
+  const agent = {
+    session: {
+      snapshotEvents: () => events,
+      deriveMessages: () => messages,
+    },
+    ctx: {
+      tools: {
+        schemas: () => {
+          schemasCalls++
+          if (throwOnSchemas) throw new Error('宿主工具视图不可用')
+          return currentSchemas
+        },
+        register: (definition) => {
+          registered.set(definition.name, definition)
+          return () => registered.delete(definition.name)
+        },
+        guard: (fn) => {
+          guards.push(fn)
+          return () => {
+            const index = guards.indexOf(fn)
+            if (index >= 0) guards.splice(index, 1)
+          }
+        },
+      },
+    },
+  }
+  const ctx = {
+    // 服务访问走 ctx.get（cordis 对未注入服务的属性访问直接抛错；生产里 system-prompt
+    // 恒在，但取用方式必须安全）。shape 同 skillsHost 夹具。
+    get: (name) => (name === 'systemPrompt' ? ctx.systemPrompt : undefined),
+    on: (name, handler) => {
+      handlers.set(name, handler)
+      return () => handlers.delete(name)
+    },
+    tools: {
+      schemas: () => currentSchemas,
+      register: (definition) => {
+        registered.set(definition.name, definition)
+        return () => registered.delete(definition.name)
+      },
+      guard: (fn) => {
+        guards.push(fn)
+        return () => guards.splice(guards.indexOf(fn), 1)
+      },
+    },
+    systemPrompt: {
+      section: (section) => {
+        sections.push(section)
+        return () => sections.splice(sections.indexOf(section), 1)
+      },
+    },
+    logger: { warn: () => {}, error: () => {} },
+  }
+  return {
+    ctx, agent, handlers, guards, sections, registered,
+    setSchemas: (next) => { currentSchemas = next },
+    schemasCalls: () => schemasCalls,
+    cleanup: installToolSearchRuntime(ctx, config),
+  }
+}
+
+const BIG_SCHEMAS = Array.from({ length: 20 }, (_, index) => ({
+  name: `mcp__jshook__tool_${index}`,
+  description: `tool number ${index} for browser work`,
+  parameters: { type: 'object', properties: { arg: { type: 'string' } } },
+}))
+
+const DEFER_CONFIG = { deferServers: ['jshook'], serverNames: ['jshook'] }
+
+const assemble = (fixture, assembly, agent = fixture.agent) =>
+  fixture.handlers.get('system-prompt/assemble')(assembly, { agent }, async () => assembly)
+
+test('install: 注册搜索工具、守卫、引导 section，且只订阅 assemble', () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  assert.ok(fixture.registered.has('tool_search'))
+  assert.equal(fixture.guards.length, 1)
+  assert.ok(fixture.sections.some((section) => section.name === 'tool-search:guidance'))
+  // agent/created、tools/change、agent/disposed 三个订阅都已移除：视图按 revision 自愈，
+  // 预热与脏标记都是冗余门。留着就是"要人记得置"的失配源。
+  assert.deepEqual([...fixture.handlers.keys()], ['system-prompt/assemble'])
+  fixture.cleanup()
+  assert.equal(fixture.registered.size, 0)
+  assert.equal(fixture.guards.length, 0)
+  assert.equal(fixture.handlers.size, 0)
+})
+
+test('assembly 过滤：被管理工具移出，目录 section 追加且不插值，已发现工具保留', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const assembly = {
+    tools: [{ name: 'Read' }, ...BIG_SCHEMAS.map((schema) => ({ name: schema.name })), { name: 'tool_search' }],
+    sections: [{ name: 'persona', text: 'x' }],
+  }
+  const result = await assemble(fixture, assembly)
+  const names = result.tools.map((tool) => tool.name)
+  assert.deepEqual(names, ['Read', 'tool_search'])
+  const catalog = result.sections.find((section) => section.name === 'tool-search:catalog')
+  assert.ok(catalog)
+  // 目录正文嵌第三方 MCP 描述：必须 interpolate:false，否则描述里一个 {{var}} 就让
+  // 每步 renderPrompt 抛错（宿主给 mcp:<server> 指令段设的就是这个）。
+  assert.equal(catalog.interpolate, false)
+  assert.equal(result.sections[0].name, 'persona', '原有 section 保持在前')
+
+  // 搜索命中后，同一 agent 的下次组装放行该工具。
+  await fixture.registered.get('tool_search').execute({ query: 'tool number 3' }, { agent: fixture.agent })
+  const after = await assemble(fixture, assembly)
+  assert.ok(after.tools.some((tool) => tool.name === 'mcp__jshook__tool_3'))
+  fixture.cleanup()
+})
+
+test('assembly 过滤：每次组装只读一次工具视图，且清空被延迟服务器的指令段', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const assembly = {
+    tools: [{ name: 'Read' }, ...BIG_SCHEMAS.map((schema) => ({ name: schema.name }))],
+    sections: [{ name: 'mcp:jshook', text: 'JSHOOK INSTRUCTIONS (up to 32KB)' }, { name: 'mcp:other', text: 'OTHER' }],
+  }
+  const result = await assemble(fixture, assembly)
+  assert.equal(fixture.schemasCalls(), 1, '一次组装只向宿主读一次视图（revision 也靠它算）')
+  assert.equal(result.sections.find((s) => s.name === 'mcp:jshook').text, '')
+  assert.equal(result.sections.find((s) => s.name === 'mcp:other').text, 'OTHER')
+  fixture.cleanup()
+})
+
+test('阈值以下不激活：不遮罩、不加目录，并摘掉引导段', async () => {
+  const fixture = createFixture({
+    schemas: [{ name: 'mcp__jshook__only', description: 'only one', parameters: null }],
+    config: DEFER_CONFIG,
+  })
+  const assembly = {
+    tools: [{ name: 'Read' }, { name: 'mcp__jshook__only' }],
+    sections: [{ name: 'tool-search:guidance', text: 'GUIDANCE' }, { name: 'persona', text: 'x' }],
+  }
+  const result = await assemble(fixture, assembly)
+  // 工具一个都不动：低于阈值时遮罩整套不启用。
+  assert.deepEqual(result.tools.map((tool) => tool.name), ['Read', 'mcp__jshook__only'])
+  assert.equal(result.tools, assembly.tools, '工具列表原样带过来，不过滤')
+  // 目录段不加（它与引导段是同一句话的两半，只能同进同退）。
+  assert.equal(result.sections.some((section) => section.name === 'tool-search:catalog'), false)
+  // 引导段必须摘掉：没有服务器被延迟时，"Some tools are deferred…" 是在教模型
+  // 去找一批并不存在的延迟工具（P2 修的就是这个）。
+  assert.equal(result.sections.find((section) => section.name === 'tool-search:guidance').text, '')
+  assert.equal(result.sections.find((section) => section.name === 'persona').text, 'x', '别人的段不受影响')
+  assert.equal(fixture.guards[0]({ name: 'mcp__jshook__only', agent: fixture.agent }), undefined)
+  fixture.cleanup()
+})
+
+test('引导段跟着活状态显隐：同一进程里翻 defer，不用重装', async () => {
+  // P2 的核心：条件判断必须在**组装层**。section() 是启动时一次性注册，而 defer 是活
+  // 状态（面板开关、服务器晚连都会改）。这里用同一个 fixture、同一个 agent，只翻活配置，
+  // 证明引导段跟着走——注册时判一次的话，这里第二次断言必然还是旧值。
+  let defer = true
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: { deferServers: () => (defer ? ['jshook'] : []), serverNames: ['jshook'] } })
+  try {
+    const assembly = { tools: [], sections: [{ name: 'tool-search:guidance', text: 'GUIDANCE' }] }
+    const on = await assemble(fixture, assembly)
+    assert.equal(on.sections.find((section) => section.name === 'tool-search:guidance').text, 'GUIDANCE', '有东西被延迟时引导段保留')
+    assert.ok(on.sections.some((section) => section.name === 'tool-search:catalog'), '同时追加活库存目录')
+
+    defer = false
+    const off = await assemble(fixture, assembly)
+    assert.equal(off.sections.find((section) => section.name === 'tool-search:guidance').text, '', '一个都不延迟时引导段必须摘掉')
+    assert.equal(off.sections.some((section) => section.name === 'tool-search:catalog'), false, '目录段同步消失')
+
+    defer = true
+    const back = await assemble(fixture, assembly)
+    assert.equal(back.sections.find((section) => section.name === 'tool-search:guidance').text, 'GUIDANCE', '再打开必须回来（不能只摘不补）')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('fail-open：宿主视图抛错时退回全量可见，不炸会话', async () => {
+  // ToolSearch 是优化不是正确性机制。算不出视图就回到 feature 前的行为并记账，
+  // 而不是让 assemble/guard 抛错——那会否决建会话或让 agent loop 每步失败。
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, throwOnSchemas: true })
+  const assembly = {
+    tools: [{ name: 'Read' }, { name: 'mcp__jshook__tool_0' }],
+    sections: [{ name: 'tool-search:guidance', text: 'GUIDANCE' }],
+  }
+  const result = await assemble(fixture, assembly)
+  assert.deepEqual(result.tools.map((tool) => tool.name), ['Read', 'mcp__jshook__tool_0'], '视图不可用时工具一个都不遮')
+  assert.equal(result.sections.some((section) => section.name === 'tool-search:catalog'), false)
+  // fail-open 视图的 deferring 是 false，所以引导段同样摘掉——此时确实没有任何工具被延迟。
+  assert.equal(result.sections.find((section) => section.name === 'tool-search:guidance').text, '')
+  assert.equal(fixture.guards[0]({ name: 'mcp__jshook__tool_0', agent: fixture.agent }), undefined)
+  const value = await fixture.registered.get('tool_search').execute({ query: 'browser' }, { agent: fixture.agent })
+  assert.deepEqual(value.matches, [])
+  assert.ok(value.instruction.includes('No tool matched'))
+  fixture.cleanup()
+})
+
+test('搜索工具：命中即激活，返回完整 schema 与 meta 协议', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const definition = fixture.registered.get('tool_search')
+  const value = await definition.execute({ query: 'select:mcp__jshook__tool_7' }, { agent: fixture.agent })
+  assert.equal(value.protocol, 'dsh-tool-search/v1')
+  assert.equal(value.matches.length, 1)
+  assert.equal(value.matches[0].name, 'mcp__jshook__tool_7')
+  assert.deepEqual(value.matches[0].parameters, { type: 'object', properties: { arg: { type: 'string' } } })
+  assert.deepEqual(value.discoveredTools, ['mcp__jshook__tool_7'])
+  assert.deepEqual(value.allDiscoveredTools, ['mcp__jshook__tool_7'])
+  // meta 带累积列表，render 剥掉（不泄回提示词）。
+  const meta = definition.output.presentationMeta({}, value)
+  assert.deepEqual(meta.allDiscoveredTools, ['mcp__jshook__tool_7'])
+  const rendered = definition.output.render({}, value)
+  assert.equal(JSON.parse(rendered[0].text).allDiscoveredTools, undefined)
+  assert.equal(JSON.parse(rendered[0].text).matches.length, 1)
+  fixture.cleanup()
+})
+
+test('搜索工具：select 不存在时报 found:false 且不激活', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const value = await fixture.registered.get('tool_search').execute({ query: 'select:mcp__jshook__ghost' }, { agent: fixture.agent })
+  assert.equal(value.matches[0].found, false)
+  assert.deepEqual(value.discoveredTools, [])
+  assert.equal(value.discoveredCount, 0)
+  fixture.cleanup()
+})
+
+test('守卫：未发现拒绝并附指引，搜索后放行', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const guard = fixture.guards[0]
+  const denial = guard({ name: 'mcp__jshook__tool_2', agent: fixture.agent })
+  assert.equal(typeof denial, 'string')
+  assert.ok(denial.includes('tool_search'))
+  await fixture.registered.get('tool_search').execute({ query: 'tool number 2' }, { agent: fixture.agent })
+  assert.equal(guard({ name: 'mcp__jshook__tool_2', agent: fixture.agent }), undefined)
+  // 不是本机制管理的工具守卫不置词。
+  assert.equal(guard({ name: 'Read', agent: fixture.agent }), undefined)
+  // 无 agent 的执行不拦截（分类不了就不管）。
+  assert.equal(guard({ name: 'mcp__jshook__tool_2' }), undefined)
+  fixture.cleanup()
+})
+
+test('maxDiscovered 上限：无界发现被最旧淘汰', async () => {
+  const fixture = createFixture({
+    schemas: BIG_SCHEMAS,
+    // maxResults 2 时 maxDiscovered 下限被抬到 2；配 3 得到上限 3。
+    config: { ...DEFER_CONFIG, maxResults: 2, maxDiscovered: 3 },
+  })
+  const tool = fixture.registered.get('tool_search')
+  let value
+  for (let index = 0; index < 5; index++) {
+    value = await tool.execute({ query: `select:mcp__jshook__tool_${index}` }, { agent: fixture.agent })
+  }
+  assert.equal(value.discoveredCount, 3)
+  assert.deepEqual(value.allDiscoveredTools, ['mcp__jshook__tool_2', 'mcp__jshook__tool_3', 'mcp__jshook__tool_4'])
+  fixture.cleanup()
+})
+
+test('晚连服务器：工具后出现，同一次组装里就被滤掉（无窗口）', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  fixture.setSchemas([...BIG_SCHEMAS, { name: 'mcp__jshook__late', description: 'late arrival', parameters: null }])
+  const assembly = { tools: [{ name: 'Read' }, { name: 'mcp__jshook__late' }], sections: [] }
+  const result = await assemble(fixture, assembly)
+  assert.deepEqual(result.tools.map((tool) => tool.name), ['Read'])
+  fixture.cleanup()
+})
+
+test('resume：从会话派生消息恢复发现集，恢复的工具直接可见', async () => {
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'go' }] },
+    {
+      role: 'tool',
+      toolCallId: 'c1',
+      isError: false,
+      source: { kind: 'tool', callId: 'c1' },
+      content: [{ type: 'text', text: JSON.stringify({ protocol: 'dsh-tool-search/v1', discoveredTools: ['mcp__jshook__tool_5'] }) }],
+    },
+  ]
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, messages, config: DEFER_CONFIG })
+  const assembly = { tools: [{ name: 'Read' }, ...BIG_SCHEMAS.map((schema) => ({ name: schema.name }))], sections: [] }
+  const result = await assemble(fixture, assembly)
+  assert.ok(result.tools.some((tool) => tool.name === 'mcp__jshook__tool_5'), 'resume 后恢复的发现应直接可见')
+  fixture.cleanup()
+})
+
+test('agent-less 执行：显式失败，不静默', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  await assert.rejects(
+    fixture.registered.get('tool_search').execute({ query: 'browser' }, {}),
+    /agent-scoped/,
+  )
+  fixture.cleanup()
+})
+
+test('活配置：deferServers 函数形态，开关变化即生效（不重装）', async () => {
+  let deferred = ['jshook']
+  const fixture = createFixture({
+    schemas: BIG_SCHEMAS,
+    config: { deferServers: () => deferred, serverNames: () => ['jshook'] },
+  })
+  const assembly = { tools: [{ name: 'Read' }, { name: 'mcp__jshook__tool_0' }], sections: [] }
+  // 开着：tool_0 被滤掉。
+  const filtered = await assemble(fixture, assembly)
+  assert.deepEqual(filtered.tools.map((tool) => tool.name), ['Read'])
+  // 用户关掉开关：下一次组装读到新配置，零干预（同一个对象）。
+  deferred = []
+  const passthrough = await assemble(fixture, assembly)
+  assert.equal(passthrough, assembly)
+  // 再打开：重新过滤。
+  deferred = ['jshook']
+  const refiltered = await assemble(fixture, assembly)
+  assert.deepEqual(refiltered.tools.map((tool) => tool.name), ['Read'])
+  fixture.cleanup()
+})
+
+test('viewRevision: stem 开关必须进 revision，否则翻转开关视图不重建', () => {
+  // stem 改变的是 documentTokens/nameTokens 的切分结果，直接影响目录与排序。
+  // 若它不进 revision，viewCache 会认为"没变化"而继续用旧视图——开关翻转静默失效。
+  const schemas = [{ name: 'mcp__jshook__tool_0', description: 'a tool', parameters: null }]
+  const base = resolveRuntimeConfig({ deferServers: ['jshook'], serverNames: ['jshook'] })
+  const on = { ...base, stem: true }
+  const off = { ...base, stem: false }
+  assert.notEqual(viewRevision(schemas, on), viewRevision(schemas, off), 'stem 不同 → revision 必须不同')
+  assert.equal(viewRevision(schemas, on), viewRevision(schemas, { ...base, stem: true }), '同开关 → revision 仍须相同（缓存有效）')
+})
+
+test('resolveRuntimeConfig: stem 缺省开、显式 false 能关掉', () => {
+  assert.equal(resolveRuntimeConfig().stem, true, '缺省开：两个真实工具集实测零误伤')
+  assert.equal(resolveRuntimeConfig({ stem: false }).stem, false, '显式 false 必须能关（Harman 1991 证明某些语料无收益）')
+  assert.equal(resolveRuntimeConfig({ stem: true }).stem, true)
+})
+
+test('视图按 revision 缓存：配置与工具都不变时不重建，描述变了才重建', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const assembly = { tools: [{ name: 'Read' }, { name: 'mcp__jshook__tool_0' }], sections: [] }
+  const first = await assemble(fixture, assembly)
+  const second = await assemble(fixture, assembly)
+  assert.equal(first.sections.at(-1).text, second.sections.at(-1).text, '库存不变则目录字节稳定')
+  // 描述变了（同名、内容不同）→ revision 变 → 目录跟着变。
+  fixture.setSchemas(BIG_SCHEMAS.map((s) => (s.name === 'mcp__jshook__tool_0' ? { ...s, description: 'EDITED' } : s)))
+  const third = await assemble(fixture, assembly)
+  assert.ok(third.sections.at(-1).text.includes('EDITED'), '内容变化必须被 revision 捕捉')
+  fixture.cleanup()
+})

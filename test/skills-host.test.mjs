@@ -47,7 +47,9 @@ test('MCP panel still activates on a real cordis Context when skills is absent',
         inner.provide('loader', {
           entries: () => [{ options: { id: 'include', name: 'cordis:include', config: { path: pathToFileURL(patch).href } } }],
         })
-        inner.provide('tools', { schemas: () => [] })
+        // 工具服务的最小可用 mock：schemas 供 toolInventory/workspace 用，register/guard 供
+        // ToolSearch 装配用（真实宿主恒提供三者——dsh-tools 服务契约）。
+        inner.provide('tools', { schemas: () => [], register: () => () => {}, guard: () => () => {} })
       },
     })
     // 刻意**不**提供 skills：模拟用户禁用了内置插件 dsh-skill。
@@ -85,7 +87,7 @@ test('mounting the plugin exposes the skills service without a second patch entr
         inner.provide('loader', {
           entries: () => [{ options: { id: 'include', name: 'cordis:include', config: { path: pathToFileURL(patch).href } } }],
         })
-        inner.provide('tools', { schemas: () => [] })
+        inner.provide('tools', { schemas: () => [], register: () => () => {}, guard: () => () => {} })
         inner.provide('skills', {
           async list() { return [] },
           async get() { return undefined },

@@ -13,13 +13,42 @@ async function createProfileFixture(content, extraEntries = []) {
   await writeFile(rootConfig, '[]\n')
   await writeFile(patchPath, content)
   const entries = [{ options: { id: 'include', name: 'cordis:include', config: { path: pathToFileURL(rootConfig).href } } }, ...extraEntries]
+  // 真 loader 的 Entry 一定有 update()——setDisabled 与 update(spec) 改连接字段时在生产里就走它。
+  // 桩上补一个最小实现（merge options，即 loader 的 replaceKeys 语义），否则这两条 RPC 路径
+  // 在桩上会以 "entry.update is not a function" 炸掉，而那不是产品缺陷、是夹具不忠实。
+  // entry.parent.remove(id) 同理：它是 loader 里"停掉并移除一个条目"的原语，removeServer 走它
+  // （不走 ctx.loader.remove——那条对 include 子树条目是静默 no-op，见 lib/index.js 的注释）。
+  const group = {
+    remove: async (id) => {
+      const index = entries.findIndex((entry) => entry.options.id === id)
+      if (index >= 0) entries.splice(index, 1)
+    },
+  }
+  for (const entry of entries) {
+    entry.parent = group
+    if (typeof entry.update !== 'function') {
+      entry.update = async (options) => { Object.assign(entry.options, options ?? {}) }
+    }
+  }
   return {
     root,
     rootConfig,
     patchPath,
     entries,
     ctx: {
-      loader: { entries: () => entries },
+      // create/remove 同样必须补：add / removeServer / installBuiltins 靠它们在**运行中的
+      // 进程**里增删 loader 条目（只写盘的那半是旧行为，已由 test/real-host-loader.test.mjs
+      // 的真 loader 夹具覆盖连接效果）。桩上做同一份 entries 数组上的增删——稳定引用、
+      // 可观测，与 entries() 是同一个真相源。
+      loader: {
+        entries: () => entries,
+        create: async (options) => {
+          const entry = { options: { ...options }, parent: group, update: async (next) => { Object.assign(entry.options, next ?? {}) } }
+          entries.push(entry)
+          return options.id
+        },
+        remove: async (id) => group.remove(id),
+      },
       tools: { schemas: () => [] },
       get: () => undefined,
     },

@@ -177,6 +177,67 @@ test('every label a table can produce is covered by the dictionary', () => {
   assert.deepEqual(uncovered, [], '表里的这些文案没有英文，英文界面下会显示中文')
 })
 
+/**
+ * 渲染路径上**直接** `t('中文')` 的那些键。
+ *
+ * 为什么单独扫一遍：上面的 parity 只覆盖表驱动标签，而 ToolSearch 那批最显眼的文案
+ * （主按钮「全部延迟」/「取消全部延迟」、详情行、开启前预告）全是调用点上的字面量——
+ * 审查轮实测英文界面下主按钮显示中文，而当时 712 个用例全绿。表驱动与调用点两条路都要 parity。
+ *
+ * 注释行整体剔除：注释里提到 `t('全部延迟')` 是行文，不是调用点（本仓库注释极多，
+ * 不剔的话一堆散文会被当成键）。
+ *
+ * 键要做一次转义还原：扫到的是**源码字面量**（`C:\\path`），而 EN_DICT 是求过值的对象
+ * （`C:\path`）。这些文案里只出现 `\\` 一种转义，所以一条 replace 就够。
+ */
+function calledTranslationKeys() {
+  const code = clientSource.split('\n').map((line) => line.replace(/^\s*\/\/.*$/, '')).join('\n')
+  return new Set([...code.matchAll(/\bt\(\s*'([^']*)'\s*[,)]/g)].map((match) => match[1].replace(/\\\\/g, '\\')))
+}
+
+test('every t() call-site key has an English entry, and the dictionary has no dead keys', () => {
+  const i18n = loadI18n()
+  const intentional = new Set(['.dsh/skills', '.agents/skills', 'MCP'])
+  const tabled = [
+    ...Object.values(i18n.SCOPE_LABELS),
+    ...Object.values(i18n.SCOPE_LABEL_DETAILS),
+    ...Object.values(i18n.SORT_LABELS),
+    ...Object.values(i18n.ENTRY_LABELS),
+    ...i18n.ABILITY_TABS.map((tab) => tab.label),
+    ...i18n.SKILL_MODES.map((mode) => mode.label),
+    ...i18n.MCP_PRESETS.map((preset) => preset.label),
+  ]
+  const reachable = new Set([
+    ...calledTranslationKeys(),
+    ...tabled,
+    // 经命名常量到达的键：哨兵是**数据**（五处 `===` 判据靠它），显示时才 t(PRESERVED_VALUE_LABEL)。
+    // 源码扫描看不见 `t(常量)`，所以这里显式补上。
+    i18n.PRESERVED_VALUE_LABEL,
+  ])
+
+  const uncovered = [...reachable].filter(
+    (key) => !Object.prototype.hasOwnProperty.call(i18n.EN_DICT, key) && !intentional.has(key),
+  )
+  assert.deepEqual(uncovered, [], '这些在用文案没有英文，英文界面下会漏出中文')
+
+  // 键存在还不够：还得真的译得动。判据用 `t(key) !== key`（不重抄译文——
+  //  那会把测试变成实现的复读机）。路径片段与专有名词刻意恒等，已在 intentional 里。
+  i18n.setLocaleActiveForTest('en')
+  try {
+    const untranslated = [...reachable].filter(
+      (key) => !intentional.has(key) && Object.prototype.hasOwnProperty.call(i18n.EN_DICT, key) && i18n.t(key) === key,
+    )
+    assert.deepEqual(untranslated, [], '这些词条在英文界面下译不出东西（译文与中文原文相同）')
+  } finally {
+    i18n.setLocaleActiveForTest(null)
+  }
+
+  // 反方向同样要守：词典里没有调用点的词条是死词条。它们不会让任何测试变红，
+  // 只会在下次"照着旧词条改文案"时把人引向一个已经不存在的字符串。
+  const dead = Object.keys(i18n.EN_DICT).filter((key) => !reachable.has(key))
+  assert.deepEqual(dead, [], '词典里这些词条没有任何调用点，是死词条')
+})
+
 test('preset templates store source text and translate only at the render site', () => {
   // 预设模板表（MCP_PRESETS）与页签表是同一类缺陷形态，别分开修：
   // 表里写 `label: t('Filesystem · 本地文件读写')` 时，t() 在 bundle 加载那一刻求值，

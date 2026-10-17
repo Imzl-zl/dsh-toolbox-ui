@@ -188,6 +188,65 @@ test('rejects transports and fields DSH cannot represent', () => {
   )
 })
 
+test('entrySpec 必须读回 defer：盘上的延迟开关不能在被管理的行上丢失', () => {
+  // 这个 bug 是真浏览器测试抓到的：patch 里写着 defer:true，面板详情行却显示
+  // 「关闭（工具全量常驻上下文）」，「全部开启延迟」按钮也判定为未开启。
+  // 根因是 entrySpec 只读 MANAGED_CONFIG_FIELDS 那一组，漏了 PLUGIN_OWN_CONFIG_FIELDS，
+  // 于是 summarize() 的 `raw = managed || live` 落在没有 defer 的 managed 上。
+  // 只读侧漏字段、写侧一直在用，所以功能碰巧对、只有状态显示是反的——最难发现的一类。
+  const patch = `- insert:\n    - id: mcp-serena\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        transport: stdio\n        serverName: serena\n        command: serena\n        args: [ 'start-mcp-server' ]\n        defer: true\n`
+  const parsed = readManagedMcpServers(patch)
+  assert.equal(parsed.servers.length, 1)
+  assert.equal(parsed.servers[0].defer, true, 'defer:true 必须被读回（否则面板显示与真实状态相反）')
+
+  // defer:false 也要读回：省略与显式 false 是不同状态，不能都变成 undefined。
+  const explicitFalse = patch.replace('defer: true', 'defer: false')
+  assert.equal(readManagedMcpServers(explicitFalse).servers[0].defer, false, 'defer:false 同样要读回')
+
+  // 没写 defer 的条目仍应是 undefined（缺省语义由配置桥决定，不能凭空造个 false）。
+  const absent = patch.replace('        defer: true\n', '')
+  assert.equal(readManagedMcpServers(absent).servers[0].defer, undefined, '没写 defer 时不得凭空造值')
+})
+
+test('managed 字段清单 round-trip：每个 MANAGED 字段写进 patch 再读回必须相等', () => {
+  // F2 治的是"读写两份清单漂移"。曾经的形状是**一份常量 + 四处手抄**，漂移实验证明：
+  // 往常量里加一个 futureField，712 个用例全绿，而 round-trip 实测"写出 v1、读回
+  // undefined"——静默丢失、零测试覆盖。这条表驱动用例就是那道闸：它遍历常量本身，
+  // 于是任何人往清单里加字段而忘了读侧（或写侧），这里立刻红。
+  const input = {
+    mcpServers: {
+      stdioOne: {
+        command: 'node',
+        args: ['server.js', '--flag'],
+        env: { TOKEN: '${TOKEN}' },
+        cwd: '/tmp/server',
+        toolCallTimeoutMs: 120000,
+        failOnStartupError: true,
+        reconnect: { enabled: false, initialDelayMs: 1000, maxDelayMs: 4000, maxAttempts: 3 },
+        defer: true,
+      },
+      httpOne: {
+        url: 'https://example.test/mcp',
+        headers: { Authorization: 'Bearer ${TOKEN}' },
+        toolCallTimeoutMs: 30000,
+        defer: false,
+      },
+    },
+  }
+  // 期望值全部取自生产路径（normalizeMcpImport 的真实产出），不在测试里重抄常量。
+  const specs = normalizeMcpImport(input).servers
+  const written = updateManagedMcpPatch('[]\n', specs)
+  const readBack = new Map(readManagedMcpServers(written).servers.map((server) => [server.name, server]))
+  assert.deepEqual([...readBack.keys()], ['stdioOne', 'httpOne'])
+
+  for (const spec of specs) {
+    for (const field of [...mcpConfig.MANAGED_CONFIG_FIELDS, ...mcpConfig.PLUGIN_OWN_CONFIG_FIELDS]) {
+      if (spec[field] === undefined) continue
+      assert.deepEqual(readBack.get(spec.name)[field], spec[field], `${spec.name}.${field} 必须 round-trip（读回与写入相等）`)
+    }
+  }
+})
+
 test('preserves unrelated patch entries and JS expressions during managed replacement', () => {
   const original = `# keep this comment\n- insert:\n    - id: other-plugin\n      name: other-plugin\n- insert:\n    - id: mcp-old\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        transport: stdio\n        serverName: old\n        command: node\n        env:\n          TOKEN: !!js process.env.OLD_TOKEN\n`
   const parsed = readManagedMcpServers(original)
@@ -209,6 +268,35 @@ test('preserves unrelated patch entries and JS expressions during managed replac
   assert.match(replaced, /id: other-plugin/)
   assert.doesNotMatch(replaced, /serverName: old/)
   assert.match(replaced, /serverName: new/)
+})
+
+test('batch defer toggle rewrites every managed entry and keeps other fields', () => {
+  // 一键「全部延迟」的服务端底座：一次给多个 specs，每个条目各自的 defer 都要写对，
+  // 且注释、未知字段、非 defer 配置都不能丢（updateEntry 是重建 config 节点的）。
+  const original = `- insert:\n    - id: mcp-one\n      name: '@deepseek-ai/dsh-mcp-client'\n      # keep managed comment\n      futureOption: keep-me\n      config:\n        transport: stdio\n        serverName: one\n        command: node\n        args: ['-e', '']\n        futureConfig: keep-config\n    - id: mcp-two\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        transport: stdio\n        serverName: two\n        command: node\n`
+  const specs = [
+    { name: 'one', transport: 'stdio', command: 'node', args: ['-e', ''], defer: true },
+    { name: 'two', transport: 'stdio', command: 'node', defer: true },
+  ]
+  const on = updateManagedMcpPatch(original, specs)
+  assert.match(on, /id: mcp-one/)
+  assert.match(on, /id: mcp-two/)
+  assert.match(on, /# keep managed comment/)
+  assert.match(on, /futureOption: keep-me/)
+  assert.match(on, /futureConfig: keep-config/)
+  assert.match(on, /command: node/)
+  assert.match(on, /args:\n\s+- -e\n/)
+  // 两个条目都写上 defer: true。
+  assert.equal((on.match(/defer: true/g) || []).length, 2)
+
+  // 反向：全部关掉时不留 true 残影。
+  const off = updateManagedMcpPatch(on, [
+    { name: 'one', transport: 'stdio', command: 'node', args: ['-e', ''], defer: false },
+    { name: 'two', transport: 'stdio', command: 'node', defer: false },
+  ])
+  assert.doesNotMatch(off, /defer: true/)
+  assert.equal((off.match(/defer: false/g) || []).length, 2)
+  assert.match(off, /futureConfig: keep-config/, '关掉时同样不能丢字段')
 })
 
 test('toggles disabled in place without dropping comments or future fields', () => {
@@ -365,4 +453,27 @@ test('a removed builtin is reinstalled only after the user selects it again', ()
 
   assert.deepEqual(second.added, ['firecrawl'])
   assert.equal(readManagedMcpServers(second.content).servers.some((server) => server.name === 'firecrawl'), true)
+})
+
+// ── defer 字段（ToolSearch 延迟加载开关，插件自有，同 idleTimeoutMs 待遇） ──
+
+test('normalizeMcpImport: defer 布尔解析、缺省不落键、不触发未知字段警告', () => {
+  const { servers, warnings } = normalizeMcpImport({
+    mcpServers: {
+      jshook: { command: 'npx jshook', defer: true },
+      firecrawl: { url: 'https://example.com/mcp', defer: false },
+      plain: { command: 'npx plain' },
+    },
+  })
+  assert.equal(servers.find((server) => server.name === 'jshook').defer, true)
+  assert.equal(servers.find((server) => server.name === 'firecrawl').defer, false)
+  assert.equal('defer' in servers.find((server) => server.name === 'plain'), false)
+  assert.equal(warnings.some((warning) => warning.includes('.defer')), false)
+})
+
+test('normalizeMcpImport: defer 非布尔抛错', () => {
+  assert.throws(
+    () => normalizeMcpImport({ mcpServers: { a: { command: 'x', defer: 'yes' } } }),
+    /a\.defer 必须是布尔值/,
+  )
 })

@@ -389,6 +389,40 @@ test('scope labels name the project, not just the scope kind', () => {
   assert.match(option.label, /公众号/, '安装弹窗的作用域候选要带项目名')
 })
 
+test('显示层增强的 RPC 抛错时不得逃逸成 Uncaught (in promise)', async () => {
+  // 真机 console 实测（stack 经 prepareInvocation）：技能面里两个"取不到就用缺省"的
+  // effect 只处理了 `result.ok === false`，RPC **抛错**（宿主没这个 endpoint / 传输失败）
+  // 时那个 async IIFE 直接 reject → `Uncaught (in promise)`。注释承诺的缺省对抛错那条路
+  // 根本不成立。这两个都是纯显示层增强，缺了只影响展示，不该把面板带下去。
+  const internals = loadClientInternals()
+  const unhandled = []
+  const onUnhandled = (reason) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const called = []
+    internals.__effects.length = 0
+    internals.__render(internals.SkillsPanel, {
+      call: async (method) => {
+        called.push(method)
+        if (method === 'skillHubCategories' || method === 'skillTargets') throw new Error(`transport failure for ${method}`)
+        return { ok: true, skills: [], disabled: [] }
+      },
+      workspaces: [],
+      onClose() {},
+      floating: true,
+    })
+    await flushEffects(internals)
+    // rejection 是在 effect 同步返回之后的下一个 tick 冒出来的，所以要多等一个宏任务。
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.ok(called.includes('skillHubCategories'), '用例前提：市场分类的 effect 必须真的跑过')
+    assert.ok(called.includes('skillTargets'), '用例前提：安装目标的 effect 必须真的跑过')
+    assert.deepEqual(unhandled.map((reason) => String(reason?.message ?? reason)), [],
+      '显示层增强的 RPC 抛错必须被显式吞掉（缺省值就是调用方的初始 state）')
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+})
+
 test('the managed list carries scope in group headers, never again in row badges', async () => {
   // ⚠️ 设计约束（从「行内画出」升级而来）：一条作用域标签是「哪一级 × 哪个项目」两维，
   // 压进 139px 的原生 select 或行内 badge 都必然被裁（Windows Chrome 的 option 面板

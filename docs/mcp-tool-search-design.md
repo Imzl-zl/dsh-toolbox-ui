@@ -1,0 +1,331 @@
+# MCP ToolSearch 设计：工具定义的延迟加载
+
+> 状态：已实现并落地（v1）。本文回答「做什么、为什么这么做、边界在哪」。
+> **第二轮起的历次修正（对抗式审查 / 独立审查后）见 §12**——那里记录每条被证据推翻的论据与相应的代码改动。
+> **没做完 / 没验证的事见 `.tasks/mcp-tool-search/OPEN-ITEMS.md`**——skills 三个 RPC 的运行中生效性、
+> 隔离 profile 主题色异常、lightvela 网关拒 `role:"developer"`、夹具 MCP 双 spawn。
+> `add` / `removeServer` / `installBuiltins` 的运行中生效已在第五轮修好（§12.3 #24）、
+> 第六轮用真 Include + 真重启终验（§12.3 #26 与 OPEN-ITEMS 的 O1R）。
+
+## 1. 目标与非目标
+
+**目标**：MCP 服务器的工具定义不再无条件全量注入每个会话的模型上下文，改为默认延迟、按需搜索加载——复刻 Claude Code ToolSearch 机制，**插件层实现，不等 harness 原生支持**。
+
+**非目标（v1 明确不做）**：
+
+- 不改 harness 内核（`@deepseek-ai/*`），只消费其公开 API
+- 不做 embeddings 语义搜索（BM25 足够，见决策 5）
+- 不做跨会话的"已加载"持久化、加载集的 LRU 驱逐
+- 不做 auto 阈值模式（可延迟定义占上下文 10% 才激活，Claude Code 的 `ENABLE_TOOL_SEARCH=auto`）——v1 用 per-server 显式开关，阈值模式留 v1.1
+- 不改模型系统提示词（引导放在工具描述里，见决策 6）
+
+## 2. 问题
+
+两个后果，都有官方数据支撑：
+
+- **上下文税**：工具定义每个请求都在上下文里。Anthropic 博客实测：5 个服务器 58 个工具 ≈ 55K tokens，加 Jira（~17K）逼近 100K+；内部见过 134K。启用 ToolSearch 后 77K → 8.7K（85% 降幅），且不破坏 prompt caching（延迟工具完全不在初始 prompt 中）。
+- **选错率**：一次加载超过 30-50 个工具，工具选择准确性显著下降（Claude Code 文档原话）。启用后 Opus 4 从 49% → 74%，Opus 4.5 从 79.5% → 88.1%。
+
+本仓现状更极端：一个接满 MCP 的会话（jshook 735 + firecrawl/chrome-devtools/serena/exa…）上下文里挂着 300+ 个工具定义，远超选错率恶化区间。DSH 现状是 MCP 工具全量注册、每步全量注入。注意：DSH **有一套原生延迟加载传输层**（见 §3.1），但对 MCP 工具今天不可用——没有生产方。
+
+## 3. 可抄的资产（Claude Code，v2.1.72 逐字原文）
+
+社区逆向镜像（Claude Code 本体未开源，npm 打包产物可读，权威源头是官方博客+文档）：
+
+- 工具描述 bulk 部分（[dsdanielpark/claude-code-system-prompts](https://github.com/dsdanielpark/claude-code-system-prompts) `tool-description-toolsearch-second-part.md`）：
+
+> Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a `<functions>` block. Once a tool's schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.
+>
+> Query forms:
+> - `"select:Read,Edit,Grep"` — fetch these exact tools by name
+> - `"notebook jupyter"` — keyword search, up to max_results best matches
+> - `"+slack send"` — require "slack" in the name, rank by remaining terms
+
+- 引导模式：**两处并存，不是二选一**。① 提示侧索引：系统提示里列出全部延迟工具的名字 + 一行用途（Piebald-AI 镜像 `tool-description-toolsearch-unfetched-tool-note.md`，v2.1.231："Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked"）；② 就近显式提醒：v2.1.221 系统提示 claude-in-chrome 段原话 *"If the `mcp__claude-in-chrome__*` tools are deferred (must be loaded via ToolSearch before use), load every tool you expect to need first."*。**修正（审查后）**：早前此处写"Claude Code 实际也不用总则"是以单处引语概括全局——Agent SDK 官方文档明确推荐总则式引导："You can also add a system prompt section listing available tool categories. This gives the agent context about what kinds of tools are available to search for."（code.claude.com/docs/en/agent-sdk/tool-search → Optimize tool discovery）。我们的实现两者都有（`tool-search:guidance` 静态总则 + `tool-search:catalog` 活库存），与官方建议一致。
+- 官方博客（[advanced tool use](https://www.anthropic.com/engineering/advanced-tool-use)）：开箱提供 regex 与 BM25 两种搜索后端；工具定义 >10K tokens 才值得用；<10 个工具不划算。
+- 官方文档：每次搜索默认返回最多 5 个；加载的工具在后续轮次保持可用，直到压缩后才需重搜。
+
+三个最值钱的设计决策，直接继承：
+
+1. **"未加载 = 不可调用"写进描述**——明确告诉模型延迟工具只有名字、无参数 schema，掐断凭记忆幻觉调用；
+2. **查询语法三形态**（`select:` 精确 / 关键词 top-N / `+server` 限定命名空间）；
+3. **返回结果即完整定义**——模型见到即可用，零学习成本。
+
+**完整闭环是三段式（本轮新取证）**：① 系统提示侧列出全部延迟工具的**名字** + unfetched 注解（“Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked”，Piebald-AI 镜像 `tool-description-toolsearch-unfetched-tool-note.md`，v2.1.231）；② 工具描述本体（查询语法 + 返回格式）；③ **动态 system-reminder**（`system-reminder-deferred-tools-available.md`，v2.1.218）：“The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use ToolSearch with query 'select:<name>[,<name>...]' to load tool schemas before calling them:” + 名字清单。
+
+**我们比 Claude Code 快一步**：Claude Code 即便收到 availability 提醒，也还要再发一次 `select:` 搜索才能调用（它的 schema 加载是二次的）；DSH 的方案是搜索命中即掀罩——完整 schema 在结果文本里、工具同时在原生工具列表里，**下一轮直接调用，无需二次 select**。描述文案必须体现这个差异（不能教模型“再搜一次”）。
+
+**一处被迫偏离**：Claude Code 的模型“知道全部延迟工具的名字”（索引在系统提示里）；DSH 的工具描述静态、无提示通道，活库存改为查询形态获取（决策 9）。
+
+**模型依赖性的处置（范围决策）**：Claude Code 官方只支持 Opus 4 / Sonnet 4 / Haiku 4.5 及以上，社区确认其在 Kimi 等模型上直接拒绝开启。DSH 模型无关，但**不做模型门控**——机制保证完善与优雅，模型配合度问题由用户用全局开关自行处置（`DSH_MCP_TOOL_SEARCH=off` / per-server `defer: false`）。内部实测仍要做，但目的从"决定是否默认开"变为"验证机制在真实模型阵容上可运行"。
+
+## 3.1 原生传输层核对（复核修正：早期"内核零延迟加载"的结论是错的）
+
+DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四包协作）：
+
+| 层 | 包 | 机制 |
+|---|---|---|
+| 定义 | `dsh-tools` | `defineTool({ deferLoading: true })`；schema 投影带 `deferLoading` 字段 |
+| 组装 | `dsh-system-prompt` | toolProvider 的 schema 原样透传进 `assembly.tools` |
+| 记录 | `dsh-session` | `request/header` 记工具全集；`developer/message` 带 `tool-addition` / `tool-removal` 块（引用 header 里的完整定义，`deferLoading` 必须为 true） |
+| 折叠投影 | `dsh-llm` | `projectToolUpdates`：按历史位置重建 provider 声明——"显式延迟的基线工具首次 addition 后才可用" |
+| 自动记账 | `dsh-agent-loop` | 工具集相对基线变化时**自动**追加 `developer/message`（source: `tool-registry`，`index.js:1233` 附近） |
+
+**为什么 v1 不用它（三个原因）**：
+
+1. **没有生产方**：全库确认（PowerShell 全量复核）没有任何包注册 `deferLoading: true` 的工具；MCP 工具由 `dsh-mcp-client` 注册，它**不支持**这个标记（只有第一方 `defineTool` 能设）。
+2. **tool-addition 引用必须在 header 里**：被遮罩的 MCP 工具不在 `request/header` 中，就没有可引用的定义——原生激活链路对 MCP 工具今天走不通。
+3. **路由依赖**：不支持 toolUpdate 的路由会剥掉 flag、全员立即可用（`dsh-llm` 原注释："Unsupported routes need immediately available tools"）——原生机制在那类路由上等于没有。
+
+**两个对设计有影响的结论**：
+
+- **意外收获**：agent-loop 的自动记账意味着我们的"掀罩"（工具新出现在组装集里）会被原生机制自动记成 tool-addition——**历史位置一致性由宿主保证，我们不需要自己管**。这消除了一个早期未识别的风险。
+- **迁移路径**：两条，主动权都在本插件手里——① 等 `dsh-mcp-client` 支持 defer 选项，本插件的 `defer` 配置与 UI **1:1 映射**即可切换；② **本插件自己当生产方**：`ctx.systemPrompt.tools(provider)` 已验证可注册 tool-schema provider（`dsh-system-prompt/lib/index.js:286-288`，每次组装求值、schema 带 `deferLoading` 透传）——插件可让 provider 先只回报未加载的延迟工具（标 `deferLoading: true`），搜索命中后回报集合增大，agent-loop 自动记 tool-addition 完成原生激活。但必须**按路由门控**：不支持 toolUpdate 的路由会剥掉 flag 全员立即可用（遮罩失效），而路由支持性只有 harness 侧知道——所以 v1 仍走 assembly 过滤路线，native 路线作为路由透明后的切换项。
+
+## 3.2 原生能力分层结论（表面通读后定稿）
+
+把"问题能不能原生解决"按层拆开，每层都以上界通读为依据（不靶向验证）：
+
+| 问题 | 原生能否解决 | 依据 |
+|---|---|---|
+| 可发现性/引导（模型知道有什么、怎么加载） | **能，纯原生** | `systemPrompt.section()` 动态渲染活库存（`dsh-system-prompt:240-243`）；DSH 自带的 skills 就是同款先例（目录进提示 + 工具按需加载），证明此模式在本 harness 出厂就跑 |
+| 激活（命中后让工具可用） | **能，纯原生** | 两条：agent-loop 在 assembly 变化时自动追加 `developer/message` tool-addition（`dsh-agent-loop:1229-1248`）；或插件直接 `session.append("developer/message", …)`（`dsh-session:1441`） |
+| 声明-扣留语义（看得见但调不了） | **条件性原生** | `deferLoading` + `projectToolUpdates` 的 offered 集机制（`dsh-llm content.js:290-339`）——但只在模型声明 `toolUpdate`（`LlmModelInfo.toolUpdate`，`'in-history'｜'addition-only'`）时成立；不支持的模型 flag 被剥、全员立即可用 |
+| 上下文税/选错率（工具根本不进模型眼前） | **能，但另一层** | prompt 层扣留在不支持的模型上全部失效（进了 `assembly.tools` 就到眼前）；唯一解是让工具不进 assembly——assembly waterfall 过滤（本插件走的路线）或 registry 层遮罩（`tools.restrict`，但遮不到 scope-local 注册） | 
+| 模型配合度（会不会主动搜） | **无原生解** | 任何架构都依赖模型调用 `tool_search`；只能实测 + 拒绝自愈兜底 + 按模型设门（Claude Code 自己就用模型白名单） |
+
+**门控缺口（唯一待 harness 的事）**：`toolUpdate` 只在 `prepareCall` 返回的 `preparedCall` 里（`dsh-llm:2222`），session header 不落、无查询 API。混合架构要按模型分流，缺这个干净信号。需求形态：把 `modelInfo.toolUpdate` 落进 `request/header`，或开一个 `llm` 侧的能力查询方法。**在拿到之前，L2 层不可做**（做了就是赌路由）。
+
+**终极架构 = 四层，全部 harness 原生能力**：
+
+- **L0 引导层**（全模型）：`systemPrompt.section` 活库存 —— 对应 Claude Code 的提示侧索引
+- **L1 遮罩层**（全模型）：assembly waterfall 过滤 `resolved.tools` —— 上下文税的唯一天花板无关解（`tools.restrict` 是备选，但遮不到 scope-local 注册，见决策 8）
+- **L2 声明层**（`toolUpdate` 模型，门控就绪后）：`systemPrompt.tools()` provider + `deferLoading` + 激活 —— 更富语义（名字+描述可见、不可调），可就位后停用对应 L1
+- **L3 行为兜底**（全模型）：拒绝自愈（监听 `UNKNOWN_TOOL`，对已知延迟工具自动掀罩）。**不做模型能力门控**（范围决策）：模型配合度由全局开关交用户自处置
+
+**v1 = L0 + L1 + `tool_search` + L3**——不是妥协，是四层里当前可做的三层；L2 等门控信号。
+
+## 3.3 提供方能力与生态实现查证（外部调研）
+
+**提供方原生延迟加载能力**（2026-07 查证）：
+
+| 提供方 | 能力 | 形态 |
+|---|---|---|
+| Anthropic | ✅ 有 | Tool Search Tool + `defer_loading` + `tool_reference`（2025-11 beta，`advanced-tool-use-2025-11-20`）；官方数据 77K→8.7K、Opus 4 49%→74% |
+| OpenAI / Azure | ✅ 有 | Responses API `tool_search` + `defer_loading` + namespace 级延迟（gpt-5.4+；[Azure 文档](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/tool-search)）：hosted（服务端搜索）与 client-executed（应用侧搜索回传 `tool_search_output`）两种模式；延迟的 function 模型仍可见 name+description，延迟的是 parameter schema |
+| DeepSeek | ❌ 无 | 无原生延迟协议（其 function calling 仅常规形态） |
+| Gemini 等 | 未发现 | — |
+
+**生态已有实现（两个，均为 agent 层、提供方无关——与本文 L1 结论一致）**：
+
+- [studyzy/dsh-lazy-tools](https://github.com/studyzy/dsh-lazy-tools)：`ctx.tools.restrict()` 遮罩 + `tool_search` + `defer_execute_tool`；激活写入 agent 的 allow 集、下一轮生效；**仅全局工具**（README 明示"已注册在 agent 自身作用域的工具始终可见"）；无名字目录；resume 后从零（自述为避免写未注册的会话事件类型）；配置为 CodeBuddy 风格 `Defer(...)`/`NoDefer(...)`。
+- [lordqyxz/dsh-tool-search](https://github.com/lordqyxz/dsh-tool-search)：**与本文 L0+L1+L3 设计高度收敛**——常驻目录 section（系统提示每工具一行：名字+截断目的，注册表不变则字节稳定、变化重建）、BM25（名字+描述+参数文本，CJK 字符二元分词）、命中直调无 dispatcher、单调 guard 自愈、阈值 inert（threshold 15 / maxResults 5 / maxDiscovered 20）、**resume 用 presentation meta + 会话日志持久化**（解决了本文"resume 从零"的行为边界）；基准：120 工具 14632→3417 tokens（省 76.6%）、top-1 100%。
+
+**对本设计的含义**：核心机制（目录 section + registry 遮罩 + 自愈）已获第三重复核（Claude Code + 两个生态实现），且带了基准数据。本文与参考实现的**真实差异**（早前"高度收敛"的说法不准确，粒度不同）：① **延迟粒度**——我们是 per-server defer（未列入的服务器天然稳定），它是"全延迟 + `alwaysVisible` 白名单"（默认白名单含 `skill`/`ask_user_question`/`report`/`submit_*`/`structured_output*`，说明它连内置工具一起延迟）；② **项目族**——两个生态实现都只做全局族，我们的 assembly 遮罩天然覆盖项目族（见决策 8①）；③ **MCP 管理 UI 集成**——现有实现均为配置文件驱动；④ **活配置**——我们的 deferServers/serverNames 是函数形态，开关改了下一次组装即生效，不需要重装。
+
+**照抄之外必须自己补的两件事**（早前遗漏，审查后补上）：
+- **MCP server instructions 也要遮**。`dsh-mcp-client` 给每个服务器注册一个 `mcp:<server>` prompt section（order 3100，`interpolate:false`，默认上限 `maxInstructionBytes` 32768 字节），只遮 tool schema 不遮它，延迟收益会被这八分之一上下文吃掉。参考实现用 `deferToolGuidance` 处理同类问题；我们对"还有未发现工具的服务器"清空该段，全部发现后恢复。（项目族不受影响：项目连接的 section 注册在兄弟作用域，本来就不进 agent 的 prompt——已实测。）
+- **目录必须有体积上界**。700+ 名字全量进 prompt 约 10 万字符（实测），超出 `maxCatalogLines` 的部分截断并提示"另有 N 个，用关键词或 `select:` 查询"。
+
+**策略决策（B：差异化，不做全自研）**：引擎层“稳”不求新——查询语法照抄 Claude Code 三形态、BM25/CJK 参数对照 lordqyxz 实测调、resume 用其 presentation meta 方案（消除本文“resume 从零”边界）；集成层“精”——per-server defer 开关进服务器列表 UI（生态零 UI）、项目族支持（生态空白，见决策 8①）、与 exclude 合并、加载状态与节省量面板可见。明确不做：重新发明搜索算法、自造 dispatcher、发明新查询语法。前提：三样“更多”（UI、项目级、管理器联动）做得出来，否则诚实放弃而非造平庸复制品。
+
+## 4. 总体架构
+
+```
+插件安装（一次）
+  ├─ ctx.tools.register({ name: "tool_search", ... })          # 全局注册搜索工具
+  ├─ ctx.systemPrompt.section(promptSection('tool-search:guidance', …))   # 静态总则（interpolate:false）
+  └─ ctx.on('system-prompt/assemble', …, { prepend: true })    # 唯一的订阅
+     # 不需要 agent/created 预热、tools/change 脏标记、agent/disposed 清理：
+     # 视图按 revision 自愈，标志是要人记得置的，漏置就是静默失配（见 §12 #5）
+
+每次组装（agent-loop 每步都调 assemble）
+  └─ viewFor(agent)：读 schemas(agent) → 算 revision → 不变就复用缓存，变了才 buildToolSearchView
+     │   view = { managed, catalog, catalogText, managedByServer, deferring }
+     │   fail-open：算不出来就返回 INERT_VIEW（全量可见）并记账，绝不把抛错逃进宿主
+     ├─ 过滤 resolvedAssembly.tools：只摘 managed 里未发现的（黑名单，不动外来工具）
+     ├─ 清空"还有未发现工具的服务器"的 mcp:<server> 指令段（返回新对象，不 mutate）
+     └─ 追加 promptSection('tool-search:catalog', view.catalogText)   # 活库存，interpolate:false
+
+模型调用 tool_search(query)
+  └─ execute(args, exec)：
+       ├─ exec.agent 拿本会话作用域（无 agent 则显式失败，不静默）
+       ├─ 索引来源 = `agent.ctx.tools.schemas(agent)`——**不 restrict 所以它就是全量**
+       │   （§7 表格里"会话视图不能当索引源"是 restrict 时代的残留，已作废）
+       ├─ 过滤已在 managed 划分里做过：per-server 下限 + 聚合阈值 + defer 集合
+       ├─ BM25(name + description + 参数文本) 匹配，返回 ≤ max_results 个完整 schema
+       └─ 命中即并入 discovered（临界区纯同步：prepareState 到 return 之间无 await）
+          # 工具清单每步从 assembly 重建 ⇒ 下一轮模型请求即含这些工具（原生 function calling）
+          # 工具新出现会被 agent-loop 自动记 tool-addition，历史位置一致性由宿主保证（§3.1）
+```
+
+配置来源（两个族合成唯一一张表，`serverDeferTable`）：
+- **全局族**：loader 条目（profile patch 里的 mcp 条目，`defer` 经 schemastery 非严格 merge 活着到达 `entry.options.config`）
+- **项目族**：共享连接记录上的 `defer` 活值（项目连接是 `connectionCtx.plugin()` 建的，**不在 loader 树里**，所以必须有第二个来源——见 §12 #4）
+
+归属只能按 serverName（工具名只编码它）：任一同名条目 defer，该名字就 defer。
+
+
+## 5. 关键决策
+
+| # | 决策 | 理由 | 否决的替代 |
+|---|---|---|---|
+| 1 | **插件层实现，不等原生** | 原生排期不可控；且内核只供机制不供策略是既定设计哲学——`dsh-tools` 提供 register/restrict/schemas/guards 全套原语，workspace exclude（按服务器 deny + tools/change reconcile）证明策略层就是插件的领地 | 提 harness PR：排期不可控，且越界 |
+| 2 | **功能默认开启，双层开关可关** | 内部实测通过后默认开——这正是 Claude Code 的姿势（默认启用 + `ENABLE_TOOL_SEARCH=false` 总开关）。逃逸通道两层：每服务器一个 `defer: false`（描述质量差、或每轮必用的小工具集不适合延迟），全局一个总开关（env `DSH_MCP_TOOL_SEARCH=off`，形态照抄 Claude Code）。默认开的前提是内部实测覆盖 DSH 真实模型阵容——DSH 模型无关，弱模型可能不执行搜索 | 默认关闭等灰度：用户拿不到收益，且开关本就提供逃逸通道。**小工具集自动豁免**：工具数 ≤10 的服务器整体不参与延迟（官方原话 <10 工具"less beneficial"，白付一次往返）——纯计数判定，不依赖上下文窗口。它与聚合阈值（`threshold: 15`）正交：前者是服务器属性，后者是会话属性，两个门槛都过才真正延迟 |
+| 3 | **defer 标志放 profile 级（每服务器一条）** | defer 是服务器属性（工具数、描述体积），不是项目属性；workspace exclude 已占"本项目不想要"的语义，两者正交、可合并（见 §6） | workspace 级：重复配置面，且与 exclude 语义重叠 |
+| 4 | **会话内加载常驻到会话结束** | 遮罩是每次组装的纯函数，随会话销毁自然清零，无需额外簿记；DSH 没有 Claude 的"压缩后失效"对应物 | 照抄压缩失效：无对应机制。源码调研结论：① 全库确认 DSH 无任何压缩/淘汰/上下文窗口机制（agent-loop 的 compact 仅是流式折叠内部概念），Claude 那招没有对应物；② 显式 LRU 的机械可行性已验证——淘汰只是一次重算视图，反复摘戴无未验证坑。上限框架（不设魔法数）：按"它替代的东西"定，= 全量集的 10-20%（jshook 735 → 40-75 个，最坏仍省 80-90%），或加载集估算 token ≤ 15-20K；反方平衡（上限小了反复搜）：LRU 只在工作集真超上限时才抖，而那正说明该服务器太核心——用 per-server 关整个常驻，两个旋钮配合覆盖两种 regime。v1 不设硬上限，只设 `maxDiscovered`（无界发现会让请求 schema 长回全量基线），实测曲线后再加淘汰 |
+| 5 | **BM25 本地实现，不引依赖** | 仓库依赖极简（smol-toml/yaml/zod），BM25 约百行；匹配字段 name+description 是官方明确约定 | 引 bm25 库：依赖治理成本；embeddings：v1 过度 |
+| 6 | **引导双通道：静态总则 section + 活库存目录 section（主）+ 工具描述（辅）** | **两条通道都已验证**：① `ctx.systemPrompt.section({ name, order, text })`（`dsh-system-prompt/lib/index.js:240-243`）注册静态总则（"是什么/怎么用/未加载不可调用"）；② 活库存目录在 `system-prompt/assemble` waterfall 里追加（`text` 可以是函数、每次组装求值——`typeof section.text === "function" ? section.text(context)`），因为它必须按**本 agent 的可见集**渲染，全局 section 做不到。名字级 token 成本（比 schema 便宜一个量级）、落在系统提示缓存前缀上（库存不变则字节稳定——行序用 code-unit 比较保证，见 §12 #3）。工具描述退居"是什么/怎么用"，不承载库存。**两条通道都必须 `interpolate:false`**：目录正文嵌第三方 MCP 描述（见 §9） | 只放静态描述（本设计早期方案）：库存常新做不到、`select:` 教不了真名 |
+| 7 | ~~面具戴在既有有界等待之后~~ **已作废** | 原方案用 `restrict({deny})` 遮罩，才需要"等连接就绪再戴面具"的时序安排（复用 `waitForConnectionReady` 的 5s 预算）。改走 assembly 过滤后（决策 8）**每次组装都过滤**，晚连服务器的工具在它首次出现的那次组装里就被滤掉，根本没有"先放行后补遮罩"的窗口，也就不需要这个时序安排 | — |
+| 8 | **遮罩做在 assembly 过滤层，不做 registry restrict** | 参考实现（lordqyxz/dsh-tool-search `src/index.ts`）采用的机制更优，已采用：① **两族一机制**——`system-prompt/assemble` waterfall 里过滤 `resolved.tools`，全局族与项目族（scoped 注册）通吃，restrict 对 scope-local 抛错的问题不存在；② **窗口不存在**——每次组装都过滤，晚连服务器的工具在它首次出现的那次组装里就被滤掉，无"先放行后补遮罩"；③ **自愈有指令**——工具不 restrict（保持可解析），`tools.guard` 对"未发现的延迟工具"返回带指引的拒绝（"call tool_search with the exact name 'X'"），比 UNKNOWN_TOOL 裸错好。**修正（审查后）**：早前此处称"DSH 对不可见工具在 guard 之前就返回 UNKNOWN_TOOL"是错的——`prepareExecution` 的 `guardReason`（dsh-tools:3241）跑在 `dispatchToolBody` 抛 `ToolNotFoundError`（:3307）之前，且 `createExecution` 对不可见工具返回 `kind:"ready"`（:3188）。也就是说 restrict 路线**同样**能拿到 guard 自愈；本条的真实优势只有 ①②④⑤，不含 ③；④ **索引源简单**——`schemas(agent)` 即全量（没被 restrict 掉），不需要全局视图+连接视图的绕路；⑤ 与 exclude 天然取交集——exclude 滤掉的工具不在 agent 可见集里，不进 catalog，本机制当它不存在。代价：遮罩完备性依赖"assembly 是唯一模型可见面"（主路径已验证：agent-loop L907 → buildRequest）；**PTC 模式下不成立**——`tools:sdk` section 是独立投影路径（dsh-tools `sdkSection`→`sdkSchemas`），遮罩与 guard 双失效，故 PTC 部署下本功能**整体不装配**（见 §12） | registry restrict（原设计）：两族两机制、有晚连窗口 |
+| 9 | **活库存走 assemble waterfall 追加的目录 section，静态总则走 `systemPrompt.section`** | 目录必须按**本 agent 的可见集**渲染，所以它在 `system-prompt/assemble` waterfall 里追加（`prepend:true` 保证我们的过滤有最终发言权）；静态总则与可见集无关，走普通 `section()` 注册即可。`select:` 所需的真名由目录直接列出。complete-section 部署下目录会被吞（宿主规则：存在 effective complete section 时它成为唯一 prompt section，`dsh-system-prompt:356-361`，已实测），那时模型至少还能靠工具描述主动查 | 库存变化时 dispose+重注册 `tool_search`：工具定义变动触发 `toolsChanged`/新 series（缓存失效），且重注册瞬间的调用会 UNKNOWN_TOOL——风险大于收益 |
+| 10 | **loaded 集变更的临界区必须同步** | DSH 支持并行工具调用（agent-loop 并行调度器 `DEFAULT_MAX_PARALLEL_TOOL_CALLS = 10`）；两步 `tool_search` 同轮执行时，若 read-discovered 与 write-discovered 之间有 await，后写覆盖先写 → 前一次搜索命中的工具被重新遮罩（结果文本说"已可用"、工具列表里却没有）。约束：execute 里从取视图到写 discovered 全程无 await（配置读取已由活配置 getter 前置掉） | 加锁/队列：DSH 无现成 per-session 锁原语，自己造轮子；纯同步临界区零成本且足够 |
+| 11 | **自愈走 guard 指引拒绝，不走 UNKNOWN_TOOL 观测** | 采用参考实现的机制：工具保持可解析（不 restrict），`ctx.tools.guard` 注册单调守卫——对"在延迟目录里但未被发现"的直调返回拒绝并附指引（"call tool_search with the exact name 'X' as the query, then call it directly"）。已发现的工具直接放行；其他策略（exclude）拒掉的工具不在 catalog 里，守卫不置词——取交集不放宽。**guard 内自动掀罩已评估并否决**：guard 是任意函数，本可以在拒绝前把该名字加进 discovered（"模型都报出确切名字了，替它省一轮搜索"）。否掉的理由是 Claude Code 在拥有远超我们的模型调优经验下，仍然选择"拒绝 + 指引先搜索"（其 system-reminder 原文："calling them directly will fail with InputValidationError. Use ToolSearch with query 'select:<name>…'"）。默认拒绝；若将来要为弱模型开放自动掀罩，应做成显式开关而不是悄悄改默认 | 观测 UNKNOWN_TOOL 结果自愈：需要验证事件可达性，且拒绝信息不可定制。**guard 内自动掀罩**：与 Claude Code 的既定行为相反，且会让"凭记忆幻觉调用"直接变成加载 |
+
+## 6. 与现有机制的合并规则
+
+- **遮罩语义 = 黑名单过滤，不用 deny**：`assembly.tools` 里只摘"本机制管理的且未发现的"（`filterManagedTools`），其余一概不动。刻意不用"稳定集+已发现"的白名单——assembly 里可能有非本注册表来源的工具（其他插件的 toolProvider），白名单会把它们误删。per-server 延迟的语义是"只延迟这些服务器的工具，对别的工具没有意见"。
+- **与 workspace exclude 取交集不放宽**：exclude 用 `restrict` 把工具从会话视图去掉，被 exclude 的工具不在 `schemas(agent)` 里 → 不进 `managed` → 既不被我们滤（本来就不在），guard 也不置词。`loaded` 不可能含 excluded 工具。
+- **唯一 owner 判定**（沿用 `toolInventory` / `applyWorkspaceRestrict` 的既有规则）：工具名以 `mcp__<server>__` 为前缀且**唯一命中**一个服务器名才可归属（`uniqueOwner`）。serverName 含 `__` 时裸前缀匹配会误伤，必须要求唯一；歧义时落稳定侧，不延迟。
+- **同名即同延迟**：归属只能按 serverName（工具名只编码它），所以任一同名条目 defer，该名字就 defer。DSH 0.1.5 起各注册作用域允许同名，这不是冲突。
+- **tool_search 自身永不被延迟**：`partitionSchemas` 把它直接放稳定侧；它是插件全局注册的原生工具。
+
+## 7. 集成点契约
+
+已验证（读码确认，行号为当前 node_modules/源码）：
+
+| API | 契约 | 位置 |
+|---|---|---|
+| `tools.restrict({ deny })` | per-agent 作用域遮罩，返回 disposer；**只管全局工具**：未知名与 scope-local 名都会抛错；scoped 注册不受影响、restrictions 相交。**本实现不用它**（决策 8①：遮不到项目族） | `dsh-tools/lib/index.js:2888-2910` |
+| `tools.register(definition)` | 全局层注册，返回 disposer；定义**必填 `output { schema, render }`**（`render` 须为函数，缺了直接 TypeError）；`defineTool({ name, description, parameters, execute, output, timeoutMs? })`，完整签名实现时按 schema.d.ts 钉死 | `dsh-tools/lib/index.js:2878-2887`、`schema.d.ts:248` |
+| `tools.schemas(scope)` | 模型可见 schema；被 restrict 的工具"reads as absent"——**会话视图只含可见工具，被 restrict 遮掉的工具不在内**。本实现不 restrict，所以 `schemas(agent)` 就是全量索引源（见决策 8④）；§4 架构图里"会话视图不能当索引源"那句是 restrict 时代的残留，已作废 | `dsh-tools/lib/index.js:3023`、`view()` 2959-2985 |
+| `readScopedToolSchemas(ctx, entry)`（插件自有） | 项目族工具的唯一枚举通路（工具在共享作用域层，全局视图看不到），含失败语义（抛错记账、空集≠无工具） | `lib/workspace-runtime.js:710-744` |
+| 每步重建工具清单 | assembly 每步重算（agent-loop preStep）→ 新遮罩对运行中会话**下一轮请求即生效** | `dsh-agent-loop/lib/index.js:907` |
+| `agent/created` / `tools/change` / `agent/disposed` | **本功能一个都不订阅**（见 §4）。列在这里只为说明"为什么不需要"：视图按 revision 自愈，预热与脏标记都是冗余门，标志是要人记得置的 | `lib/workspace-runtime.js:1258-1271` |
+| agent-loop 自动记账 | 工具集相对基线变化时自动追加 `developer/message`（tool-addition/removal）——掀罩后的历史位置一致性由宿主保证，插件无需自理 | `dsh-agent-loop/lib/index.js:1233` 附近、`dsh-llm` `projectToolUpdates` |
+| `ctx.effect(() => () => cleanup, label)` | 生命周期归属 | `lib/workspace-runtime.js:1239` |
+| `exec.agent` | 调用所属 agent，`agent.ctx` 即作用域上下文 | `dsh-tools/lib/types/index.d.ts:228-229` |
+
+实现时待钉（不影响设计）：`defineTool` 的完整选项签名（已知 `output { schema, render }` 必填，其余字段实现时按 `schema.d.ts` 钉死）；`exec.agent` 为 undefined 的 agent-less 执行路径可达性（可达则显式失败并说明，不静默降级）。搜索索引按会话构建（`schemas(agent)`，含本会话投射的项目工具），不用全局视图。
+
+**两处刻意不照抄 Claude Code**：① 返回格式不用 `<functions>` XML——DSH 走原生 function calling，直接返回 JSON schema 数组 + 一句"以上工具已在你的工具列表中可用"；② 无压缩失效语义（决策 4）。
+
+## 8. 配置与 UI
+
+- **配置**：**两个族**的服务器条目都有 `defer: boolean`（默认 `true` = 延迟；置 `false` = 该服务器工具常驻）。全局族走 profile patch（`PLUGIN_OWN_CONFIG_FIELDS`，mcp-client 非严格 merge 透传）；项目族走 `.dsh/mcp.json`（`specToMcpEntry` 往返）。`defer` **不进** `toMcpClientConfig`——它不是 mcp-client 字段，进指纹会让"改个延迟开关"触发一次重连；它作为活值存在共享连接记录上，每次挂载刷新。
+- **全局开关**：env `DSH_MCP_TOOL_SEARCH=off` 一键回退全量注入（形态照抄 Claude Code `ENABLE_TOOL_SEARCH`）；置关时所有服务器视同 `defer: false`，本插件所有延迟逻辑短路。
+- **UI**（面板是本职）：服务器行加"延迟加载"开关（全局与项目两族都渲染）；徽标只标"延迟"状态。会话维度"已加载 N/M"v1 可省。**徽标与详情行不带 token 估算**——那个数字的精确感是假的（我们不知道用户装了什么 MCP，schema 大小差一个量级），而给了数字用户就拿它做决定，于是它在主动误导；留下的判断材料是真实数据（工具数）与真实规则（per-server 下限）。整套撤除的记录见 §12.3 F4。
+
+## 9. 风险
+
+- **晚连服务器没有窗口期**：assembly 过滤**每次组装都跑**（agent-loop 每步 assemble），晚连/重连的服务器工具在它首次出现的那次组装里就被滤掉。视图按 revision 判失效，不需要 dirty 标志，也就不存在"忘了置标志导致静默不遮"这一类失配。
+- **静默全量不可观测**：视图算不出来时 fail-open 退回全量可见（§4），此时必须记账到日志——否则"没挂上"发生时用户无感知。当前记 `ctx.logger.error`；与 exclude 一样进面板错误账是后续可做项。
+- **`tool_search` 常驻的固定成本**：它全局注册、每个会话都在（无 defer 服务器的会话也付这份描述 token，约 350）。Claude Code 按阈值条件注入；DSH 无对应通道（工具描述静态），接受这笔固定税，描述保持精简，无延迟服务器时返回明示文案。
+- **complete-section 吞掉目录**：宿主 assemble 的规则是"存在 effective complete section 时，它成为唯一 prompt section"（`dsh-system-prompt:356-361`，已实测）——若某部署/preset 注册了 complete section，我们的目录 section 会被静默丢弃，但**遮罩仍然生效**（`{...transformed, sections:[completeSection]}` 保留过滤后的 tools）。兜底：工具描述里的静态引导仍在，模型至少还能主动查。
+- **section 每组装渲染的成本**：已按 revision 缓存——工具可见面内容或任一影响划分的配置变了才重建视图与目录正文，否则两次组装产出**字节一致**的目录（实测 735 工具：revision 3.08ms / 重建 52.8ms）。目录行序用 **code-unit 比较**而不用 `localeCompare`：后者依赖 ICU 与区域，混合大小写会给出不同序，"库存不变则字节稳定"就不成立（宿主 `compareToolNames` 用同一理由避开它）。超大规模服务器按 `maxCatalogLines` 截断为"前 N 个 + 计数"，`select:` 真名不足时用查询形态补。
+- **第三方文本绝不能进插值**：目录正文嵌 MCP 工具描述，必须 `interpolate:false`——否则描述里一个 `{{var}}` 就让每步 `renderPrompt` 抛 `unknown prompt variable`，agent loop 每步失败。宿主给 `mcp:<server>` 指令段和 `tools:sdk` 设的就是这个（mcp-client:739、dsh-tools:2749），我们照做。
+- **MCP server instructions 是另一笔上下文**：`dsh-mcp-client` 给每个全局服务器注册 `mcp:<server>` section（order 3100，默认上限 32768 字节）。只遮 tool schema 不遮它，延迟收益会被吃掉。当前实现：对"还有未发现工具的服务器"清空该段，全部发现后恢复。项目族不受影响（项目连接的 section 注册在兄弟作用域，本来就不进 agent 的 prompt——已实测）。
+
+**行为边界（有意的语义选择，非缺陷）**：
+
+- **resume 状态恢复（已解决）**：发现状态事件源化——`tool_search` 的结果在 **presentation meta** 里带累积发现列表（`protocol: 'dsh-tool-search/v1'` + `allDiscoveredTools`），render 时剥掉（不泄露进提示词）；重建的 agent 从会话日志恢复。**恢复走受支持的 `session.deriveMessages()`**（扫 `role==='tool'` 消息里的 protocol JSON），不用 `snapshotEvents()`——后者在 dsh-session 上标注 `@deprecated … new calls are prohibited`（:1358/:1370）。两条路径已用真 Session 验证等价，且派生消息方案更短：不需要 tool/call↔tool/result 配对，也没有 ptc-dispatch 特例。上限淘汰用 `maxDiscovered`（最旧先让位，≥ maxResults）
+- **子 agent 独立**：子 agent 继承同一 assembly 过滤（waterfall 按 assembly 的 context.agent 跑），发现集独立——它用到的工具自己搜一遍
+- **PTC 模式**：assembly 遮罩需同步整形 `tools:sdk` section（参考实现的 `shapeSdkSection`）。**未补，因此 PTC 部署下本功能整体不装配**并在日志明说——半失效（模型看着完整 schema 却调用即错，`collapses` 直接拒 model-direct 调用）比不装更坏。
+- **`agent/created` 监听器必须吞错**：宿主把该串行监听器的抛错当作否决这次会话创建（dsh-agent:472）。**已通过删订阅解决**——预热是冗余的（assemble 必定早于第一次模型请求，guard 必定早于第一次工具执行），删掉它比给它加 try/catch 更彻底。剩下的 assemble / guard / execute 三个入口共用同一个 fail-open 边界：视图算不出来就退回全量可见并记账，绝不让抛错逃进宿主。
+- **`tool_search` 作为新全局工具的审批面**：某些权限模式下首次调用可能弹审批；描述里写清用途可降低困扰。
+- **模型不搜就调**：DSH 是模型无关的 harness（DeepSeek 及第三方模型），指令遵循弱的模型可能无视搜索、凭记忆调延迟工具。缓解：guard 拒绝里带**确切查询串**（模型照抄即可）+ 目录里列出全部真名；**默认开启前必须用真实模型阵容实测**；观测靠工具调用日志。
+- **agent-less 执行**：搜索工具拿不到作用域时显式失败，禁止"返回 schema 但不掀罩"的静默半生效。
+- **阈值模式缺输入**：上下文窗口在 harness 内部是流动的（`dsh-llm` adapter context → agent-loop `preparedCall.context.contextWindow`），但**插件侧的公开查询通道未验证**；故 v1 不做 auto 阈值，通道验证后可在 v1.1 补（届时照抄 Claude Code 的 10% 规则）。
+
+## 10. 测试计划（node --test）
+
+- `tool-search-index`（纯函数）：三种查询语法解析（含 `+` 约束对含 `-`/`_` 服务器名）、BM25 排序 fixture、max_results、空查询/无命中、CJK 分词、平手 code-unit 序
+- `tool-search-runtime`（mock tools service）：`uniqueOwner` 歧义、`partitionSchemas`、`applyServerFloor`（per-server 下限）、`filterManagedTools` 黑名单语义、`guardDecision`、`clampDiscovered`、`discoveredFromMessages`（含非本工具/错误结果/非 JSON）、`viewRevision` 纯度、`buildToolSearchView`（聚合阈值 + per-server 下限）、`activeMaskedServers`、`catalogSectionText`（截断 + code-unit 序）、`maskInstructionSections`（不 mutate）、装配层（只订阅 assemble、目录 interpolate:false、指令段清空、fail-open、agent-less 显式失败、活配置、revision 缓存）
+- 挂载边界：宿主视图抛错时零干预（fail-open），不炸会话
+- **项目级 defer 端到端**：`projectMcpServers` + `serverDeferTable` 把项目族并进同一张表（`workspace-runtime` 用例）
+- **PTC 模式不装配**（`tool-search-wiring` 用例）
+- **真宿主集成**（`tool-search-real-host`，真 cordis + 真 SystemPrompt + 真 ToolRuntime + 真 dsh-scope）：遮罩同时覆盖全局族与项目族、目录 `interpolate:false`、第三方描述含 `{{var}}` 不抛错、guard 拒绝未发现直调并经真 dispatcher 放行、发现后工具回到 assembly 且指令段恢复、库存不变目录字节稳定、`+` 约束对含连字符服务器名生效。**这一类用例不可用手写夹具替代**——§12.1 的两个阻塞 bug 都是夹具绿、真宿主炸
+- 配置：`defer` 字段读写往返不丢（全局 patch 与项目 `.dsh/mcp.json` 两路）
+- 回归锚点：workspace exclude / workspace-runtime 现有用例全绿
+
+## 11. 实施顺序（TDD，一步一验）
+
+1. ~~`lib/tool-search-index.js`~~——**已完成**（查询三形态 + BM25 + CJK 二元分词 + 精确全名置顶）
+2. ~~`lib/tool-search-runtime.js`~~——**已完成**（assembly 黑名单过滤 + guard 自愈 + 目录 section + 搜索工具注册）。assembly 过滤机制**天然覆盖项目族**（assembly 含投射进会话 own 层的项目工具，目录从 `schemas(agent)` 构建亦然）——原计划的“项目族投射过滤”独立步骤被吸收
+3. ~~配置字段 `defer` + UI 开关~~——**已完成**：profile patch（`PLUGIN_OWN_CONFIG_FIELDS`，mcp-client 非严格 merge 实测透传）与 workspace 配置（`specToMcpEntry` 往返）双路落盘；`lib/tool-search-config.js` 配置桥（**全局族 loader 条目 + 项目族共享连接**两个来源合成一张表，`DSH_MCP_TOOL_SEARCH=off` 总开关）；运行时可迭代配置（函数形态，视图按 revision 判失效即生效）；UI：编辑表单复选框 + **开启前预告**（只说 per-server 规则：≤10 工具“不参与延迟”，>10 显示“N 个工具”；会话级聚合阈值行级看不到，不说）+ 详情行状态 + 列表行徽标（虚边框 t-defer，只标“延迟”）。token 估算曾在这里出现过两轮，已整套撤除，理由见 §12.3 F4
+4. 真机验证：接 jshook（735 工具）实测延迟前后上下文差量与搜索命中率；用真实模型阵容验证“模型会搜索”
+
+每步跑 `node --test` 最窄子集，全绿再进下一步。
+
+## 12. 第二轮：对抗式审查后的修正
+
+一轮独立审查把每个结论按"读到的 / 推断的"重新取证（真 cordis + 真 Loader + 真 dsh-scope + 真 dsh-mcp-client + 真 dsh-system-prompt + 真 dsh-session 实跑）。结论：**架构路线成立且几乎是唯一解**，但实现层有 2 个会静默破坏功能的缺陷、1 个违反本仓既有不变量的缺陷、1 个"UI 承诺而运行时不交付"的缺陷。以下按"错论据 → 改动"记录。
+
+| # | 被推翻 / 遗漏的事实 | 证据 | 改动 |
+|---|---|---|---|
+| 1 | `+<server>` 查询形态对含 `-`/`_` 的 serverName **完全静默失效** | 约束只取一个拉丁词 `/^\+([a-z0-9_-]+)/`，而工具名按非字母数字切词 → `nameTokens.has('chrome-devtools')` 恒 false。内置目录 47 个 serverName 里 11 个含 `-` | `parseQuery` 的约束段改走**和名字同一套** `tokenize`，切成词集合要求全部命中（`tool-search-index.js`） |
+| 2 | 目录 section 未设 `interpolate:false`，第三方工具描述里一个 `{{var}}` 就让**每步组装抛错** | `renderPrompt` → `interpolate` 抛 `unknown prompt variable`（实测复现）。宿主给 `mcp:<server>`、`tools:sdk` 都设了 `interpolate:false` | 模块内统一 `promptSection()`，永远带 `interpolate:false` |
+| 3 | 目录行序用 `localeCompare`，"库存不变则字节稳定"**不成立** | 混合大小写时 locale 序与 code-unit 序不同（实测）。宿主 `compareToolNames` 用同一理由避开它 | 换 code-unit 比较（`tool-search-index.js` 排序 + 目录行序） |
+| 4 | **项目级 defer 是彻底的静默 no-op**，而 UI 三处都在渲染它 | `toMcpClientConfig` 不转发 `defer`；且项目共享连接是 `connectionCtx.plugin()` 建的，**不进 loader 树**，`allMcpEntries` 看不见（实测：`loader.create()` 的条目在，`connectionCtx.plugin()` 的不在） | `workspace-runtime` 导出 `projectMcpServers(ctx)`，`tool-search-config` 把两个族合成唯一一张 `serverDeferTable`；`defer` 做成连接记录上的活值（不进指纹，所以切开关不触发重连） |
+| 5 | `agent/created` 监听器未吞错，违反本仓既有不变量 | 隔壁 `installAgentRuntime` 有 try/catch 并注释"宿主把抛错当作否决会话创建"（dsh-agent:472 明写）；设计自己的测试计划也列了这条却未实现 | **删掉该订阅**：预热是冗余的（assemble 必早于首次模型请求，guard 必早于首次工具执行）。同时删掉 `tools/change`、`agent/disposed`——4 个订阅收敛为 1 个 |
+| 6 | MCP server instructions（每服默认上限 32KB）完全没遮 | `dsh-mcp-client:736-743` 注册 `mcp:<server>` section（order 3100）。参考实现用 `deferToolGuidance` 处理同类问题，我们漏了 | 视图带 `managedByServer`，assemble 时对"还有未发现工具的服务器"清空该段（返回新对象，不 mutate），全部发现后恢复 |
+| 7 | 阈值语义 UI 与运行时不一致；决策 2 承诺的 per-server 豁免**没实现** | 运行时是聚合 `managed.size >= 15`，UI 行级用 `toolCount < 15` | 两条规则都实现且分工明确：per-server `> minServerTools(10)` 才可延迟（行级文案只说这条），聚合 `>= threshold(15)` 才启用机制（会话级，行级不说） |
+| 8 | 用了宿主标注"new calls are prohibited"的 `snapshotEvents()` | dsh-session:1358/1370 双处 `@deprecated` | 改走受支持的 `deriveMessages()`，扫 protocol JSON。真 Session 验证两条路径等价，且净减代码（去掉配对与 ptc-dispatch 特例） |
+| 9 | 目录无体积上界、每次组装全量重渲染 | 实测 735 工具：`catalogSectionText` 11.1ms/次、正文 100,914 字符 | 加 `maxCatalogLines`（默认 300）+ "另有 N 个" 提示；视图按 revision 缓存（实测 revision 3.08ms vs 重建 52.8ms） |
+| 10 | `estimateSchemaTokens` 的 chars/4 对中文低估 2.7–4× | 算术推断（本机无 DeepSeek tokenizer），但方向确定 | 改 CJK 感知：CJK 字符按 1、其余按 `charactersPerToken`；纯 ASCII 走快路径，数值与旧版一致。**⚠️ 这条已被 §12.3 #23 推翻并作废**：估算器整套撤除， chars/4 与 CJK 粗估都不再存在。留下的判断材料是真实数据（工具数）与 per-server 规则 |
+| 11 | PTC 模式下遮罩与 guard **双失效**，设计只承认前者 | `tools:sdk` 是独立投影路径（dsh-tools `sdkSection`→`sdkSchemas`）；且 `collapses` 直接拒 model-direct 调用，guard 根本不跑 | PTC 部署下**整体不装配**并在日志明说。要支持需先补 `shapeSdkSection`，那是另一个改动 |
+| 12 | 决策 8③/11 引的"UNKNOWN_TOOL 先于 guard"是错的 | `prepareExecution` 的 `guardReason`（dsh-tools:3241）在 `dispatchToolBody` 抛 `ToolNotFoundError`（:3307）之前；`createExecution` 对不可见工具返回 `kind:"ready"`（:3188） | 改文档论据。结论不变（assembly 过滤仍是对的），但真实优势只剩 ①②④⑤ |
+| 13 | 决策 6/9 引的"Claude Code 不用总则"是以偏概全 | Agent SDK 官方文档明确推荐 "add a system prompt section listing available tool categories" | 改文档论据。实现两者都有，与官方建议一致 |
+| 14 | §3.3 "与 lordqyxz 高度收敛"言过其实 | 粒度不同：我们 per-server defer，它全延迟 + `alwaysVisible` 白名单（连内置工具一起延迟） | 改为逐条列真实差异 |
+
+### 12.1 第三轮：真宿主集成测试又抓出两个（都是"夹具全绿、真宿主炸"）
+
+前两轮所有用例都是手写夹具。补了 `test/tool-search-real-host.test.mjs`（真 cordis + 真 SystemPrompt + 真 ToolRuntime + 真 dsh-scope，跑真 `assemble()` 与真 `tools.execute()`）之后**当场**抓出两个问题，而且都是阻塞级：
+
+| # | 问题 | 为什么夹具全绿 | 证据 |
+|---|---|---|---|
+| 15 | **重构时丢了 section 的 `order`** → 真实宿主里插件加载即抛 `prompt section "tool-search:guidance" order must be a finite number`，整个 MCP 面板起不来 | 夹具的 `systemPrompt.section()` 只是 push 进数组，不校验；wiring 夹具压根没提供 systemPrompt，那条路径从未被执行 | dsh-system-prompt:241（`if (!Number.isFinite(section.order)) throw`）。**这是我引入的回归**，681 个全利用例无一发现 |
+| 16 | **`select:` 查询在真实宿主里直接报错**：结果带 `score: Infinity`，而 `JSON.stringify(Infinity)` 是 `null`，被 `snapshotToolValue` 判为"非无损 JSON" → `INVALID_TOOL_OUTPUT` | 夹具直接调 `definition.execute()`，绕过了宿主的输出校验 | dsh-tools:3542-3544（`validateJsonSchemaValue(tool.output.schema, detached, "value")` → `ToolOutputError`）。主查询形态完全不可用 |
+
+**改动**：`promptSection(name, text, order?)` 补回 order（只有走 `systemPrompt.section()` 注册的那条需要）；工具结果**不再返回 `score`**——它是内部排序产物，排序已由数组顺序表达，模型不需要这个数，也就不该让它有机会变成 `null` 污染输出。
+
+**教训（比两个 bug 本身更值钱）**：手写夹具会系统性地漏掉"宿主对输入的校验"这一类契约。凡是本功能的输出要进宿主管线、或本功能要调宿主入口的地方，都必须有一条真宿主用例。现在 `tool-search-real-host.test.mjs` 守住的包括：`section()` 的 order 校验、`renderPrompt` 的插值、`tools.execute()` 的完整管线（createExecution → pre-execute waterfall → guardReason → dispatch）、输出 schema 的无损 JSON 校验、assemble 的 context 形状（`{agent, scope: agent, signal}`）。
+
+**另一处修正**：真宿主测试还确认了 `assemble` 的 context 里**没有 `agent` 字段时本功能按 fail-open 早退**（不遮）。宿主 `assembleContextFor` 恒返回 `{agent, scope: agent, …}`，所以生产路径总有；但测试最初就是漏传了 `agent`，结果"看起来没遮住"——这条行为现在是显式文档化的。
+
+### 12.2 第四轮：真机复跑与 RPC 生效性审计
+
+| # | 被推翻 / 遗漏的事实 | 证据 | 改动 |
+|---|---|---|---|
+| 17 | **引导段无条件注入**：`tool-search:guidance` 在启动时一次性注册，文案是 "Most tools are deferred… call tool_search…"。当用户把所有服务器的 `defer` 关掉（`view.deferring` 为 false）时，`## Deferred tool catalog` 不出现，这段仍在——在教模型去找一批并不存在的延迟工具 | 真机实测（isolated profile，serena `defer:false`）：`system/message` 只有 7375 字符、既无目录也无引导段缺失的对照；修复前同形状的会话里引导段在、目录段不在 | 引导段的注入改成**有条件**：在 `system-prompt/assemble` waterfall 里按 `view.deferring` 决定是否清空它的文本（`maskGuidanceSection`）。条件判断放组装层而不是注册层——defer 是活状态（面板开关、服务器晚连都会改），`section()` 却是启动时一次性；视图按 revision 自愈、每次组装重算，所以这里才跟着活状态走，且不新增任何订阅。清空文本而非删段：宿主 `renderPrompt` 本就 `.filter(text => text.length > 0)`，效果等于不注入而段列表形状不变，与 `maskInstructionSections` 清空 `mcp:<server>` 指令段同一种做法。**"没事情可做就不碰 assembly"**：段里没有引导段时原样返回，`maskInstructionSections` 的 `size===0` 早退同此——低于阈值的组装仍是同一个对象 |
+| 18 | **`add` / `removeServer` / `installBuiltins` 只写盘，运行中进程毫无变化** | 真 loader 夹具实测（`ctx.plugin(Loader)` + `ctx.loader.create()` 造真 mcp-client entry）：`add` 后 `loader.entries()` 不变、无新连接，note 已如实说"重启后生效"；`removeServer` 后 patch 里没有该服务器，但 entry 还在、工具还在、子进程 pid 没变；`installBuiltins` 后 patch 里追加了 `exa`，loader 里没有对应条目 | 文案已如实（上两轮）。**本条停摆理由在第五轮被证伪并已修复**，见 §12.3 #24：生产形状可以零新依赖复现，"缺 cordis-plugin-include/group 所以无法复现"是事实错误 |
+| 19 | **`setDisabled`/`enable`/`disable`/`reconnect` 是真热加载**（此前的"疑似"落地为判定） | 同一真 loader 夹具：`disable` 后 `entry.disabled=true` 且工具从全局视图消失；`enable` 后工具回来；`reconnect` 后 pid 集合整体换新且 `echo()` 仍可执行 | 无（代码已走 `entry.update()` / `entry.fiber.restart()`，含失败回滚）。审计结论进报告，未改代码 |
+
+**架构结论（不变）**：assembly waterfall 是当前 DSH 下唯一能同时遮罩全局族与项目族的注入点——toolProvider 只能 append 不能移除 dsh-tools 的贡献（dsh-system-prompt:286-288/319-333），`restrict` 的 `restrictableNames` 结构性排除 agent own 层（dsh-tools:2970-2978），项目工具正是注册在 own 层（workspace-runtime:550）。`prepend:true` 经 cordis `unshift`（cordis:336）保证我们的过滤有最终发言权。
+
+**结构收敛**：九个问题里七个同根——缺少一个"按 revision 算一次的自包含视图对象"。修正后所有派生状态（managed 划分、per-server 计数、目录、目录正文、遮罩集、阈值判定）挂在同一个 `buildToolSearchView` 产物上，三个调用点只做"取视图 + 自己那一件事"，取视图包在同一个 fail-open 边界里。副作用是删掉三个订阅、一处死状态（`tokenCount`/`stableNames`）和一个"要人记得置"的失效机制。
+
+### 12.3 第五轮：独立审查后的整改（F1–F4 修透 + O1 落地）
+
+一轮独立审查把前四轮的每项修复重新取证，结论是"真修了，但没修透"：F1/F2 是补丁式正确（症状修了、根因原样保留），F3 留了三处残留，F4 删得基本干净但留下一个永假守卫与 i18n 漏洞。审查轮还用真 loader 夹具端到端实测出了 O1 的正确形状，**推翻了两条此前写进 OPEN-ITEMS 的停摆理由**（"缺 cordis-plugin-include/group 所以复现不了生产形状"、"dsh-fs/dsh-home-paths 不在依赖树里"——两者都是事实错误）。下表按"错论据 → 证据 → 改动"记录本轮整改。
+
+| # | 被推翻 / 遗漏的事实 | 证据 | 改动 |
+|---|---|---|---|
+| 20 | **F1 的三边比对对"均匀缺失"结构性失明**。`setDeferAll` 的原始 bug 形态是 index.js / typert.js / client.js **三边同时**缺，而三边同序比对在那种形状下照样绿（当时只有 manifest 的精确计数 34≠35 会红）——OPEN-ITEMS 里"三边比对守住了它"只对不对称退化成立，那句话是错的 | 审查轮变异实验：把 `setDeferAll` 从三边同时删掉 → 三边比对测试**绿**，只有 typert-manifest 计数红 | 补**第四边**：`McpManagerGateway.prototype` / `SkillsManagerGateway.prototype`（纯导入即可枚举，无需起 Context）。新断言"原型上每个方法都必须出现在三份清单"让均匀缺失直接红；仅内部使用的方法（`setDisabled`）显式登记并说明理由。变异复验：三边同删时新断言红、三边比对绿 |
+| 21 | **F2 的 managed 字段清单实缴五份手抄**（一份常量 + 四处手抄）。漂移实验：往常量加一个 `futureField` → 712 个用例全绿，而 round-trip 实测"写出 v1、读回 `undefined`"——静默丢失、零测试覆盖 | 审查轮逐一核实五处：`MANAGED_CONFIG_FIELDS`（唯一真相源）、`entrySpec` 读侧 9 字段、`makeEntry` 10 字段、`warnUnsupported` 的 known 集合、`index.js:1481` `installWorkspaceBuiltins` 10 字段 | 四处全部改引常量（`entrySpec` 的 `transport` 特例显式跳过并注明理由）；known 集合从两份字段常量派生；`installWorkspaceBuiltins` 改用 `builtinSpec()`（`mcp-config.js` 里本来就为这件事存在的函数，此前没复用）。补一条**表驱动 round-trip 测试**（遍历常量本身，每个 MANAGED 字段写进 patch 再读回必须相等）——它让上面的漂移实验变红 |
+| 22 | **F3 的三处残留**：① 项目作用域 ≤6 服务器时整个控件行（含"全部延迟"按钮）不渲染——而项目作用域恰恰是延迟开关的第二个写入口，"唯一入口"在项目小列表下不存在；② 计数口径分裂（客户端按 `filtered`、Host 按 patch 全量），同一次交互出现两个数；③ `ListFooter` 的 `action` 槽 + 4 条 `.dsh-mcp-foot-action` CSS 是死代码，而 docstring 还指示后人往底栏加第二个入口 | 审查轮子审查者抓到、已核实代码路径；计数口径两侧源码对照 | ① 门分成两道：控件本身照旧按数量收，动作行只要有 `toolbarAction` 就渲染（新增 `.dsh-mcp-filters.bare` 单列靠右）；② `deferAllState` 的输入从 `filtered` 改成 `servers`（当前作用域全量），与 Host 的 `state.byName` 作用面一致；③ 删槽位 + 4 条 CSS + 改 docstring，`panel-css-invariants` 加一条"死槽位连样式一起删干净" |
+| 23 | **F4 的删除留了三样**：一个**永假守卫**（`tool-search-wiring.test.mjs` 守 `/estimateSchemasTokens/`，真名是 `estimateSchemaTokens`，差一个 s——即使有人用真名把估算器加回来，这条也永远绿）；5 个在用字符串没有英文条目（含主按钮"全部延迟"/"取消全部延迟"，英文界面主按钮显示中文）；6 条死词条 | 审查轮抽查 + grep 实证；712 个全利用例一条都没抓到 | 正则改成真名（守"不许再加回来"）；词典补 6 条 EN（本轮实测是在用缺英 6 条、死词条 8 条——比审查报告数的 5/6 各多一条，`'中文'` 与 `'已开启（工具经 tool_search 按需加载）'` 也被新测试抓出来）；parity 测试**扩到 `t()` 调用点**（此前只覆盖表驱动标签），同时守"缺英文"与"死词条"两个方向，并要求译得动（`t(key) !== key`） |
+| 24 | **O1 的两条停摆理由是事实错误，正确形状已端到端实测**。"复现不了生产形状"不成立：`EntryTree` 由已安装的 `cordis-plugin-loader` 导出，手写一个最小子类（`[Service.init]` 里 `root.update(固定条目列表)`）注册进 `ctx.loader.builtins.include` 就能搭出生产形状，**零新依赖**。"缺的只是那个带 `[Service.init]` 的 group 包装"也与事实相反——可用的那个（`Group`）一直在已安装的 loader 包里且导出 | 审查轮真 loader 探针 V1–V7：根部 `loader.create({id,name,config})` 后条目立即可见、工具连上、`list()` 报 `managed:true, connected`、**patch 文件不被根部创建改写**（根部 `tree.write()` 是 no-op）；`ctx.loader.remove(id)` 后条目移除、夹具进程退出（哨兵文件为证） | `add()` / `installBuiltins()`：writePatch → `await ctx.loader.create({ id: patch 行 id, name: MCP_NAME, config: entryConfigOf(spec) })` **根部创建**（不用 `'include'` 子树：那条路触发 `Include.write()` 把含 patch 插入条目的整个 root.data 写回 base 配置，下次启动重复 insert）；`removeServer()`：writePatch → `entry.parent.remove(entry.options.id)`。三条路共用同一个失败回滚形状（抽成 `rollbackLiveChange`：patch 写回原版本，回滚也失败就抛 AggregateError）。新测试 `test/real-host-loader.test.mjs` 用真 Loader + 真 ToolRuntime + 真 mcp-client + 真 stdio 子进程覆盖：连上、工具活、`managed:true`、子进程退出、create 失败回滚 patch |
+| 25 | **`update()` 改 env 时，重连后的进程拿到的是 `!!js` 字面量而不是环境变量的值**（审查清单外，本轮实测发现） | 真 loader 探针：patch 里的 `MARKER: !!js process.env.HOME ?? ""` 经 include 子树物化后子进程拿到 HOME 的真值；同一条配置经 `manager.update()` 改 env 后重连，子进程拿到的是字符串 `!!js (process.env.HOME ?? "")` | loader 的 `interpolate` 只求值 `{ __jsExpr }` 对象、**raw 字符串原样透传**。`entryConfigOf()` 因此先把内部 `!!js <expr>` 转成 `{ __jsExpr: <expr> }`（递归进对象与数组），`add`/`installBuiltins`/`update` 三条路共用。`entry.options.config` 于是与生产条目同形（盘上 `!!js`、内存 `__jsExpr`），`reveal()` 的 `resolveLiveConfigValue` 本就是为这个形状存在的 |
+| 26 | **`ctx.loader.remove(id)` 对 include 子树条目是静默 no-op**（审查清单外，本轮实测发现） | `EntryTree.remove()` 先用完整 id `include:<id>` resolve 出条目，再把**同一个完整 id** 传给 `EntryGroup.remove()`，而后者按 `this.tree.store[id]` 查的是**局部 id** → 查不到 → `if (!entry) return`。真 loader 实测：remove 不抛错，条目与工具原样留着、子进程不退 | `removeServer()` 改用 `entry.parent.remove(entry.options.id)`（loader 自己"停掉并移除一个条目"的原语，局部 id）。**第六轮已终验**（`test/real-host-include.test.mjs`，真 `cordis-plugin-include@1.0.10` + 真重启）：那条路还有第二个后果——`EntryTree.remove()` 结尾的 `tree.write()` = `Include.write()` 把整个 `root.data`（含 patch 插入的 mcp 条目）写回 base 配置。正向用例全绿（add 后 cordis.yml 一字节不动、重启后无重复、remove 后无残留），反向对照证明走 `ctx.loader.remove()` 会"既没删掉、又把配置写脏" |
+
+**O1 的终验（第六轮补上，曾经是唯一未决项）**：装 `@deepseek-ai/cordis-plugin-include@1.0.10` 为 **devDependency**（运行时不 import，与 `dsh-typert-loader` 同一待遇），夹具换成真 Include，跑"创建 → dispose 整个 ctx → 用同一对 cordis.yml / cordis.patch.yml 重新起宿主"的真重启。结果：`add()` 根部创建后 cordis.yml 一个字节都没动，重启后两条各恰好一条；`removeServer()` 后二次重启只剩一条、无残留。peer 版本宽于实际装版本（include 要 cordis ~4.0.5 / loader ~1.0.6，基线是 4.0.2 / 1.0.3）不是新问题——所有 `dsh-*@0.2.0-rc.2` 都要 ~4.0.4，仓库一直在那个状态下全绿。
+
+**O1 仍未终验的一项**：`entry.parent.remove()` 不走 `tree.write()`，所以"移除 patch 条目会不会把剩余条目烙进 base 配置"这个风险在本轮被**绕开**而不是被验证；要终验需要真 `cordis-plugin-include` 夹具 + 重启一轮。已记入 `.tasks/mcp-tool-search/OPEN-ITEMS.md`。
+
+**本轮新增的两条测试纪律**（都是"撤掉改动看红"实证过的）：① 手写 loader 桩必须补 `create`/`remove`/`entry.parent.remove`——否则三条 RPC 在桩上以 "is not a function" 炸掉，而那不是产品缺陷、是夹具不忠实（与 `entry.update` 同一理由）；② 凡是输出进宿主管线或调宿主入口的路径必须有一条真宿主用例——`test/real-host-loader.test.mjs`（第五轮）与 `test/real-host-include.test.mjs`（第六轮，真 Include + 真重启）就是为此新建的，F1/F2/O1 的三个盲区全是它们或第四边断言抓到的。
+
+**审查清单外顺手修掉的一处同源缺陷**：`skillTargets` 的 effect（client.js:5555）与 `skillHubCategories` 是同一个形状——只处理 `result.ok === false`，RPC 抛错时逃逸成 `Uncaught (in promise)`，而注释同样承诺"拿不到就留空"。审查轮只点了后者的名，两者都修（各有自己的 try/catch 与说明，因为缺省值不同：一个是空候选、一个是原始分类 key）。真机 console 实测两者都会冒出来。
+
+**第六轮（O1 终验）**：用户要求把剩下那个未决项也验掉。新增 `test/real-host-include.test.mjs`，用**真** `@deepseek-ai/cordis-plugin-include`（为此把它加进 devDependencies）复现生产形状，并且真的"重启"——dispose 整个 cordis Context、用同一对 `cordis.yml` / `cordis.patch.yml` 重新起一个宿主。这一轮同时产出三样东西：① 正向证据（`add()` 根部创建后 base 配置一字节不动、重启后无重复条目、`removeServer()` 后无残留）；② 反向证据（走 `ctx.loader.remove()` 会"既没删掉、又把 patch 条目烙进 base 配置"，两个后果同时发生）；③ 一条不许回退的闸门（产品代码改回 `ctx.loader.remove()` 立刻红）。
+

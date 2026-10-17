@@ -428,6 +428,35 @@ test('the three contract faces list the same methods in the same order', async (
   assert.deepEqual(descriptors, declared, 'lib/client.js 的 descriptor 必须与它们同序')
 })
 
+test('the gateway prototypes are the fourth contract face: no method falls off the wire', async () => {
+  // 上面那条三边比对守的是**边间漂移**（一边加了、另一边忘了）。它对 F1 的实际形态
+  // ——`setDeferAll` 从三边**同时**消失——结构性失明：那时只有 manifest 的精确计数会红。
+  // 第四边就是为这个盲区存在的：Host 实现面本身（`McpManagerGateway.prototype` /
+  // `SkillsManagerGateway.prototype`，纯导入即可枚举，不需要起 Context）。
+  //
+  // 断言方向：原型上每个方法都必须出现在三份清单里（@Remote / TYPERT / client descriptor）。
+  // 均匀缺失时这一条直接红，而三边比对不会。
+  const { McpManagerGateway, SkillsManagerGateway } = await import('../lib/index.js')
+  const declared = [...hostIndex.matchAll(/Remote\("([A-Za-z0-9_]+)"\)/g)].map((match) => match[1])
+  assert.ok(declared.length >= 40, `从 index.js 读到的 Remote 数量异常（${declared.length}）`)
+
+  // 仅内部使用、不上面 wire 的方法必须**显式登记**：漏登记一个，这条就红，而红说的正是
+  // "有个方法没接上 wire"。目前只有一个——`setDisabled` 是 enable/disable 的共用实现，
+  // 面板不直接调它（调的是 enable/disable）。
+  const INTERNAL_ONLY = new Set(['setDisabled'])
+  const faces = [
+    ...Object.getOwnPropertyNames(McpManagerGateway.prototype),
+    ...Object.getOwnPropertyNames(SkillsManagerGateway.prototype),
+  ].filter((name) => name !== 'constructor' && !INTERNAL_ONLY.has(name))
+
+  const offWire = faces.filter((name) => !declared.includes(name))
+  assert.deepEqual(offWire, [], '这些 gateway 方法没有 @Remote，客户端永远调不到（要么补上三边，要么登记进 INTERNAL_ONLY 并说明理由）')
+  const missingImpl = declared.filter((name) => !faces.includes(name))
+  assert.deepEqual(missingImpl, [], '这些 @Remote 在 gateway 原型上找不到实现（调用必失败）')
+  // 两侧数量必须相等：只比"没有多的"会让"少的那一半"永远隐形。
+  assert.equal(faces.length, declared.length, `原型方法数与 Remote 数不一致（原型 ${faces.length} / Remote ${declared.length}）`)
+})
+
 test('every workspace write goes through the one registered-target gate', async () => {
   const runtime = await readFile(new URL('../lib/workspace-runtime.js', import.meta.url), 'utf8')
   // 「本插件只写自己认识的工作区」这条不变量只表达一次：所有会落盘 <工作区>/.dsh/mcp.json 的
@@ -638,9 +667,11 @@ test('project MCP: what the README promises the panel shows, the panel actually 
   assert.doesNotMatch(host, /await reconcileWorkspaceConnections\(this\.ctx/)
   // 编辑表单是"重建 spec"：表单不渲染的字段必须原样带回，否则编辑一次就抹掉它们
   //（disabled 会让被禁用的 server 悄悄启用；项目级预算旋钮则会被静默清空）。
+  // defer（ToolSearch 延迟开关）由表单渲染（复选框直接赋值），但行投影仍必须带上它，
+  // 否则打开编辑框时复选框初始值是错的。
   assert.match(client, /if \(initial\.enabled === false\) spec\.disabled = true;/)
   assert.match(client, /for \(const key of \['idleTimeoutMs', 'readyTimeoutMs'\]\)/)
-  assert.match(host, /"idleTimeoutMs", "readyTimeoutMs"\]\) if \(server\[field\] !== undefined\)/)
+  assert.match(host, /"idleTimeoutMs", "readyTimeoutMs", "defer"\]\) if \(server\[field\] !== undefined\)/)
   // 详情页空态不能承诺“刷新即可看到工具”：那要求 tools RPC 真能枚举共享作用域层，
   // 而 toolInventory 只认 loader 条目 + 全局视图。要么能枚举，要么别承诺。
   assert.doesNotMatch(client, /刷新即可看到工具/)

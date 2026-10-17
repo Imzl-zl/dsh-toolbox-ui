@@ -29,7 +29,7 @@ const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
   `${exportMarker}
-exports.__chrome = { McpTab, McpMarketView, SkillInstallModal, Btn, ServerList, ServerDetailPane, SkillsPanel, ServerDetail, SkillDetail, Notice, DropMenu, ICONS, mcpStatsText, skillStatsText, sortServers, sortSkills, skillScopeTabs, skillGroups, skillGroupKey, skillScopeOptions, skillTargetOptions, classifyHubError, catalogForScope, SORT_KEYS };`,
+exports.__chrome = { McpTab, McpMarketView, SkillInstallModal, Btn, ServerList, ServerDetailPane, SkillsPanel, ServerDetail, SkillDetail, Notice, DropMenu, ICONS, mcpStatsText, skillStatsText, sortServers, sortSkills, skillScopeTabs, skillGroups, skillGroupKey, skillScopeOptions, skillTargetOptions, classifyHubError, catalogForScope, SORT_KEYS, deferAllState };`,
 )
 assert.notEqual(instrumentedClient, clientSource, 'client test export marker must stay current')
 
@@ -386,6 +386,59 @@ test('底栏统计文本只数真实行，且区分启用与失败', () => {
   assert.equal(mcpStatsText([{ enabled: true, status: 'connected' }]), '1 个服务 · 1 启用')
 })
 
+// ═══ ⑤b 一键「全部延迟」的状态判定是纯函数 ═════════════════════════════════════
+// ⚠️ 逐字段断言而不用 deepEqual：client 跑在 vm realm 里，它造出的对象字面量的
+// Object.prototype 与测试主 realm 的不是同一个，deepStrictEqual 会以
+// "same structure but are not reference-equal" 失败（返回字符串的纯函数没这个问题）。
+test('deferAllState 只数当前 profile 可改的全局服务器', () => {
+  const { deferAllState } = loadClientInternals()
+  const fields = (value) => [value.total, value.deferred, value.all]
+
+  // 空列表：没有可改对象，all=false 让按钮禁用，而不是显示成一个可点的「全部开启」。
+  assert.deepEqual(fields(deferAllState([])), [0, 0, false])
+
+  // 只数 managed 的全局行。项目行（scope==='workspace'）与只读行（其他 bundle/agent）
+  // 都不该被一键扫到——它们不写在当前 profile 的 patch 里，改了会静默失败。
+  assert.deepEqual(
+    fields(deferAllState([
+      { serverName: 'a', managed: true, defer: true },
+      { serverName: 'b', managed: true, defer: false },
+      { serverName: 'ws', managed: true, scope: 'workspace', defer: false },
+      { serverName: 'ro', managed: false, defer: false },
+    ])),
+    [2, 1, false],
+  )
+
+  // 全部已开 → all=true，按钮转成「全部关闭」。
+  assert.deepEqual(
+    fields(deferAllState([
+      { serverName: 'a', managed: true, defer: true },
+      { serverName: 'b', managed: true, defer: true },
+    ])),
+    [2, 2, true],
+  )
+
+  // 一个都没开 → all=false，按钮是「全部开启」。
+  assert.equal(deferAllState([{ serverName: 'a', managed: true }]).all, false)
+  // 非数组不炸（rows 可能来自还没加载完的响应）。
+  assert.deepEqual(fields(deferAllState(undefined)), [0, 0, false])
+
+  // 项目作用域：includeWorkspace 打开后，项目行进入统计——否则按钮永远禁用，
+  // 项目级一键延迟就成了死按钮。
+  assert.deepEqual(
+    fields(deferAllState([
+      { serverName: 'ws1', managed: true, scope: 'workspace', defer: false },
+      { serverName: 'ws2', managed: true, scope: 'workspace', defer: true },
+    ], { includeWorkspace: true })),
+    [2, 1, false],
+  )
+  // 默认（全局作用域）仍然不数项目行。
+  assert.deepEqual(
+    fields(deferAllState([{ serverName: 'ws1', managed: true, scope: 'workspace', defer: false }])),
+    [0, 0, false],
+  )
+})
+
 test('分类药丸行必须换行，不得把溢出藏起来', () => {
   // 真机实测：分类多到十个时，横滚 + `scrollbar-width:none` 让最后一个药丸被切在
   // 右边缘（「文件与…」），而滚动条是隐藏的——用户没有任何线索知道那一行还能滚，
@@ -629,6 +682,25 @@ test('底栏统计必须跟着看得见的那一批行走', () => {
   assert.match(clientSource, /h\(ListFooter, \{\n\s*text: skillStatsText\(visibleRows\)/)
   assert.doesNotMatch(clientSource, /mcpStatsText\(servers\)/, '底栏不得统计全量 MCP')
   assert.doesNotMatch(clientSource, /skillStatsText\(rows\)/, '底栏不得统计全量技能')
+})
+
+test('一键「全部延迟」两个作用域都能用，且各写各的文件', () => {
+  // 曾经「批量」因为缺 RPC 被明确否决（ListFooter 的注释记着）。一键全部不是多选：
+  // 它是单一语义 + 服务端一次改写，所以现在做。多选**仍然没做**。
+  assert.match(clientSource, /setDeferAll\(/)
+  // 计数取当前作用域的**全量**行：Host 的 setDeferAll 改的就是 patch/项目配置里的全部
+  // managed 条目。按 filtered 算的话，一有筛选，title 写「所有 MCP（N 个）」而完成后
+  // toast 写「已把 M 个服务器…」——同一次交互两个数，用户不知道该信哪个。
+  // （底栏统计仍然跟 filtered 走，那是另一件事：它描述的是屏幕上看得见的那批行。）
+  assert.match(clientSource, /deferAllState\(servers, scope === 'global' \? \{\} : \{ includeWorkspace: true \}\)/)
+  assert.doesNotMatch(clientSource, /deferAllState\(filtered/, '一键延迟的计数不得跟筛选后的行走')
+  // 两个作用域都要接线，且载荷不同：全局改 profile patch，项目改 .dsh/mcp.json。
+  assert.match(clientSource, /inWorkspace \? \{ wsPath: scope, defer: next \} : \{ defer: next \}/,
+    '项目作用域必须带 wsPath，否则会写错文件')
+  // 项目作用域必须打开 includeWorkspace，否则项目行全被滤掉、按钮永远禁用。
+  assert.match(clientSource, /includeWorkspace: true/)
+  // 按钮不得常驻可点：没有可改对象时必须禁用，否则点一下返回 changed:0 而界面毫无变化。
+  assert.match(clientSource, /deferAll\.total === 0 \|\| busy/)
 })
 
 test('排序键覆盖三种口径，且同键保持宿主返回的原始顺序', () => {

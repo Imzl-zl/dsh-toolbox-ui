@@ -81,10 +81,16 @@ test('every skills invocation is namespaced, correctly identified and self-consi
   const skills = TYPERT.invocations.filter((invocation) => invocation.namespace === 'skillsManager')
   assert.ok(skills.length > 0, 'skills 的方法应登记进 TYPERT')
   // MCP 的条目一个都不能少（加 skills 不该挤掉既有契约）。
-  // 34 = 31 + 合并进来的跨工作区复制 / 预览 / 导出三条（main 的 1.5.1）。数字仍然精确，
-  // 所以少登记一条依旧会红；这里只跟着真实的 MCP 面走，不是放宽成 >=。
+  // 数字精确，所以少登记一条依旧会红；这里只跟着真实的 MCP 面走，不是放宽成 >=。
+  //
+  // ⚠️ 这个数字曾经把「setDeferAll 整个方法没接上」这件事**固化成了正确值**：那次
+  // index.js 漏写 @Remote、typert.js 漏登记、client.js 漏 descriptor，三边全缺，
+  // 于是 manifest 里恰好还是 34 条，这条断言安之若素。真正该守的是「三边同组」，
+  // 已由 package-contract.test.mjs 的「the three contract faces list the same methods
+  // in the same order」逐项比对（含顺序）。这里保留精确计数，作为第三道闸：
+  // 它回答的是"manifest 里到底有几条"，与那道比对互为冗余。
   const mcp = TYPERT.invocations.filter((invocation) => invocation.namespace === 'mcpManager')
-  assert.equal(mcp.length, 34, `MCP 的方法数应保持 34，实际 ${mcp.length}`)
+  assert.equal(mcp.length, 35, `MCP 的方法数应保持 35，实际 ${mcp.length}`)
 
   for (const invocation of skills) {
     const where = `skills 调用 ${invocation.method}`
