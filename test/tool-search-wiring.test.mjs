@@ -492,7 +492,7 @@ test('徽标：延迟行只标记状态，不带 token 估算', async () => {
   assert.doesNotMatch(client, /fmtTokens/, '不得再有 token 紧凑格式化')
   const host = await readFile(new URL('../lib/index.js', import.meta.url), 'utf8')
   assert.doesNotMatch(host, /toolEstTokens/, '行投影不得再算估算 token（全局与项目两路都不算）')
-  // 开启前预告仍要在，但只带真实数据（工具数）与真实规则（per-server 下限）。
+  // 开启前预告仍要在，但只带真实数据（工具数）——门槛已经不存在了。
   assert.match(client, /initial\.toolCount !== undefined/, '编辑表单必须带开启前预告')
 })
 

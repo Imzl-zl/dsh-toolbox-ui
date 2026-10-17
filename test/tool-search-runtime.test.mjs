@@ -5,7 +5,6 @@ import * as dshTools from '@deepseek-ai/dsh-tools'
 import {
   DEFAULTS,
   activeMaskedServers,
-  applyServerFloor,
   buildToolSearchView,
   catalogSectionText,
   deferredTools,
@@ -53,20 +52,14 @@ test('partitionSchemas: 只管理列入 defer 的服务器，搜索工具自身�
   assert.equal(ownerOf.get('Read'), undefined)
 })
 
-test('applyServerFloor: 工具数不超过下限的服务器整体不延迟', () => {
-  // Anthropic 原话 "<10 tools less beneficial"：小工具集每轮必搜一次，纯赔。
-  const names = (server, n) => Array.from({ length: n }, (_, i) => `mcp__${server}__t${i}`)
-  const ownerOf = new Map()
-  const managed = new Map()
-  for (const name of [...names('small', 10), ...names('big', 11)]) {
-    managed.set(name, { name, description: 'd', parameters: null })
-    ownerOf.set(name, name.startsWith('mcp__small__') ? 'small' : 'big')
-  }
-  const kept = applyServerFloor(managed, ownerOf, 10)
-  assert.equal(kept.managed.size, 11, '只有超过下限的服务器被延迟')
-  assert.deepEqual([...kept.droppedServers], ['small'])
-  assert.ok(!kept.managed.has('mcp__small__t0'))
-  assert.ok(kept.managed.has('mcp__big__t10'))
+test('per-server 门槛不存在：3 工具服务器也启用（旧 applyServerFloor 已删）', () => {
+  // 这条替换掉原来的 `applyServerFloor` 用例（F11 那条 `>` 变异用例一并作废）。
+  // 官方没有 per-server 工具数门槛（F8），而那道门槛制造了"勾了没生效"的断层——
+  // 所以判据只剩一个：**这台服务器被列入 defer 了吗**。
+  const schemas = Array.from({ length: 3 }, (_, i) => ({ name: `mcp__tiny__t${i}`, description: 'd', parameters: null }))
+  const view = buildToolSearchView(schemas, resolveRuntimeConfig({ deferServers: ['tiny'], serverNames: ['tiny'] }))
+  assert.equal(view.managed.size, 3, '3 个工具也必须启用')
+  assert.equal(runtimeSource.includes('applyServerFloor'), false, '门槛函数必须彻底消失（留着会被当"还在生效"）')
 })
 
 test('filterManagedTools: 只摘被管理未发现的，外来工具原样保留', () => {
@@ -148,35 +141,33 @@ test('viewRevision: 内容不变 revision 不变，内容或配置变则变', ()
   assert.notEqual(viewRevision(schemas, config), viewRevision(schemas, moreServers), 'serverNames 变了必须换 revision')
 })
 
-test('buildToolSearchView: 纯函数，聚合阈值与 per-server 下限都生效', () => {
-  // 视图里的 `managed` 是**生效的**受管集合：阈值未达时为空，于是遮罩/目录/引导/裁剪
-  // 全部自然关闭（不需要第二个"机制是否启用"的布尔——B14 之后那是第三个真相源）。
+test('buildToolSearchView: 纯函数；per-server 与聚合门槛都不存在（3 工具服务器也启用）', () => {
+  // B1/C3：两道门槛整个删掉了。视图里的 `managed` 就是"列入 defer 的服务器全部工具"，
+  // 不再有"低于阈值时清空"这一步——用户勾了就生效。
   const many = Array.from({ length: 16 }, (_, i) => ({ name: `mcp__jshook__t${i}`, description: 'd', parameters: null }))
   const config = resolveRuntimeConfig({ deferServers: ['jshook'], serverNames: ['jshook'] })
   const view = buildToolSearchView(many, config)
   assert.equal(view.managed.size, 16)
   assert.deepEqual([...activeMaskedServers(view, new Set())], ['mcp:jshook'], '被延迟的服务器指令段要一并遮掉')
 
-  // 聚合阈值未达：受管集为空 ⇒ hasDeferredServers 为假 ⇒ 整套惰性。
-  const few = many.slice(0, 14)
-  assert.equal(buildToolSearchView(few, config).managed.size, 0, '低于阈值时受管集必须是空的（否则遮罩会照做）')
+  // 小服务器也照常启用：这是去门槛的核心可观测点（原来 ≤10 工具整台不延迟）。
+  const tiny = Array.from({ length: 3 }, (_, i) => ({ name: `mcp__tiny__t${i}`, description: 'd', parameters: null }))
+  const tinyView = buildToolSearchView(tiny, resolveRuntimeConfig({ deferServers: ['tiny'], serverNames: ['tiny'] }))
+  assert.equal(tinyView.managed.size, 3, '3 工具服务器也必须启用（旧行为是 ≤10 整台不参与）')
+  assert.deepEqual([...activeMaskedServers(tinyView, new Set())], ['mcp:tiny'])
 
-  // **边界**：恰好等于阈值必须启用。旧用例只有 16 与 14，两者在 `>=` / `>` 下同结果，
-  // 于是把 `>= threshold` 写成 `> threshold` 全量仍绿——边界这个数正是最容易写错的地方。
-  // 用 DEFAULTS.threshold 而不是字面量 15：阈值调优时这条跟着走，不会静默失去区分力。
-  const exactly = Array.from({ length: DEFAULTS.threshold }, (_, i) => ({ name: `mcp__jshook__t${i}`, description: 'd', parameters: null }))
-  assert.equal(buildToolSearchView(exactly, config).managed.size, DEFAULTS.threshold, '恰好达到阈值就必须启用（>= 语义）')
-  assert.equal(buildToolSearchView(exactly.slice(1), config).managed.size, 0, '差一个就不启用（> 语义会在这里错）')
-
-  // 聚合阈值已过，但其中一个服务器太小：per-server 下限只摘掉它，大服务器照常延迟。
-  // （官方 "<10 tools less beneficial"：小工具集每轮必付一次搜索往返，纯赔。）
+  // 混合：大服务器与小服务器都启用，且各自的指令段都遮。
   const mixed = [
     ...many,
     ...Array.from({ length: 8 }, (_, i) => ({ name: `mcp__tiny__t${i}`, description: 'd', parameters: null })),
   ]
   const mixedView = buildToolSearchView(mixed, resolveRuntimeConfig({ deferServers: ['jshook', 'tiny'], serverNames: ['jshook', 'tiny'] }))
-  assert.equal(mixedView.managed.size, 16, '≤ minServerTools 的 tiny 整体不参与延迟')
-  assert.deepEqual([...activeMaskedServers(mixedView, new Set())], ['mcp:jshook'], '不延迟就不遮 tiny 的指令段')
+  assert.equal(mixedView.managed.size, 24, '两台服务器的工具都受管')
+  assert.deepEqual([...activeMaskedServers(mixedView, new Set())].sort(), ['mcp:jshook', 'mcp:tiny'])
+
+  // 不以 defer 的服务器照旧不受管（那是本机制唯一的"不介入"判据）。
+  const off = buildToolSearchView(many, resolveRuntimeConfig({ deferServers: [], serverNames: ['jshook'] }))
+  assert.equal(off.managed.size, 0)
 })
 
 test('deferredTools: D = managed − discovered，未被发现的才算"还有活要干"', () => {
@@ -263,17 +254,18 @@ test('maskGuidanceSection: 只清空引导段，段里没有它时原样返回',
 test('resolveRuntimeConfig: 缺省、maxDiscovered 下限抬到 maxResults、非法值抛错', () => {
   const config = resolveRuntimeConfig()
   assert.equal(config.toolName, DEFAULTS.toolName)
-  assert.equal(config.threshold, DEFAULTS.threshold)
-  assert.equal(config.minServerTools, DEFAULTS.minServerTools)
   assert.equal(config.maxCatalogLines, DEFAULTS.maxCatalogLines)
   // 这两个也对齐 DEFAULTS 而不是复述字面量：字面量一改就红，却证明不了"缺省取自 DEFAULTS"
   // 这件本用例唯一想守的事（同 L207-210 的模式）。
   assert.equal(config.maxResults, DEFAULTS.maxResults)
   assert.equal(config.maxDiscovered, DEFAULTS.maxDiscovered)
   assert.equal(resolveRuntimeConfig({ maxResults: 5, maxDiscovered: 2 }).maxDiscovered, 5)
-  assert.throws(() => resolveRuntimeConfig({ threshold: 0 }), /threshold/)
+  // 门槛两键已删除：不再有缺省值，写进来必须**显式报错**（C3：静默忽略会让后人以为它还在生效）。
+  assert.equal('threshold' in DEFAULTS, false, 'DEFAULTS 里不得再有 threshold')
+  assert.equal('minServerTools' in DEFAULTS, false, 'DEFAULTS 里不得再有 minServerTools')
+  assert.throws(() => resolveRuntimeConfig({ threshold: 15 }), /threshold 已废弃/)
+  assert.throws(() => resolveRuntimeConfig({ minServerTools: 10 }), /minServerTools 已废弃/)
   assert.throws(() => resolveRuntimeConfig({ maxResults: 1.5 }), /maxResults/)
-  assert.throws(() => resolveRuntimeConfig({ minServerTools: 0 }), /minServerTools/)
 })
 
 // ── 装配集成（高保真夹具：契约如实，ctx 与 agent 分离）──
@@ -441,7 +433,10 @@ test('assembly 过滤：每次组装只读一次工具视图，且清空被延�
   fixture.cleanup()
 })
 
-test('阈值以下不激活：不遮罩、不加目录，并摘掉引导段', async () => {
+test('只有 1 个工具的服务器也照常启用（去门槛之后"勾了就生效"）', async () => {
+  // 这条替换掉原来的「阈值以下不激活」：旧的聚合阈值 15 与 per-server 下限 10 都已删除（B1/C3）。
+  // 现在唯一的判据是"这台服务器被列入 defer 了吗"——极端情形正是原来被门槛挡住的那些：
+  // 只有 1 个工具的服务器，用户勾了就必须真的延迟。
   const fixture = createFixture({
     schemas: [{ name: 'mcp__jshook__only', description: 'only one', parameters: null }],
     config: DEFER_CONFIG,
@@ -451,16 +446,11 @@ test('阈值以下不激活：不遮罩、不加目录，并摘掉引导段', as
     sections: [{ name: 'tool-search:guidance', text: 'GUIDANCE' }, { name: 'persona', text: 'x' }],
   }
   const result = await assemble(fixture, assembly)
-  // 工具一个都不动：低于阈值时遮罩整套不启用。
-  assert.deepEqual(result.tools.map((tool) => tool.name), ['Read', 'mcp__jshook__only'])
-  assert.equal(result.tools, assembly.tools, '工具列表原样带过来，不过滤')
-  // 目录段不加（它与引导段是同一句话的两半，只能同进同退）。
-  assert.equal(result.sections.some((section) => section.name === 'tool-search:catalog'), false)
-  // 引导段必须摘掉：没有服务器被延迟时，"Some tools are deferred…" 是在教模型
-  // 去找一批并不存在的延迟工具（P2 修的就是这个）。
-  assert.equal(result.sections.find((section) => section.name === 'tool-search:guidance').text, '')
+  assert.deepEqual(result.tools.map((tool) => tool.name), ['Read'], '唯一的延迟工具也必须被遮')
+  assert.equal(result.sections.some((section) => section.name === 'tool-search:catalog'), true, '目录段要出现（否则模型不知道有这个工具）')
+  assert.equal(result.sections.find((section) => section.name === 'tool-search:guidance').text, 'GUIDANCE', '有活要干，引导段保留')
   assert.equal(result.sections.find((section) => section.name === 'persona').text, 'x', '别人的段不受影响')
-  assert.equal(fixture.guards[0]({ name: 'mcp__jshook__only', agent: fixture.agent }), undefined)
+  assert.equal(typeof fixture.guards[0]({ name: 'mcp__jshook__only', agent: fixture.agent }), 'string', '守卫也必须生效')
   fixture.cleanup()
 })
 
