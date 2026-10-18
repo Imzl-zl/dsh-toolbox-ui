@@ -12,7 +12,7 @@ const clientSource = await readFile(new URL('../lib/client.js', import.meta.url)
 const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
-  `${exportMarker}\nexports.__settingsPanel = { ToolSearchSettingsModal, TOOL_SEARCH_SETTING_FIELDS };`,
+  `${exportMarker}\nexports.__settingsPanel = { HintMarker, ToolSearchSettingsModal, TOOL_SEARCH_SETTING_FIELDS };`,
 )
 assert.notEqual(instrumentedClient, clientSource, 'client test export marker must stay current')
 
@@ -189,6 +189,50 @@ test('保存失败：宿主的报错显示在表单里，且不收起（错误�
   assert.match(allText(tree), /host rejected: maxResults/, '宿主的原话必须显示出来，不能换成一句泛泛的失败')
   assert.equal(saved.length, 0, '失败不得走"成功"那条路')
   assert.deepEqual(closed, [], '失败不关表单')
+})
+
+test('每个字段都有 ⓘ 说明标记：移上去是大白话的"这个数管什么"，且不只 hover 一条路', async () => {
+  // 用户要求（原话）：「最好有个提示标记那个，移动上去会说明是控制啥的，要普通人都能看懂」。
+  // 所以这条钉三件事：三个字段各有标记、标记挂在**标签**里（不是在别处）、说明文字同时给
+  // title 与 aria-label（触屏没有 hover、键盘用户拿不到 title），并且那段说明**不**铺在
+  // 表单正文里（正文里是大白话标签 + 默认值，行话放不进视线）。
+  const { HintMarker, ToolSearchSettingsModal, TOOL_SEARCH_SETTING_FIELDS, __render, __drainEffects } = loadInternals()
+  const { call } = fakeCall()
+  __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  __drainEffects()
+  await flush()
+  const tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+
+  // ① 每个字段的标签里**恰好一个**说明标记，且喂给它的是这个字段自己的 about。
+  //    夹具的 h() 不会展开组件，所以节点 type 就是 HintMarker 本身。
+  const labels = collectAll(tree, (node) => node?.type === 'label')
+  assert.equal(labels.length, 3, '三个字段各一个标签')
+  const markerTexts = labels.map((label) => {
+    // 标签文字仍然在（标记是**加在**标签上，不是替换它）。
+    assert.ok(allText(label).trim().length > 0, '标签必须有文字')
+    const markers = collectAll(label, (node) => node?.type === HintMarker)
+    assert.equal(markers.length, 1, `每个字段标签里恰好一个说明标记（实际 ${markers.length}）`)
+    return markers[0].props.text
+  })
+  assert.deepEqual(
+    [...markerTexts].sort(),
+    // 跨 realm：TOOL_SEARCH_SETTING_FIELDS 来自 vm 上下文，直接 .map() 出来的数组原型不同，
+    // deepStrictEqual 会以"看起来一模一样却不等"失败。先摊进本 realm 的数组。
+    [...TOOL_SEARCH_SETTING_FIELDS].map((field) => field.about).sort(),
+    '三个标记必须各自带上对应字段的说明文字（顺序与表一致）',
+  )
+
+  // ② 标记渲染出来的形状：原生 title（hover 可见）+ aria-label + 可 Tab（两条非 hover 路径）。
+  const rendered = __render(HintMarker, { text: '这段说明' })
+  assert.equal(rendered.props.className, 'dsh-mcp-hint')
+  assert.equal(rendered.props.title, '这段说明', 'title 是 hover 那条路')
+  assert.equal(rendered.props['aria-label'], '这段说明', 'aria-label 让读屏拿到同一段文字')
+  assert.equal(rendered.props.tabIndex, 0, '可 Tab：键盘用户拿不到 title')
+
+  // ③ 说明只走 tooltip：正文里不该再出现那三段长句（普通人看到的是标签 + 默认值）。
+  const inline = collectAll(tree, (node) => typeof node?.props?.children === 'string'
+    && TOOL_SEARCH_SETTING_FIELDS.some((field) => node.props.children === field.about))
+  assert.deepEqual(inline, [], '说明文字不得铺在表单正文里')
 })
 
 test('恢复默认：把三个值填回宿主给的默认值（不猜数字，用宿主返回的那份）', async () => {

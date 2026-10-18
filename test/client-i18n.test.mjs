@@ -209,8 +209,10 @@ test('every t() call-site key has an English entry, and the dictionary has no de
     ...i18n.ABILITY_TABS.map((tab) => tab.label),
     ...i18n.SKILL_MODES.map((mode) => mode.label),
     ...i18n.MCP_PRESETS.map((preset) => preset.label),
-    // C2 的参数表单：三个字段各有一条标签与一段实测依据，都在渲染点过 t()。
-    ...i18n.TOOL_SEARCH_SETTING_FIELDS.flatMap((field) => [field.label, field.hint]),
+    // C2 的参数表单：三个字段各有一条标签与一段 ⓘ 说明（说明文字是 tooltip 内容，
+    // 同样在渲染点过 t()）。表字段名从 hint 改成 about：它是给普通人的"这个数管什么"，
+    // 不是给懂行的人看的实测记录（证据留在 TUNING-DECISIONS 里）。
+    ...i18n.TOOL_SEARCH_SETTING_FIELDS.flatMap((field) => [field.label, field.about]),
   ]
   const reachable = new Set([
     ...calledTranslationKeys(),
