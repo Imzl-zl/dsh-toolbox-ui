@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader, { EntryTree } from '@deepseek-ai/cordis-plugin-loader'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import { DEFAULTS } from '../lib/tool-search-runtime.js'
+import { readToolSearchSettingsFromPatch } from '../lib/tool-search-settings.js'
 
 // 这一组用例打的是 **O1 的生产形状**：真 cordis Context + 真 Loader（带 include 子树）
 // + 真 ToolRuntime + 真 mcp-client 连**真 stdio 子进程**。
@@ -331,5 +333,74 @@ test('real loader host: installBuiltins() appends live loader entries for the se
   } finally {
     await host.cleanup()
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+// ── C2：延迟加载参数（面板表单 → 插件自己的 patch 行 → 运行中生效）──
+//
+// 为什么必须在这一组里：C2 的落点是**插件自己那条 patch 条目的 config**，而"改配置怎么生效"
+// 完全取决于真实 loader 的形状——patch 文件不会被热加载，所以"只写盘"等于改了没反应。
+// 夹具里给一个假 loader 只能证明"插件调用了写盘函数"，那正是设计文档 §12.1 记过的坑。
+test('real loader host: 面板改延迟参数 → 写进 plugin patch 并当场重装运行时（不重启）', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const patchBody = [
+    '# profile patch：注释必须原样保留',
+    '- insert:',
+    '  - id: mcp-manager-ui',
+    '    name: dsh-toolbox-ui',
+    '  - id: mcp-filesystem',
+    "    name: '@deepseek-ai/dsh-mcp-client'",
+    '    config:',
+    '      transport: stdio',
+    '      serverName: fs',
+    '      command: node',
+    '',
+  ].join('\n')
+  const host = await createLoaderHost(patchBody, [])
+  try {
+    const DEFAULT_SETTINGS = {
+      maxResults: DEFAULTS.maxResults,
+      maxCatalogLines: DEFAULTS.maxCatalogLines,
+      maxDiscovered: DEFAULTS.maxDiscovered,
+    }
+    const registered = () => host.tools.schemas().find((schema) => schema.name === 'tool_search')
+
+    // 1) 读：没有配置时就是默认值（面板照这个渲染）。
+    const initial = await host.manager.toolSearchSettings()
+    assert.deepEqual(initial.settings, DEFAULT_SETTINGS)
+    assert.deepEqual(initial.defaults, DEFAULT_SETTINGS)
+    assert.match(registered().parameters.properties.max_results.description, new RegExp(`\\(1-${DEFAULTS.maxResults}\\)`))
+
+    // 2) 写：三个都改，落盘是稀疏的（都≠默认，所以三个都写）。
+    const saved = await host.manager.updateToolSearchSettings({ settings: { maxResults: 25, maxCatalogLines: 120, maxDiscovered: 25 } })
+    assert.deepEqual(saved.settings, { maxResults: 25, maxCatalogLines: 120, maxDiscovered: 25 })
+    const written = await readFile(host.patch, 'utf8')
+    assert.match(written, /# profile patch：注释必须原样保留/, '注释不得被写丢')
+    assert.match(written, /serverName: fs/, '别的条目一个字都不该动')
+    assert.deepEqual(readToolSearchSettingsFromPatch(written, { name: 'dsh-toolbox-ui' }), {
+      maxResults: 25,
+      maxCatalogLines: 120,
+      maxDiscovered: 25,
+    })
+
+    // 3) 生效：**同一个宿主进程**里注册的工具定义已换成新上限。
+    //    这是 C2 的核心断言——只写盘不重装的话，运行值已是 25 而模型看到的上限还是 10，
+    //    也就是"文件对了、行为没变"。
+    assert.match(registered().parameters.properties.max_results.description, /\(1-25\)/,
+      '改完参数后模型可见的工具定义必须跟着变：否则面板说生效了、模型看到的还是旧上限')
+    assert.equal(host.tools.schemas().filter((schema) => schema.name === 'tool_search').length, 1,
+      '重装不得留下两份 tool_search（先拆后装）')
+
+    // 4) 回到默认 → 键被删掉，而不是写回 10/300/20。
+    const reset = await host.manager.updateToolSearchSettings({ settings: DEFAULT_SETTINGS })
+    assert.deepEqual(reset.settings, DEFAULT_SETTINGS)
+    assert.doesNotMatch(await readFile(host.patch, 'utf8'), /toolSearch/, '等于默认的值不得落盘（将来调默认值才不会被老数字钉住）')
+    assert.match(registered().parameters.properties.max_results.description, new RegExp(`\\(1-${DEFAULTS.maxResults}\\)`))
+
+    // 5) 非法值：明确报错，且**盘上不动**（先校验再写）。
+    const before = await readFile(host.patch, 'utf8')
+    await assert.rejects(host.manager.updateToolSearchSettings({ settings: { maxResults: 0 } }), /maxResults/)
+    assert.equal(await readFile(host.patch, 'utf8'), before, '非法值不得写进配置')
+  } finally {
+    await host.cleanup()
   }
 })

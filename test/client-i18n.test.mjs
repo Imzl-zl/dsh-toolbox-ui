@@ -31,6 +31,9 @@ const testSurface = [
   'SCOPE_LABELS',
   'SCOPE_LABEL_DETAILS',
   'MCP_PRESETS',
+  // C2 的参数表单表：标签与提示存中文原文，渲染点 t(field.label) / t(field.hint)。
+  // 和 MCP_PRESETS 一样，源码扫描看不见 `t(字段)`，所以必须显式登记进可达集。
+  'TOOL_SEARCH_SETTING_FIELDS',
   'EN_DICT',
   't',
   'preservedView',
@@ -206,6 +209,8 @@ test('every t() call-site key has an English entry, and the dictionary has no de
     ...i18n.ABILITY_TABS.map((tab) => tab.label),
     ...i18n.SKILL_MODES.map((mode) => mode.label),
     ...i18n.MCP_PRESETS.map((preset) => preset.label),
+    // C2 的参数表单：三个字段各有一条标签与一段实测依据，都在渲染点过 t()。
+    ...i18n.TOOL_SEARCH_SETTING_FIELDS.flatMap((field) => [field.label, field.hint]),
   ]
   const reachable = new Set([
     ...calledTranslationKeys(),

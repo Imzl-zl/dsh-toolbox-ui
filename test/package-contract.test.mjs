@@ -399,13 +399,14 @@ test('client moves focus into dialogs so Escape handlers receive keyboard events
   assert.match(dialogCtor, /useEffect\(\(\) => \{ dialogRef\.current\?\.focus\(\); \}, \[\]\)/, 'Dialog 必须在挂载时把焦点吸进来（挂载即打开）')
   assert.match(dialogCtor, /role: 'dialog'/)
   assert.match(dialogCtor, /tabIndex: -1/)
-  // 五个 modal 全部走构造器；有任何一个回去手写内层 div，这里就会掉下来。
+  // 六个 modal 全部走构造器；有任何一个回去手写内层 div，这里就会掉下来。
+  // 5 → 6：1.8.0 的 C2 新增「延迟加载参数」表单（它同样必须走 Dialog，才有焦点与 Escape）。
   const uses = [...client.matchAll(/h\(Dialog, \{ label: /g)].length
-  assert.equal(uses, 5, `走 Dialog 的对话框数量变了（现在 ${uses} 个）`)
+  assert.equal(uses, 6, `走 Dialog 的对话框数量变了（现在 ${uses} 个）`)
   assert.equal((client.match(/className: 'dsh-mcp-modal' \+ \(cls/g) || []).length, 1, 'modal 的 class 组合只该在 Dialog 里做一次')
-  // 遮罩由调用点渲染一次（五个 modal + 更新卡片自己那层，共六处）。Dialog 内部再套一层就会
+  // 遮罩由调用点渲染一次（六个 modal + 更新卡片自己那层，共七处）。Dialog 内部再套一层就会
   // 嵌套出两个 overlay——实测踩过，所以钉住。
-  assert.equal((client.match(/className: 'dsh-mcp-overlay'/g) || []).length, 6, '遮罩只在调用点渲染，Dialog 不重复套一层')
+  assert.equal((client.match(/className: 'dsh-mcp-overlay'/g) || []).length, 7, '遮罩只在调用点渲染，Dialog 不重复套一层')
 })
 
 test('the three contract faces list the same methods in the same order', async () => {

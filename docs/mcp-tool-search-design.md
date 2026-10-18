@@ -523,3 +523,48 @@ not only on disk`（夹具 = 临时技能根 × 真 `SkillRegistry` × 真 `dsh-
 - **`both` 的 inert 必须显式早退**，而不是靠"managed 为空"自然发生：两者在组装层的
   差别是"引导段摘不摘"，而摘了就不是 inert 了。
 
+## 12.9 第十一轮（C2）：把三个有证据的参数开放给用户
+
+**落点**：插件自己那条 profile patch 条目（`- id: mcp-manager-ui / name: dsh-toolbox-ui`）的
+`config.toolSearch`，**不新开设置文件**。这是本插件**第一次有 `Config`**（`lib/index.js` 的
+`static Config = ToolSearchConfigSchema`），cordis 用标准 schema 在加载时校验
+（`resolveConfig` → `runtime.Config['~standard'].validate`）。
+
+**只开三个**（证据见 `TUNING-DECISIONS`）：`maxResults`（Q2/F4）、`maxCatalogLines`（Q4）、
+`maxDiscovered`（Q2）。**不开** `requireDiscovery`（Q6：关掉 = 让模型凭记忆直调未加载工具），
+也不开 `toolName` / `stem`（前者是换名逃生门；后者只有两组真实工具集的零误伤证据）。
+`descriptionChars` / `threshold` / `minServerTools` 已删除，schema 的 strict 让它们**写进来就报错**。
+
+**四个决定与理由**：
+
+1. **schema 必须接受 `undefined`**。存量 profile 的 patch 行没有 `config:`，loader 传
+   `undefined`——不接受它等于"升级后面板消失"。用 `z.object({…}).strict().default({})`，
+   `test/tool-search-settings.test.mjs` 第一条钉的就是这件事。
+2. **落盘稀疏**：与 `DEFAULTS` 相同的值**不写**。否则默认值将来有更好的实测依据时，老用户会
+   被这次抄下来的数字钉住，而面板照样显示"默认"。删键后空的 `config` / `toolSearch` 一起删
+   （不留空壳）。
+3. **生效方式是重装运行时，不是"活值 getter"**。`max_results` 的**取值范围与默认值写在工具
+   定义里**（模型据它决定传什么数字），而工具定义只在 `tools.register` 那一刻生成一次；做成
+   活值就会出现"运行值 25、模型看到的上限 10"的假生效。重装的代价（发现集要从会话投影恢复）
+   实测可接受：`test/tool-search-runtime.test.mjs` 的「换参数重装后已发现集仍在」证明守卫照样
+   放行、目录照样不再列它。
+4. **先校验 → 再写盘 → 最后重装**。写盘失败整个失败（运行时不改），免得"只在本进程生效、
+   盘上没写"在下次重启时静默回退；重装失败则把旧配置装回来并**明确报错**（参数已写盘、
+   重启后生效）。patch 文件**不会被热加载**（这正是 `add()` 走 `loader.create` 的原因），
+   所以"改了真的生效"必须由插件自己完成——真 loader 用例钉的就是这一条。
+
+**验证**（19 条新增用例，全绿；含两处变异复验）：
+- 纯逻辑 11 条（`tool-search-settings`）：schema 三形状 / 非法值与已删除键报错 / 稀疏归一 /
+  patch 往返与注释保留 / 条目缺失时报错而不凭空新建；
+- 运行时 2 条：工具定义里的上限随配置变；重装后已发现集恢复；
+- **真 loader 1 条**（`real-host-loader`）：读默认 → 写三个值（注释与别的条目一个字不动）→
+  **同一进程里注册的工具定义换成新上限** → 回到默认删键 → 非法值盘上不动；
+- 面板 5 条（`tool-search-settings-panel`）：打开即读、三项填生效值、保存发数字且成功回报、
+  失败把宿主原话留在表单里、恢复默认。
+- 变异复验：掐掉"重装" → 真 loader 那条以"改完参数后模型可见的工具定义必须跟着变"变红。
+
+**仍欠**：`maxCatalogLines` 的默认值该不该从 300 抬起。量已经补上了（Q4：360 个真实工具、
+每行 32.66 字符、上限 300 会漏 60 个名字），但"改默认值 = 改所有用户的每请求 prompt 体积"
+属于产品决定，本轮不替用户拍板；C2 让用户自己能改，所以它不再是锁死的。
+
+

@@ -1035,3 +1035,57 @@ test('视图按 revision 缓存：配置与工具都不变时不重建，描述�
   assert.ok(JSON.stringify(hit).includes('mcp__jshook__tool_0'), '描述变化必须被 revision 捕捉：新词要能搜到')
   fixture.cleanup()
 })
+
+// ── C2：参数可配之后的两条机制级依据 ────────────────────────────────────
+//
+// 用户改参数时，落地方式有两种：(a) 把三个上限做成"活值 getter"，只改内存；(b) **用新配置
+// 重装**运行时。选 (b) 的理由就是下面第一条用例：`max_results` 的**取值范围与默认值写在工具
+// 定义里**（模型可见文案），而工具定义只在注册那一刻生成一次。(a) 会让模型看到"上限 10"
+// 而实际允许 25 —— 正是本项目最不能接受的那种"看起来生效了"。(b) 的代价是重装，所以第二条
+// 用例钉住"重装不丢已发现集"，让代价可接受。
+
+test('C2：maxResults 写在工具定义里 —— 换配置必须重新注册，否则模型看到的上限是假的', () => {
+  const first = createFixture({ schemas: BIG_SCHEMAS, config: { ...DEFER_CONFIG, maxResults: 10 } })
+  const before = first.registered.get('tool_search').parameters.properties.max_results.description
+  assert.match(before, /\(1-10\)/, '默认上限必须写进参数描述：这是模型据以决定 max_results 的唯一依据')
+  assert.match(before, /defaults to 10/)
+  first.cleanup()
+  const second = createFixture({ schemas: BIG_SCHEMAS, config: { ...DEFER_CONFIG, maxResults: 25 } })
+  const after = second.registered.get('tool_search').parameters.properties.max_results.description
+  assert.match(after, /\(1-25\)/, '新配置必须出现在新注册的工具定义里')
+  assert.match(after, /defaults to 25/)
+  second.cleanup()
+})
+
+test('C2：换参数重装运行时后，已发现集从会话投影恢复（不逼模型重搜，守卫也不反口）', async () => {
+  const projections = fakeProjections()
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, projections })
+  const assembly = { tools: [{ name: 'Read' }, ...BIG_SCHEMAS.map((schema) => ({ name: schema.name })), { name: 'tool_search' }], sections: [] }
+  const tool = fixture.registered.get('tool_search')
+  const value = await tool.execute({ query: 'select:mcp__jshook__tool_3' }, { agent: fixture.agent })
+  // 宿主把这次结果提交给会话投影（native 路径：tool/result 事件的 content 就是 render 文本）。
+  projections.commit(fixture.agent.session, toolResultEvent(tool, value))
+  assert.equal(fixture.guards[0]({ name: 'mcp__jshook__tool_3', agent: fixture.agent }), undefined, '前置：发现后放行')
+
+  // 换参数 = 拆掉旧装配、用新配置重装（宿主侧由 updateToolSearchSettings 触发）。
+  fixture.cleanup()
+  assert.equal(fixture.registered.size, 0, '前置：旧装配已完全拆除')
+  const dispose = installToolSearchRuntime(fixture.ctx, { ...DEFER_CONFIG, maxResults: 25 })
+  try {
+    // 1) 已发现集恢复：守卫放行，而不只是"新装了一份空的"。
+    assert.equal(fixture.guards.length, 1)
+    assert.equal(
+      fixture.guards[0]({ name: 'mcp__jshook__tool_3', agent: fixture.agent }),
+      undefined,
+      '重装后已发现的工具仍须放行（否则模型刚加载的工具会突然被拒）',
+    )
+    // 2) 目录里同样不再列它（D = managed − discovered 在重装后依然成立）。
+    const result = await assemble(fixture, assembly)
+    assert.ok(result.tools.some((entry) => entry.name === 'mcp__jshook__tool_3'), '已发现工具必须在可见集里')
+    const catalog = result.sections.find((section) => section.name === 'tool-search:catalog')
+    assert.doesNotMatch(catalog.text, /mcp__jshook__tool_3/, '已发现的工具不得继续留在目录里')
+  } finally {
+    dispose()
+  }
+})
+
