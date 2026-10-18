@@ -168,6 +168,38 @@ test('derives the skill root from the host resourceBase, for both skill shapes',
   }
 })
 
+test('a flat skill whose file name differs from its frontmatter name still resolves', async () => {
+  // 宿主**允许**扁平技能的文件名与 frontmatter 里的 `name` 不一致：技能名来自 frontmatter，
+  // 文件名只承载它。`locateSkill` 曾按「文件名 === `<name>.md`」判别形态，于是这种技能定位不到
+  // 根、整行不可操作（启停/删除都无从下手）。现在的判据是宿主的真实规则：末段以 `.md` 结尾
+  // 就是扁平，与技能名无关；目录捆绑固定是 `<目录>/SKILL.md`。
+  //
+  // 这个坑的来源值得记住：宿主自己的测试助手（`writeFlatSkill`）**总是**写 `` `${name}.md` ``，
+  // 所以它的用例里根本没有这种形状——拿测试的假设当契约就会漏掉真实契约。
+  // 本用例的存在就是那条修复的**回归网**（修复本身早已在 lib 里，曾只缺这条用例）。
+  const base = await mkdtemp(join(tmpdir(), 'dsh-skills-name-mismatch-'))
+  const root = join(base, 'skills')
+  await mkdir(root, { recursive: true })
+  await writeFile(join(root, 'file-name.md'), '---\nname: skill-name\ndescription: 名字不一致\n---\n\n正文\n')
+  try {
+    const skills = fakeSkills({
+      '': [
+        skill({
+          name: 'skill-name',
+          path: await realpath(join(root, 'file-name.md')),
+          resourceBase: { kind: 'directory', path: root },
+        }),
+      ],
+    })
+    const [row] = await listSkillViews(ctxWith(skills), {})
+    assert.equal(row.kind, 'flat', '名字不一致不影响形态判别')
+    assert.equal(row.root, root, '根来自 resourceBase，不是从 path 反推的')
+    assert.equal(row.entry, 'file-name.md', '条目是磁盘上的真实文件名，不是技能名')
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
 test('resolves the root when the skill directory is a link (the two host fields disagree)', async () => {
   // ⚠️ 真机缺陷（issue #5，2026-10-11 复现）：技能目录本身是符号链接/junction 时，
   // 面板那一行显示「位置（未报告）/调用权限未知」，悬浮提示还冤枉 frontmatter。
