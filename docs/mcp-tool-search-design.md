@@ -563,6 +563,10 @@ not only on disk`（夹具 = 临时技能根 × 真 `SkillRegistry` × 真 `dsh-
   失败把宿主原话留在表单里、恢复默认、**每个字段的 ⓘ 说明标记**（原生 title + aria-label +
   可 Tab；说明文字是"这个数管什么"的大白话，行话留在 TUNING-DECISIONS）。
 - 变异复验：掐掉"重装" → 真 loader 那条以"改完参数后模型可见的工具定义必须跟着变"变红。
+- **升级路径端到端核对（一次性，未进用例）**：造一个临时 junction 让 loader 能按包名解析本包，
+  再让**真 loader** 创建 `- id: mcp-manager-ui / name: dsh-toolbox-ui`（**没有 config**）这条条目：
+  插件加载成功、`mcpManager` 在、`tool_search` 已注册。带副作用的步骤不进用例，但同一段校验
+  代码由 `resolveConfig(McpManagerGateway, undefined)` 这条常驻用例守着。
 
 **仍欠**：`maxCatalogLines` 的默认值该不该从 300 抬起。量已经补上了（Q4：360 个真实工具、
 每行 32.66 字符、上限 300 会漏 60 个名字），但"改默认值 = 改所有用户的每请求 prompt 体积"

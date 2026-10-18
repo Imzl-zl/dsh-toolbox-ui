@@ -38,6 +38,26 @@ test('配置 schema：没有 config 时也要通过（否则每个老 profile �
   }
 })
 
+test('cordis 的真实校验路径接受"没有 config"（存量 profile 的升级路径）', async () => {
+  // 上面那条用的是 schema 自己的 `~standard`；这条换成**宿主会用的那段代码**：
+  // cordis 导出的 `resolveConfig(runtime, config)`。链路是 loader 把 `entry.options.config`
+  // 原样交给 cordis（cordis-plugin-loader:537 `this.ctx.registry.plugin(plugin, this.options.config)`），
+  // cordis 再用它过我们的 `static Config`。存量 profile 的那条 patch 行没有 `config:`，
+  // 所以传进来是 **undefined** —— 不接受它 = 所有用户升级后面板直接消失。
+  //
+  // 端到端那一步（真 loader 按包名加载本插件 + 该条目无 config）另做了一次一次性核对：
+  // 插件加载成功、`mcpManager` 在、`tool_search` 已注册。那一步需要往 node_modules 里临时
+  // 造一个 junction 让包名可解析，带副作用，所以不进用例；这里覆盖的是同一段校验代码。
+  const { resolveConfig } = await import('@deepseek-ai/cordis')
+  const { McpManagerGateway } = await import('../lib/index.js')
+  assert.deepEqual(resolveConfig(McpManagerGateway, undefined), {})
+  assert.deepEqual(resolveConfig(McpManagerGateway, {}), {})
+  assert.deepEqual(resolveConfig(McpManagerGateway, { toolSearch: { maxResults: 20 } }), { toolSearch: { maxResults: 20 } })
+  // 非法值在**加载期**就炸（不是等到第一次搜索），报错里带路径——这就是"写错了当场看得见"。
+  assert.throws(() => resolveConfig(McpManagerGateway, { toolSearch: { maxResults: 0 } }), /invalid config/)
+  assert.throws(() => resolveConfig(McpManagerGateway, { toolsearch: { maxResults: 20 } }), /invalid config/)
+})
+
 test('配置 schema：只认三个键，非法值与未知键当场报错', () => {
   const ok = validate({ toolSearch: { maxResults: 20, maxCatalogLines: 120, maxDiscovered: 30 } })
   assert.equal(ok.issues, undefined)
