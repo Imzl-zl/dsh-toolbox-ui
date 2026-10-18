@@ -90,8 +90,8 @@ test('every skills invocation is namespaced, correctly identified and self-consi
   // in the same order」逐项比对（含顺序）。这里保留精确计数，作为第三道闸：
   // 它回答的是"manifest 里到底有几条"，与那道比对互为冗余。
   const mcp = TYPERT.invocations.filter((invocation) => invocation.namespace === 'mcpManager')
-  // 35 → 37（1.8.0 的 C2）：新增 toolSearchSettings / updateToolSearchSettings 两个方法。
-  assert.equal(mcp.length, 37, `MCP 的方法数应保持 37，实际 ${mcp.length}`)
+  // 37 → 38（1.8.1）：新增 setDefer（行内单台的延迟开关）。
+  assert.equal(mcp.length, 38, `MCP 的方法数应保持 38，实际 ${mcp.length}`)
 
   for (const invocation of skills) {
     const where = `skills 调用 ${invocation.method}`

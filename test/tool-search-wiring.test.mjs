@@ -486,8 +486,20 @@ test('徽标：延迟行只标记状态，不带 token 估算', async () => {
   // 我们不知道用户装了什么 MCP，schema 大小差一个量级，任何估算都给不出可用的数，
   // 而给了数用户就拿它做决定（"7.4K 好像不多，不用延迟"）——主动误导。
   // 现在钉的是反面：徽标与详情行**不得**再出现 token 估算。
+  //
+  // 1.8.1 起这颗徽标同时是**行内开关**（两种状态都渲染、都可点）：所以源码形状从
+  // "开着才 `? h(Badge, {cls:'t-defer'})`" 改成"渲染 DeferChip，状态由 s.defer 决定"。
+  // 两条都钉：接线（状态从哪来）与样式（开着时哪个 class）。
   const client = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(client, /s\.defer === true[\s\S]{0,400}?'t-defer'/, '延迟行必须渲染 t-defer 徽标')
+  assert.match(client, /h\(DeferChip, \{ on: s\.defer === true, interactive: s\.managed === true && !busy/, '延迟行必须渲染状态芯片，且只有本插件管理的条目可点')
+  assert.match(client, /className: 'dsh-mcp-badge as-btn' \+ \(on \? ' t-defer' : ''\)/, '芯片开着时必须带 t-defer（虚线 accent）')
+  // 芯片点下去**不能顺带选中那一行**（行本身是 role=button，冒泡会让"点开关"变成"选中"）。
+  assert.match(client, /onClick: \(e\) => \{ e\.stopPropagation\(\); onClick\(\); \}/, '芯片必须 stopPropagation')
+  // 行内开关的写路径：单台 RPC，项目作用域带 wsPath（两个项目可能同名）。
+  assert.match(client, /const toggleDeferOne = \(s\) => \{[\s\S]{0,900}?'setDefer'/, '行内开关必须走单台 RPC setDefer')
+  assert.match(client, /s\.scope === 'workspace' \? \{ name: s\.serverName, wsPath: scope, defer: next \} : \{ name: s\.serverName, defer: next \}/, '项目行必须带 wsPath')
+  // 两个作用域的列表都要把动作传下去（少一个，那个作用域就退回"只能进编辑框"）。
+  assert.equal((client.match(/onToggleDefer: toggleDeferOne/g) || []).length, 2, '全局与项目两个列表都要接上行内开关')
   assert.doesNotMatch(client, /toolEstTokens/, '行上不得再有估算 token（精确感是假的）')
   assert.doesNotMatch(client, /fmtTokens/, '不得再有 token 紧凑格式化')
   const host = await readFile(new URL('../lib/index.js', import.meta.url), 'utf8')

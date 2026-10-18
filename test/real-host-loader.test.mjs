@@ -10,6 +10,7 @@ import Loader, { EntryTree } from '@deepseek-ai/cordis-plugin-loader'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { DEFAULTS } from '../lib/tool-search-runtime.js'
 import { readToolSearchSettingsFromPatch } from '../lib/tool-search-settings.js'
+import { readManagedMcpServers } from '../lib/mcp-config.js'
 
 // 这一组用例打的是 **O1 的生产形状**：真 cordis Context + 真 Loader（带 include 子树）
 // + 真 ToolRuntime + 真 mcp-client 连**真 stdio 子进程**。
@@ -338,6 +339,72 @@ test('real loader host: installBuiltins() appends live loader entries for the se
 
 // 真实安装形态（`dsh plugin add` → 进 bundles）：那条 insert 住在**包自己的** cordis.patch.yml
 // （bundle 层），用户 profile 的 patch 里根本没有我们这条。早期实现要求它存在，于是主安装路径下
+// 行内单台延迟开关（1.8.1）：面板行上那颗「延迟 / 全量」芯片直接调 setDefer。
+// 这条钉三件真机才有的事：① 只改被点的那一台（不误伤旁边那台）；② 磁盘上新值、内存活条目
+// 也同步（deferServersOf 读的是 entry.options.config.defer，只写盘不改内存 = 改了不生效）；
+// ③ 名字对不上时必须**报错**，不能静默 no-op。
+test('real loader host: 单台延迟开关只改那一台，并同步内存活条目', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-o1-setdefer-'))
+  const server = join(root, 'fixture-server.mjs')
+  await writeFile(server, FIXTURE_SERVER)
+  const patchBody = [
+    '- insert:',
+    '  - id: mcp-alpha',
+    `    name: '${MCP_NAME}'`,
+    '    config:',
+    '      transport: stdio',
+    '      serverName: alpha',
+    `      command: ${process.execPath}`,
+    `      args: [ '${server}', '${join(root, 'alpha-exited')}' ]`,
+    '  - id: mcp-beta',
+    `    name: '${MCP_NAME}'`,
+    '    config:',
+    '      transport: stdio',
+    '      serverName: beta',
+    `      command: ${process.execPath}`,
+    `      args: [ '${server}', '${join(root, 'beta-exited')}' ]`,
+    '      defer: true',
+    '',
+  ].join('\n')
+  const host = await createLoaderHost(patchBody, [
+    stdioEntry('mcp-alpha', 'alpha', [server, join(root, 'alpha-exited')]),
+    { ...stdioEntry('mcp-beta', 'beta', [server, join(root, 'beta-exited')]), config: { ...stdioEntry('mcp-beta', 'beta', [server, join(root, 'beta-exited')]).config, defer: true } },
+  ])
+  try {
+    await waitFor(() => host.toolNames().includes('mcp__beta__echo'))
+    const deferOf = async (name) => (await host.manager.list()).servers.find((row) => row.serverName === name)?.defer
+    assert.equal(await deferOf('beta'), true, '前置：beta 已在延迟')
+    assert.notEqual(await deferOf('alpha'), true, '前置：alpha 未延迟（没写 defer 时是 undefined，语义上等同不延迟）')
+
+    const result = await host.manager.setDefer({ name: 'alpha', defer: true })
+    assert.equal(result.changed, 1, '只该改一台')
+    assert.match(result.note, /alpha/)
+
+    // ① 盘上：alpha 变 true，beta 原样。用**生产解析器**读回来（正则会被长路径撑破，
+    //    而且断言的是"面板读到的配置"，不是 YAML 文本长什么样）。
+    const written = await readFile(host.patch, 'utf8')
+    const parsedRows = readManagedMcpServers(written).servers
+    assert.equal(parsedRows.find((row) => row.name === 'alpha').defer, true, 'alpha 的 defer 必须落盘')
+    assert.equal(parsedRows.find((row) => row.name === 'beta').defer, true, 'beta 本来就在延迟，不该被这次操作带成别的值')
+    assert.equal(await deferOf('alpha'), true)
+    assert.equal(await deferOf('beta'), true, 'beta 本来就在延迟，不该被这次操作带成别的值')
+
+    // ② 内存活条目同步：deferServersOf 读的正是它，只写盘不改内存 = 运行中的会话读旧值。
+    const alphaEntry = host.entries().find((entry) => entry.options.config?.serverName === 'alpha')
+    assert.equal(alphaEntry.options.config.defer, true)
+
+    // ③ 名字不存在：明确报错，不静默 no-op。
+    await assert.rejects(host.manager.setDefer({ name: 'ghost', defer: true }), /没有这个 MCP/)
+    // 反向再切回来，别把 beta 一起带走。
+    await host.manager.setDefer({ name: 'alpha', defer: false })
+    assert.notEqual(await deferOf('alpha'), true)
+    assert.equal(await deferOf('beta'), true)
+  } finally {
+    await host.cleanup()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 // 面板保存必然失败——而 `call()` 不抛错，失败还被 UI 当成成功（真机点一次才发现）。
 test('real loader host: 插件按 bundle 安装（patch 里没有自己的条目）时，保存追加 id 定向覆盖并当场生效', { timeout: TEST_TIMEOUT_MS }, async () => {
   const patchBody = [

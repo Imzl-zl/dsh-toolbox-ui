@@ -22,7 +22,7 @@ const clientSource = await readFile(new URL('../lib/client.js', import.meta.url)
 const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
-  `${exportMarker}\nexports.__panes = { ServerDetail, ServerDetailPane, SkillDetail, SkillDetailPane, ServerList, deferAllState };`,
+  `${exportMarker}\nexports.__panes = { DeferChip, ServerDetail, ServerDetailPane, SkillDetail, SkillDetailPane, ServerList, deferAllState };`,
 )
 assert.notEqual(instrumentedClient, clientSource, 'client test export marker must stay current')
 
@@ -432,16 +432,17 @@ test('一键延迟的计数取当前作用域全量行，不是筛选后的行',
   assert.doesNotMatch(clientSource, /deferAllState\(filtered,/, '不得再按筛选后的行计数')
 })
 
-test('延迟徽标不带 token 估算，只标状态', () => {
+test('延迟开关：行内两种状态都可点，且只标状态、不带 token 估算', () => {
   const { ServerList } = loadInternals()
-  const tree = ServerList({
-    servers: [server({ serverName: 'serena', toolCount: 28, defer: true })],
+  const rowProps = (defer) => ({
+    servers: [server({ serverName: 'serena', toolCount: 28, defer })],
     total: 1,
     selected: 'serena',
     query: '',
     onQuery() {},
     onSelect() {},
     onToggle() {},
+    onToggleDefer() {},
     busy: false,
     transportFilter: 'all',
     statusFilter: 'all',
@@ -450,25 +451,37 @@ test('延迟徽标不带 token 估算，只标状态', () => {
     footer: null,
     toolbarAction: null,
   })
-  const badge = badges(tree, 't-defer')[0]
-  assert.ok(badge, '延迟行要有徽标')
-  assert.equal(childText(badge).join(''), '延迟', '徽标只标状态，不带 token 估算（那个数字的精确感是假的）')
-  // 未延迟的行没有徽标。
-  const plain = ServerList({
-    servers: [server({ serverName: 'serena', toolCount: 28, defer: false })],
-    total: 1,
-    selected: 'serena',
-    query: '',
-    onQuery() {},
-    onSelect() {},
-    onToggle() {},
-    busy: false,
-    transportFilter: 'all',
-    statusFilter: 'all',
-    onTransportFilter() {},
-    onStatusFilter() {},
-    footer: null,
-    toolbarAction: null,
-  })
-  assert.equal(badges(plain, 't-defer').length, 0, '没开延迟不给徽标')
+  // 开着的行：芯片在、状态是"开"。
+  const on = collectAll(ServerList(rowProps(true)), (node) => node?.type?.name === 'DeferChip')[0]
+  assert.ok(on, '延迟行要有芯片')
+  assert.equal(on.props.on, true)
+  assert.equal(on.props.interactive, true, '本插件管理的条目必须可点（不然又得进编辑框）')
+  // ⚠️ 没开延迟的行**也要有芯片**——这正是这次改动的目的：用户能从列表上直接开单台，
+  // 而不用先去「编辑」里找那个藏起来的复选框。以前这里是"开着才出现的徽标"。
+  const off = collectAll(ServerList(rowProps(false)), (node) => node?.type?.name === 'DeferChip')[0]
+  assert.ok(off, '未延迟的行同样要有芯片（可点开）')
+  assert.equal(off.props.on, false)
 })
+
+test('延迟芯片：开=「延迟」、关=「全量」，状态走 aria-pressed，不带任何估算数字', () => {
+  // 组件在假 React 里不会自动展开，所以直接调它看渲染结果（与 EyeToggle 那组同一手法）。
+  const { DeferChip } = loadInternals()
+  const on = DeferChip({ on: true, interactive: true, onClick() {} })
+  assert.equal(on.type, 'button')
+  assert.equal(on.props['aria-pressed'], true)
+  assert.equal(childText(on).join(''), '延迟')
+  assert.match(on.props.className, /t-defer/)
+  // 状态标识只靠 label + aria-pressed + 虚线边框：**不给 token 估算**。我们不知道用户装了
+  // 什么 MCP，schema 大小差一个量级，给了数用户就拿它做决定（主动误导）。
+  assert.doesNotMatch(JSON.stringify(on.props), /token|%|字符/i)
+
+  const off = DeferChip({ on: false, interactive: true, onClick() {} })
+  assert.equal(off.props['aria-pressed'], false)
+  assert.equal(childText(off).join(''), '全量')
+  assert.doesNotMatch(off.props.className, /t-defer/)
+
+  // 非本插件管理的条目（项目视图里的全局条目、外部 bundle 条目）：只展示，不可点。
+  const readonly = DeferChip({ on: true, interactive: false, onClick() {} })
+  assert.notEqual(readonly.type, 'button', '只读时必须渲染成徽标，不能是可点按钮')
+})
+
