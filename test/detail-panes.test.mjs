@@ -463,25 +463,32 @@ test('延迟开关：行内两种状态都可点，且只标状态、不带 toke
   assert.equal(off.props.on, false)
 })
 
-test('延迟芯片：开=「延迟」、关=「全量」，状态走 aria-pressed，不带任何估算数字', () => {
+test('延迟芯片：开=「延迟」、关=「全量」，状态走 aria-pressed，且长得像可点的药丸', () => {
   // 组件在假 React 里不会自动展开，所以直接调它看渲染结果（与 EyeToggle 那组同一手法）。
   const { DeferChip } = loadInternals()
   const on = DeferChip({ on: true, interactive: true, onClick() {} })
   assert.equal(on.type, 'button')
   assert.equal(on.props['aria-pressed'], true)
-  assert.equal(childText(on).join(''), '延迟')
-  assert.match(on.props.className, /t-defer/)
-  // 状态标识只靠 label + aria-pressed + 虚线边框：**不给 token 估算**。我们不知道用户装了
+  // 子树里是「闪电图标 + 文案」：图标标明"这是延迟开关"，文案说明当前状态。
+  assert.deepEqual(childText(on), ['延迟'])
+  // 可点性靠**复用 .dsh-mcp-chip 原语**（市场分类就是它，用户已学会"药丸 = 可点"），
+  // 不是状态徽标 .dsh-mcp-badge；`.sel` 是选中态（accent 底 + accent 边框）。
+  assert.match(on.props.className, /\bdsh-mcp-chip\b/)
+  assert.match(on.props.className, /\bsel\b/)
+  assert.doesNotMatch(on.props.className, /dsh-mcp-badge/)
+  // 状态标识只靠 label + aria-pressed + `.sel`：**不给 token 估算**。我们不知道用户装了
   // 什么 MCP，schema 大小差一个量级，给了数用户就拿它做决定（主动误导）。
   assert.doesNotMatch(JSON.stringify(on.props), /token|%|字符/i)
 
   const off = DeferChip({ on: false, interactive: true, onClick() {} })
   assert.equal(off.props['aria-pressed'], false)
-  assert.equal(childText(off).join(''), '全量')
-  assert.doesNotMatch(off.props.className, /t-defer/)
+  assert.deepEqual(childText(off), ['全量'])
+  assert.match(off.props.className, /\bdsh-mcp-chip\b/)
+  assert.doesNotMatch(off.props.className, /\bsel\b/)
 
   // 非本插件管理的条目（项目视图里的全局条目、外部 bundle 条目）：只展示，不可点。
   const readonly = DeferChip({ on: true, interactive: false, onClick() {} })
-  assert.notEqual(readonly.type, 'button', '只读时必须渲染成徽标，不能是可点按钮')
+  assert.equal(readonly.type, 'span', '只读时必须渲染成 span，不能是可点按钮')
+  assert.match(readonly.props.className, /\bro\b/)
 })
 

@@ -492,7 +492,9 @@ test('徽标：延迟行只标记状态，不带 token 估算', async () => {
   // 两条都钉：接线（状态从哪来）与样式（开着时哪个 class）。
   const client = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(client, /h\(DeferChip, \{ on: s\.defer === true, interactive: s\.managed === true && !busy/, '延迟行必须渲染状态芯片，且只有本插件管理的条目可点')
-  assert.match(client, /className: 'dsh-mcp-badge as-btn' \+ \(on \? ' t-defer' : ''\)/, '芯片开着时必须带 t-defer（虚线 accent）')
+  // 芯片必须用「可点的药丸」原语（.dsh-mcp-chip），不是状态徽标（.dsh-mcp-badge）——
+  // 用户在这块 UI 里已经学会"药丸 = 可点"（市场分类），沿用徽标会被当成只读状态。
+  assert.match(client, /className: 'dsh-mcp-chip sm' \+ \(on \? ' sel' : ''\)/, '芯片必须复用 .dsh-mcp-chip 及其 .sel 选中态')
   // 芯片点下去**不能顺带选中那一行**（行本身是 role=button，冒泡会让"点开关"变成"选中"）。
   assert.match(client, /onClick: \(e\) => \{ e\.stopPropagation\(\); onClick\(\); \}/, '芯片必须 stopPropagation')
   // 行内开关的写路径：单台 RPC，项目作用域带 wsPath（两个项目可能同名）。
