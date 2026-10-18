@@ -63,10 +63,10 @@
 
 ```sh
 # 推荐：npm 安装 —— 之后 `dsh plugin update` 在 ^1.x 内自动升小版本
-dsh plugin --profile web add dsh-toolbox-ui@^1.8.0
+dsh plugin --profile web add dsh-toolbox-ui@^1.8.1
 
 # 或固定 GitHub release tag（不自动跨版本，升级要换 tag 重新 add）
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.8.0
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.8.1
 ```
 
 装完**重启 `dsh web`**。卸载（不会删除 profile 里已有的 MCP 条目）：
