@@ -43,6 +43,7 @@ See every installed skill's **real scope** and cross-scope shadowing, enable/dis
 - **Global + project scopes**: global writes the Web profile (available to every project), project writes that project's `.dsh/mcp.json` (visible only to its sessions); a project can also **block** a global MCP
 - **Import** configuration from other clients installed on this machine: Claude Code, Codex, OpenCode, pi, Claude Desktop, Cursor, Windsurf, VS Code, Gemini CLI, Roo Code and the cross-tool shared config — or paste JSON directly. Previewed before writing, with merge and replace modes
 - **Move servers between workspaces**: copy this project's MCP servers into another registered workspace (done inside the Host, so credentials never pass through the browser), or export the whole project config as JSON
+- **Deferred tool loading (ToolSearch)**: a server's tools no longer have to stay resident in context every turn — the model first sees a **name-only** catalog and, once `tool_search` finds a tool (by keyword or `select:<exact name>`), its full parameter schema enters the tool list and becomes directly callable. Off by default: tick "Deferred" per server, or use "Defer all" above the list; set `DSH_MCP_TOOL_SEARCH=off` to fall back to full injection everywhere
 
 **Skills**
 
@@ -62,10 +63,10 @@ See every installed skill's **real scope** and cross-scope shadowing, enable/dis
 
 ```sh
 # Recommended: from npm — `dsh plugin update` then upgrades within ^1.x
-dsh plugin --profile web add dsh-toolbox-ui@^1.7.2
+dsh plugin --profile web add dsh-toolbox-ui@^1.8.0
 
 # Or pin a GitHub release tag (no automatic upgrades; re-add with a new tag)
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.7.2
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.8.0
 ```
 
 Then **restart `dsh web`**. To uninstall (your existing MCP entries stay):
@@ -116,6 +117,8 @@ When a newer version exists the panel shows a dismissible banner; pressing Upgra
 **What do the project row's status strings mean?** They separate two independent facts: **whether a connection exists** (`已连接 · 当前无会话使用（连接保留，下次直接用）` / `已连接 · N 个会话在用` / `连接中…` / `连接失败` / `尚未建立连接（新会话自动挂载）`) and **how many sessions are using it** — the old "waiting for a session to mount" wording merged both into one sentence and read like "not connected yet".
 
 **The panel says "disabled" but the model reports `unknown tool "mcp__xxx__…"`.** That MCP is disabled, so it registers no tools. Enable it in the panel.
+
+**With "Deferred" on, can the model still find those tools?** Yes, just not by full visibility: the prompt carries a **name-only** catalog plus one line of guidance (no descriptions, no parameter schemas), and once `tool_search` finds a tool by keyword or `select:<exact name>`, its full schema enters the tool list and it becomes directly callable. Calling a not-yet-loaded tool from memory is refused, and the refusal hands back the **exact query string** to copy. Servers with only two or three tools save next to nothing (a guidance paragraph is still paid every turn); it pays off with many tools. To fall back to full injection everywhere: set `DSH_MCP_TOOL_SEARCH=off`. Note the "Deferred" badge shows **your configuration** (each server's `defer` value), not whether the mechanism is actually in effect in a given session right now.
 
 **How do I tell "mount failed", "connection failed" and "scope isolation failed" apart?** Three different things: **mount failed** = it never attached during session mount; **connection failed** = `mcp-client` cannot connect or ran out of retries; **scope isolation failed** = the connection is fine but its tools are not in the shared scope layer. The detail pane gives the specific reason; see [Design & limits](docs/design.md#连接状态语义).
 

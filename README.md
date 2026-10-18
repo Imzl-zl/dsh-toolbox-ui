@@ -43,6 +43,7 @@
 - **全局 + 项目双作用域**：全局写 Web profile（所有项目可用），项目写该项目 `.dsh/mcp.json`（只该项目会话可见）；项目里还能「屏蔽」某个全局 MCP
 - 从本机其他客户端**导入**：Claude Code、Codex、OpenCode、pi、Claude Desktop、Cursor、Windsurf、VS Code、Gemini CLI、Roo Code 与跨工具共享配置，也能直接粘贴 JSON；写入前预览，支持「合并」与「替换」
 - **跨工作区搬运**：把本项目的 MCP 复制到另一个已注册工作区（在宿主内完成，凭据不经过浏览器），或导出成 JSON 备份 / 分享
+- **工具延迟加载（ToolSearch）**：让某个服务器的工具不再每轮常驻上下文——模型先看到一份**只列工具名**的目录，用内置的 `tool_search` 搜到（关键词或 `select:<确切名字>`）之后，完整参数 schema 才进它的工具列表并可直接调用。默认不开：逐台勾「延迟」，或列表顶部一键「全部延迟」；环境变量 `DSH_MCP_TOOL_SEARCH=off` 整体退回全量注入
 
 **技能面**
 
@@ -62,10 +63,10 @@
 
 ```sh
 # 推荐：npm 安装 —— 之后 `dsh plugin update` 在 ^1.x 内自动升小版本
-dsh plugin --profile web add dsh-toolbox-ui@^1.7.2
+dsh plugin --profile web add dsh-toolbox-ui@^1.8.0
 
 # 或固定 GitHub release tag（不自动跨版本，升级要换 tag 重新 add）
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.7.2
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.8.0
 ```
 
 装完**重启 `dsh web`**。卸载（不会删除 profile 里已有的 MCP 条目）：
@@ -116,6 +117,8 @@ dsh plugin --profile web update dsh-toolbox-ui
 **项目行那些状态文案是什么意思？** 它们把两件独立的事分开说：**连接在不在**（`已连接 · 当前无会话使用（连接保留，下次直接用）` / `已连接 · N 个会话在用` / `连接中…` / `连接失败` / `尚未建立连接（新会话自动挂载）`）与**几个会话在用**——不再有「待会话挂载」那种把两者压成一句、容易被读成「还没连上」的合成状态。
 
 **面板显示「已禁用」，模型却报 `unknown tool "mcp__xxx__…"`？** 那个 MCP 被禁用了，所以它没有注册任何工具。在面板里点「启用」即可。
+
+**「延迟」打开后，模型还找得到那些工具吗？** 找得到，但不是靠全量可见：提示词里只有一份**只列工具名**的目录加一句引导（没有描述、也没有参数 schema），模型用 `tool_search` 按关键词或 `select:<确切名字>` 命中后，完整 schema 才进工具列表、之后可直接调用；凭记忆直调尚未加载的工具会被拒绝，拒绝里给出**确切的那条查询串**，照抄即可。工具只有两三个的服务器开了省不下什么（每轮仍要付一段引导语），工具多的才划算。要整体退回全量注入：环境变量 `DSH_MCP_TOOL_SEARCH=off`。注意面板上的「延迟」徽标显示的是**你的配置**（逐台的 `defer` 值），它不表示「此刻这个会话里机制真的生效了」。
 
 **「挂载失败」「连接失败」「作用域隔离失败」怎么区分？** 三件不同的事：**挂载失败**=会话挂载阶段就没挂上；**连接失败**=`mcp-client` 连不上或重连耗尽；**作用域隔离失败**=连接正常但工具不在共享作用域层。详情页会给具体原因，排查见[设计与限制](docs/design.md#连接状态语义)。
 
