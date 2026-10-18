@@ -106,14 +106,19 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 const DEFAULTS = { maxResults: 10, maxCatalogLines: 300, maxDiscovered: 20 }
 
-/** 记录调用并按宿主语义回答的 call 替身。 */
+/**
+ * `call` 的**真实契约**（lib/client.js 里那个包装器）：它**从不抛错**，而是把宿主的应答
+ * 折成 `{ ok: true, ...value }` 或 `{ ok: false, error }`。夹具必须照抄这个形状——
+ * 早期版本让它 throw，于是「保存失败」被面板当成成功处理（真机实测：文件一个字没写，
+ * 界面却弹了"已保存"）。这正是「夹具照抄实现就证明不了实现」的又一例。
+ */
 function fakeCall({ settings = DEFAULTS, failFor = null } = {}) {
   const calls = []
   const call = async (method, payload) => {
     calls.push({ method, payload })
-    if (failFor === method) throw new Error('host rejected: maxResults 必须是安全整数')
-    if (method === 'toolSearchSettings') return { settings, defaults: DEFAULTS, configKey: 'toolSearch' }
-    return { settings: payload.settings, defaults: DEFAULTS, configKey: 'toolSearch', changed: true, note: '已写入 profile 配置，当前会话立即生效' }
+    if (failFor === method) return { ok: false, error: 'host rejected: maxResults 必须是安全整数' }
+    if (method === 'toolSearchSettings') return { ok: true, settings, defaults: DEFAULTS, configKey: 'toolSearch' }
+    return { ok: true, settings: payload.settings, defaults: DEFAULTS, configKey: 'toolSearch', changed: true, note: '已写入 profile 配置，当前会话立即生效' }
   }
   return { calls, call }
 }
@@ -233,6 +238,19 @@ test('每个字段都有 ⓘ 说明标记：移上去是大白话的"这个数�
   const inline = collectAll(tree, (node) => typeof node?.props?.children === 'string'
     && TOOL_SEARCH_SETTING_FIELDS.some((field) => node.props.children === field.about))
   assert.deepEqual(inline, [], '说明文字不得铺在表单正文里')
+})
+
+test('读取失败（call 返回 ok:false）：显示宿主原话，且不渲染出半截表单', async () => {
+  // 读失败时 `res.settings` 是 undefined；若照常进表单，`loaded.defaults[field.key]` 会直接抛
+  // TypeError，整个面板跟着挂。所以这条与上面那条是同一类错误的两个方向。
+  const { ToolSearchSettingsModal, __render, __drainEffects } = loadInternals()
+  const { call } = fakeCall({ failFor: 'toolSearchSettings' })
+  __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  __drainEffects()
+  await flush()
+  const tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  assert.match(allText(tree), /host rejected/, '读不到参数时要把宿主原话摆出来')
+  assert.deepEqual(inputs(tree), [], '读失败不得渲染出没有默认值的输入框（会直接崩）')
 })
 
 test('恢复默认：把三个值填回宿主给的默认值（不猜数字，用宿主返回的那份）', async () => {

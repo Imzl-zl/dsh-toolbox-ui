@@ -336,11 +336,46 @@ test('real loader host: installBuiltins() appends live loader entries for the se
   }
 })
 
+// 真实安装形态（`dsh plugin add` → 进 bundles）：那条 insert 住在**包自己的** cordis.patch.yml
+// （bundle 层），用户 profile 的 patch 里根本没有我们这条。早期实现要求它存在，于是主安装路径下
+// 面板保存必然失败——而 `call()` 不抛错，失败还被 UI 当成成功（真机点一次才发现）。
+test('real loader host: 插件按 bundle 安装（patch 里没有自己的条目）时，保存追加 id 定向覆盖并当场生效', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const patchBody = [
+    '# 用户自己的 patch：只有别的插件的配置',
+    '- id: ui-settings-general',
+    '  name: "@deepseek-ai/dsh-client-ui-settings-general"',
+    '  config:',
+    '    welcomeNoticeVersion: 2026-09-28.1',
+    '',
+  ].join('\n')
+  const host = await createLoaderHost(patchBody, [])
+  try {
+    const registered = () => host.tools.schemas().find((schema) => schema.name === 'tool_search')
+    assert.match(registered().parameters.properties.max_results.description, /\(1-10\)/)
+
+    const saved = await host.manager.updateToolSearchSettings({ settings: { maxResults: 6 } })
+    assert.deepEqual(saved.settings, { maxResults: 6, maxCatalogLines: DEFAULTS.maxCatalogLines, maxDiscovered: DEFAULTS.maxDiscovered })
+
+    const written = await readFile(host.patch, 'utf8')
+    assert.match(written, /welcomeNoticeVersion/, '别人的条目不受影响')
+    assert.match(written, /- id: mcp-manager-ui/, '必须追加一条 id 定向覆盖（宿主的 patch 语义会把它合并进 bundle 层那条）')
+    assert.doesNotMatch(written, /name: dsh-toolbox-ui/, '不能 insert 第二个插件实例——那会把面板挂两遍')
+    assert.deepEqual(
+      readToolSearchSettingsFromPatch(written, { name: 'dsh-toolbox-ui', id: 'mcp-manager-ui' }),
+      { maxResults: 6 },
+    )
+    assert.match(registered().parameters.properties.max_results.description, /\(1-6\)/, '同一进程里当场生效')
+  } finally {
+    await host.cleanup()
+  }
+})
+
 // ── C2：延迟加载参数（面板表单 → 插件自己的 patch 行 → 运行中生效）──
 //
 // 为什么必须在这一组里：C2 的落点是**插件自己那条 patch 条目的 config**，而"改配置怎么生效"
 // 完全取决于真实 loader 的形状——patch 文件不会被热加载，所以"只写盘"等于改了没反应。
 // 夹具里给一个假 loader 只能证明"插件调用了写盘函数"，那正是设计文档 §12.1 记过的坑。
+// 这一条覆盖的是**手写 insert 条目**的形态（条目就在用户 patch 里）。
 test('real loader host: 面板改延迟参数 → 写进 plugin patch 并当场重装运行时（不重启）', { timeout: TEST_TIMEOUT_MS }, async () => {
   const patchBody = [
     '# profile patch：注释必须原样保留',

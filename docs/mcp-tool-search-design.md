@@ -557,16 +557,47 @@ not only on disk`（夹具 = 临时技能根 × 真 `SkillRegistry` × 真 `dsh-
 - 纯逻辑 11 条（`tool-search-settings`）：schema 三形状 / 非法值与已删除键报错 / 稀疏归一 /
   patch 往返与注释保留 / 条目缺失时报错而不凭空新建；
 - 运行时 2 条：工具定义里的上限随配置变；重装后已发现集恢复；
-- **真 loader 1 条**（`real-host-loader`）：读默认 → 写三个值（注释与别的条目一个字不动）→
-  **同一进程里注册的工具定义换成新上限** → 回到默认删键 → 非法值盘上不动；
-- 面板 6 条（`tool-search-settings-panel`）：打开即读、三项填生效值、保存发数字且成功回报、
-  失败把宿主原话留在表单里、恢复默认、**每个字段的 ⓘ 说明标记**（原生 title + aria-label +
-  可 Tab；说明文字是"这个数管什么"的大白话，行话留在 TUNING-DECISIONS）。
+- **真 loader 2 条**（`real-host-loader`）：读默认 → 写三个值（注释与别的条目一个字不动）→
+  **同一进程里注册的工具定义换成新上限** → 回到默认删键 → 非法值盘上不动；另一条覆盖
+  **bundle 安装形态**（用户 patch 里没有我们的条目 → 追加 id 定向覆盖）；
+- 面板 7 条（`tool-search-settings-panel`）：打开即读、三项填生效值、保存发数字且成功回报、
+  失败把宿主原话留在表单里、读失败不渲染半截表单、恢复默认、每个字段的 ⓘ 说明标记；
 - 变异复验：掐掉"重装" → 真 loader 那条以"改完参数后模型可见的工具定义必须跟着变"变红。
-- **升级路径端到端核对（一次性，未进用例）**：造一个临时 junction 让 loader 能按包名解析本包，
-  再让**真 loader** 创建 `- id: mcp-manager-ui / name: dsh-toolbox-ui`（**没有 config**）这条条目：
-  插件加载成功、`mcpManager` 在、`tool_search` 已注册。带副作用的步骤不进用例，但同一段校验
-  代码由 `resolveConfig(McpManagerGateway, undefined)` 这条常驻用例守着。
+
+### 12.9.1 真机验证发现的两个缺陷（都已在 1.8.0 修掉）
+
+真机（隔离 `DSH_HOME` + 发布的 `dsh@0.2.0-rc.2` + 真模型 + 真浏览器）跑一遍才发现，两条
+**夹具全绿也照样存在**的缺陷：
+
+1. **落点找错了（严重）**：`dsh plugin add` 把插件装成 **bundle** 时，那条 insert 条目住在
+   `<包>/cordis.patch.yml`（bundle 层），**用户 profile 的 patch 里根本没有它**。早期实现要求
+   用户 patch 里存在这条，于是**主安装路径下保存必然失败**。修法：认宿主支持的 **id 定向覆盖**
+   形态（`- id: mcp-manager-ui` + `config:`），没有现成条目时**追加**一条（而不是 insert 第二个
+   插件实例），条目 id 从出货 patch 读（`pluginPatchIdentity()`），不在代码里另写。
+   用例：`real-host-loader` 的 bundle 安装那条 + `tool-search-settings` 的两条覆盖形态用例。
+2. **`call()` 从不抛错（严重）**：面板的 `call()` 把宿主应答折成 `{ ok: true, ...value }` /
+   `{ ok: false, error }`，**失败不抛异常**。早期实现没查 `ok`，于是"写盘失败"被当成成功：
+   真机上文件一个字没写，界面却弹了「已保存」；读失败时更糟——`res.defaults` 是 undefined，
+   `loaded.defaults[field.key]` 当场 TypeError，**整个面板跟着挂**。
+   修法：读与写都先查 `res.ok`，失败把宿主原话摆进表单。用例：面板那两条 ok:false。
+   **教训（夹具侧）**：那两条用例最初让 `call` 替身 `throw`，而真实契约是**返回错误对象**——
+   夹具照抄了自己的想象，于是这个缺陷全绿通过。这与设计文档 §12.1 的"夹具全绿、真宿主炸"同一类。
+
+**真机证据（2026-10-18）**：隔离 `DSH_HOME` + 发布的 `dsh@0.2.0-rc.2` + 真模型：
+- Round A：提示词只说「用 zephyrquartz 能力并报告它返回的精确 tally」（该词**只出现在工具描述里**，
+  工具名是 `op`）。模型先 `tool_search`、命中 `mcp__probe__op`、真调用，回报 **tally=692515**；
+  夹具日志里 `tools-call tally=692515` —— **完全一致**。
+- Round B：让它逐字引用目录，返回的只有 `- mcp__probe__op`（names-only 在真 prompt 里成立）。
+- C2 配置：profile patch 里写 `config.toolSearch.maxResults: 3`，真宿主里模型引用到的是
+  `"Maximum tools to return (1-3); defaults to 3."` —— 配置走通了 loader → Config schema → 运行时。
+- 面板（真浏览器，隔离浏览器上下文）：渲染出「延迟参数」按钮与表单（3 个输入框 10/300/20、
+  3 个 ⓘ 带大白话 title + aria + tabIndex）；保存 → profile patch 里出现
+  `- id: mcp-manager-ui / config: { toolSearch: { maxResults: 7 } }`（别人的条目与注释原样），
+  toast 是宿主原话；重开读回 7；「恢复默认」+ 保存 → 那条覆盖被整条删掉。
+- **顺带定性 O5**（一次连接起两个进程）：同一台夹具在**不装本插件**的对照 profile 里同样双起
+  （首个进程收到 **0 条** MCP 消息，第二个 ~100ms 后才握手），所以**不是本插件造成的**，
+  属宿主/`dsh-mcp-client` 侧行为；已记入 `OPEN-ITEMS.md` O5。
+
 
 **仍欠**：`maxCatalogLines` 的默认值该不该从 300 抬起。量已经补上了（Q4：360 个真实工具、
 每行 32.66 字符、上限 300 会漏 60 个名字），但"改默认值 = 改所有用户的每请求 prompt 体积"

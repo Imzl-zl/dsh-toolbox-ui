@@ -156,11 +156,54 @@ test('写 patch：条目里本来就有别的 config 键时只动 toolSearch', (
 })
 
 test('写 patch：patch 里没有我们这条条目时抛错，不凭空新建', () => {
-  // 凭空新建 = 插件在写一份自己没被挂载的配置；用户看到的永远是"改了没反应"。
+  // 既没有 insert 条目、又没给出条目 id 时**不能猜**：猜一个 id 就是写一份自己没被挂载的配置，
+  // 用户看到的永远是"改了没反应"。
   assert.throws(
     () => setToolSearchSettingsInPatch(PATCH, { maxResults: 20 }, { name: 'not-this-plugin' }),
     /找不到/,
   )
+})
+
+// ── 真实安装形态：`dsh plugin add` 把插件装成 bundle ──────────────────────
+//
+// 这是**主要**安装路径，也是真机验证时才发现的缺陷形态：插件的 patch 行住在
+// `<包>/cordis.patch.yml`（bundle 层），用户 profile 的 patch 文件里**根本没有**那条 insert。
+// 早期实现要求用户 patch 里存在这条，于是面板保存必然失败（而 `call()` 不抛错，失败被吞成
+// 一次"成功"的 toast）。正确落点是宿主的 **id 定向覆盖**：用户 patch 里加一条
+// `- id: mcp-manager-ui` + `config:`，宿主的 patch 语义把它合并进 bundle 层那条条目。
+const BUNDLE_PATCH = [
+  '# 用户自己的 patch：只有别的东西，没有我们的条目',
+  '- id: ui-settings-general',
+  '  name: "@deepseek-ai/dsh-client-ui-settings-general"',
+  '  config:',
+  '    welcomeNoticeVersion: 2026-09-28.1',
+  '',
+].join('\n')
+const ENTRY = { name: PLUGIN, id: 'mcp-manager-ui' }
+
+test('写 patch：插件按 bundle 安装时（用户 patch 里没有这条）追加一条 id 定向覆盖', () => {
+  const written = setToolSearchSettingsInPatch(BUNDLE_PATCH, { maxResults: 20 }, ENTRY)
+  assert.match(written, /# 用户自己的 patch：只有别的东西/, '注释与既有条目原样保留')
+  assert.match(written, /- id: mcp-manager-ui/, '必须以 id 定向覆盖的形式落盘（bundle 层那条不在这里）')
+  assert.doesNotMatch(written, /name: dsh-toolbox-ui/, '不是 insert 一条新插件——那会挂第二个实例')
+  assert.match(written, /toolSearch:\s*\n\s+maxResults: 20/)
+  assert.deepEqual(readToolSearchSettingsFromPatch(written, ENTRY), { maxResults: 20 })
+  // 幂等：再写一次不变（不重复追加第二条覆盖）。
+  assert.equal(setToolSearchSettingsInPatch(written, { maxResults: 20 }, ENTRY), written)
+})
+
+test('写 patch：已有 id 定向覆盖时只改 toolSearch，别的键保留；全回默认时整条删掉', () => {
+  const withOverride = setToolSearchSettingsInPatch(BUNDLE_PATCH, { maxResults: 20 }, ENTRY)
+  // 用户手写/其他版本可能在那条覆盖里放了别的键
+  const withOther = withOverride.replace('  config:', '  config:\n    someOther: 1')
+  const written = setToolSearchSettingsInPatch(withOther, { maxResults: 30, maxDiscovered: 30 }, ENTRY)
+  assert.match(written, /someOther: 1/, '同一条覆盖里的其它键必须保留')
+  assert.deepEqual(readToolSearchSettingsFromPatch(written, ENTRY), { maxResults: 30, maxDiscovered: 30 })
+
+  const back = setToolSearchSettingsInPatch(written, {}, ENTRY)
+  assert.doesNotMatch(back, /mcp-manager-ui/, '全回默认后这条覆盖没有存在的理由了（不留空壳）')
+  assert.match(back, /welcomeNoticeVersion/, '别人的条目不受影响')
+  assert.deepEqual(readToolSearchSettingsFromPatch(back, ENTRY), {})
 })
 
 test('写 patch：非法值不落盘（先校验再动 YAML）', () => {
