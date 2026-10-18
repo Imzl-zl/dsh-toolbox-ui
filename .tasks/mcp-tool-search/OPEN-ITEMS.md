@@ -212,7 +212,7 @@ toggle[aria-checked=true]    = rgb(249,250,251)
 
 ---
 
-## O5（附带观察，未深究）夹具 MCP 每次连接起两个进程
+## O5（已定性：**不是本插件**，属宿主/mcp-client 侧）夹具 MCP 每次连接起两个进程
 
 真 loader 夹具里，一个 mcp-client 连接会把夹具服务器进程拉起**两次**（实测：两次启动间隔 143ms，同父进程、同 argv）。审查轮已排除两种流行解释：MCP SDK 每 transport 只 spawn 一次（`@modelcontextprotocol/client` stdio.mjs:66 `if (this._process) throw`）；mcp-client 默认重连初始延迟 500ms（dsh-mcp-client lib:436）也与之不符。
 
@@ -223,6 +223,34 @@ toggle[aria-checked=true]    = rgb(249,250,251)
 `tools-call` 落在第二个。也就是说"双 spawn"**不只是夹具现象**，真宿主 + 真实 MCP 服务器也能复现。
 本次没抓时间差/父进程/连接 owner，所以仍不能定性；但**它已经够格升为 O5b**：若要修，先按
 `loader.entries()` 与 `ctx.get('mcpClient')` 侧统计"同一 config 的 owner 数"。
+
+✅ **2026-10-18（1.8.0 真机验证）已定性 —— 不是本插件造成的**。
+
+做法：夹具服务器给每条消息都记日志（`server-start` / `initialize` / `tools-list` / `tools-call` /
+`exit`），然后跑**两组**：装了本插件的 profile，与一个只挂同一台夹具、**不装本插件**的对照 profile
+（`dsh --profile bare --from-default-profile headless`）。两组表现完全一致：
+
+```
+07:45:18.360 server-start pid=53272 tally=506365    ← 对照组（无本插件）
+07:45:18.469 server-start pid=49092 tally=650994      (+109ms)
+07:45:18.473 initialize pid=49092                     ← 只有第二个收到 MCP 消息
+07:45:18.478 tools-list pid=49092
+07:45:20.271 stdin-end / exit pid=49092
+```
+
+**结论**：一次连接起**两个进程**，其中第一个**收到 0 条 MCP 消息**（没有 `initialize`），
+~100ms 后第二个才完成握手、承载全部流量；对照组（**零本插件代码**）同样如此，所以
+**与 ToolSearch / 本插件无关**，是宿主或 `dsh-mcp-client` 侧的行为。之前"同一 config 两个
+owner"的猜测**不成立**——第一个进程从未参与协议，不可能是第二个连接 owner。
+
+**实际影响（需要上游修，但要知道）**：
+- 每个 stdio MCP 服务器每次连接多起一个进程、多付一次冷启动；对 `npx` 类服务器意味着多一次
+  解析/下载检查（实测 ~100ms），对**有副作用的启动脚本**可能重复执行；
+- 判断"残留进程"时不能按 pid 集合整体换新（首个进程可能残活/被强杀），要按**收到 `initialize`
+  的那个** pid 做判据。这条已写进真机验证的方法里。
+- **要修需要什么**：上游 `dsh-mcp-client` / 宿主的连接建立路径（例如某处在正式建连前先
+  `spawn` 一次做探测/准备又丢弃）。本仓没有处理点：grep 全 lib/ 无 spawn 调用。
+
 
 ---
 
