@@ -33,8 +33,14 @@ const DEV_BASELINE = '^0.2.0-rc.2'
 // 锁文件里解析出的具体版本。**从 DEV_BASELINE 推导**，不要另写一处：这里原本硬编码
 // /^0\.1\.5-rc\.2/，于是 bump 基线时就有了第二个真源。
 const DEV_BASELINE_VERSION = DEV_BASELINE.replace(/^[^0-9]*/, '')
-// cordis 锁补丁位：ensureLogCapture 读写 logger.exporters / logger._snExporter 私有字段。
-const CORDIS_PEER = '~4.0.2'
+// cordis 的**已验窗口**：ensureLogCapture 读写 logger.exporters / logger._snExporter 私有字段，
+// 而两个受支持的 dsh 版本自带不同的 cordis——0.2.0 是 ~4.0.2，0.2.1 是 ~4.0.5。
+// 两端都跑过全量，所以 peer 覆盖整段而不是钉死一端；上界只到 minor（<4.1.0）：
+// 私有面一动就要靠这道声明让宿主判不兼容，而不是静默错位。
+const CORDIS_PEER = '>=4.0.2 <4.1.0'
+// 开发基线仍是 0.2.0 宿主自带的那一代（~4.0.2）：peer 窗口说的是"能装哪些"，
+// devDependencies 说的是"本地这套用例跑在哪个真实组合上"。两者不是一回事。
+const CORDIS_DEV_BASELINE = '~4.0.2'
 // reveal 用 loader 的 interpolate 求值 `!!js` 节点；范围跟随 dsh 自身对它的要求。
 const CORDIS_LOADER_PEER = '^1.0.3'
 
@@ -94,9 +100,9 @@ test('every host contract this plugin actually depends on is declared as a peer'
   for (const name of dshHostPackages) {
     assert.equal(packageJson.peerDependencies?.[name], COMPAT_WINDOW, name + ' 必须声明为 peer')
   }
-  // cordis 锁到补丁位：ensureLogCapture 为了绕过 LoggerService.exporter() 删错 ID 的 bug，
-  // 直接读写了 logger.exporters / logger._snExporter 两个私有字段。这是唯一可订阅的诊断面，
-  // 但它不是公开契约，所以不能用 caret 区间。
+  // cordis 只到 minor 上界（不是 caret）：ensureLogCapture 为了绕过 LoggerService.exporter()
+  // 删错 ID 的 bug，直接读写了 logger.exporters / logger._snExporter 两个私有字段。这是唯一
+  // 可订阅的诊断面，但它不是公开契约，所以范围必须窄到"两端都实测过"的那一段。
   assert.equal(packageJson.peerDependencies?.['@deepseek-ai/cordis'], CORDIS_PEER)
   // 官方 scope 包名是 @deepseek-ai/cordis；无 scope 的 `cordis` 是另一个包，写错就是假兼容声明。
   assert.equal(packageJson.peerDependencies?.cordis, undefined)
@@ -118,7 +124,7 @@ test('lockfile resolves DSH host packages only as a development baseline on the 
     )
   }
   assert.equal(importer.dependencies?.['@deepseek-ai/cordis'], undefined)
-  assert.equal(importer.devDependencies?.['@deepseek-ai/cordis']?.specifier, CORDIS_PEER)
+  assert.equal(importer.devDependencies?.['@deepseek-ai/cordis']?.specifier, CORDIS_DEV_BASELINE)
 })
 
 test('runtime YAML parser includes the nested-collection stack overflow fix', () => {

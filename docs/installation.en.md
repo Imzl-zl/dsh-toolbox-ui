@@ -7,11 +7,18 @@ This document distinguishes between a regular install and a local development in
 
 ## Requirements
 
-- DeepSeek Harness `0.1.5-rc.1` or later (verified up to `0.2.0-rc.2`)
+- DeepSeek Harness `0.2.0-rc.1` or later (`0.2.0-rc.2` and `0.2.1-rc.2` both run the full suite; the cordis 4.0.5 / loader 1.0.6 pair that ships with 0.2.1 is covered too)
 - An initialized `web` profile
 - Node.js and pnpm callable normally by DSH's plugin commands
 
-The plugin declares the DSH host API as a peer dependency of `>=0.1.5-rc.1 <0.2.0`. It only supports 0.1.5 and later because the plugin uses two official capabilities that only exist from 0.1.5: `mcp-client` judging `serverName` uniqueness by registration scope (project-level MCP with the same name is built on this), and `setup` passing the agent as the second argument to the plugin (mounting a project MCP needs the agent's cwd). The development baseline tracks the latest verified RC and mirrors every peer dependency (plus a test-only `@deepseek-ai/dsh-typert-loader`, see [Design and Limitations](design.en.md#how-the-version-range-is-chosen-and-what-it-does-not-cover)); after upgrading DSH, run `pnpm install && npm test` to verify.
+The plugin declares the DSH host API as a peer dependency of `>=0.2.0-rc.1 <0.3.0`. It only supports 0.2.x because ToolSearch is built on capabilities that only exist from 0.2: the per-agent presentation mode (`ctx.tools.modeFor(agent)`, which decides whether a session gets a function list or the `tools:sdk` manual), the PTC manual section `tools:sdk`, and the session projection service (`ctx.sessionProjections`, the only legitimate way to restore the discovered set). None of the three exists on 0.1.x, so no downgrade branches are kept for it.
+
+**The supported surface is the 0.2.0 and 0.2.1 lines.** Between them the host swapped loader generations (`cordis-plugin-loader` 1.0.3 → 1.0.6); the plugin adapts to both differences explicitly, each with a standing test (`test/loader-compat.test.mjs`):
+
+- **Startup-error propagation**: 1.0.3 throws from `Entry.update()` when `apply` fails, so `loader.create()` itself rejects; 1.0.6 only logs it, so `create()` always resolves and the error hangs off the fiber. The plugin waits on `fiber.await()` instead — otherwise adding a server that cannot connect would not roll the patch back.
+- **What a dispose writes**: 1.0.3's unload handler had an `_disposing` early-return guard; 1.0.6 dropped it, so `fiber.entry.parent.tree.write()` really runs — for an include-subtree entry that is `Include.write()`, which writes the base config together with **every remaining patch row**. The plugin marks the entry `disabled` before removing it (the only remaining early-return criterion in that handler); otherwise removing one server would bake its siblings' patch rows into `cordis.yml`.
+
+The development baseline tracks the latest verified RC and mirrors every peer dependency (plus a test-only `@deepseek-ai/dsh-typert-loader`, see [Design and Limitations](design.en.md#how-the-version-range-is-chosen-and-what-it-does-not-cover)); after upgrading DSH, run `pnpm install && npm test` to verify.
 
 ## Install
 

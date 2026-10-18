@@ -125,12 +125,14 @@ dsh plugin --profile web update dsh-toolbox-ui
 
 | 项目 | 已验证 |
 |---|---|
-| DeepSeek Harness | `0.2.0-rc.1` 及以上（已验证至 `0.2.0-rc.2`，源码侧核对到 `0.2.1-rc.2`） |
+| DeepSeek Harness | `0.2.0-rc.1` 及以上（`0.2.0-rc.2` 与 `0.2.1-rc.2` 都跑过全量；0.2.1 宿主自带的 cordis 4.0.5 / loader 1.0.6 也在覆盖内） |
 | Node.js | DSH 自带/支持的运行时 |
 | 平台 | Windows；Linux/macOS 使用同一 DSH Web 契约 |
 
 只支持 0.2.x 起：ToolSearch 依赖 0.2 的 per-agent 呈现模式（`ctx.tools.modeFor(agent)`）与
 `tools:sdk` 手册段，0.1.x 上这两样都不存在。不为旧版本保留降级分支。
+支持面就是 **0.2.0 与 0.2.1 两条线**：两者之间宿主换了两代 loader（1.0.3 → 1.0.6），
+启动错误传播与 dispose 写盘行为都变了，插件对这两处做了显式适配并各有一条常驻用例。
 
 ## 开发
 

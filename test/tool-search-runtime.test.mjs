@@ -198,8 +198,8 @@ test('activeMaskedServers: 全部发现后指令段恢复', () => {
   assert.deepEqual([...activeMaskedServers(view, all)], [], '服务器工具全部被发现后，它的指令段不再占上下文')
 })
 
-test('catalogSectionText: 按 code-unit 名序、截断、体积上限带"另有 N 个"', () => {
-  const config = resolveRuntimeConfig({ descriptionChars: 10, maxCatalogLines: 3 })
+test('catalogSectionText: 只列工具名、按 code-unit 名序、体积上限带"另有 N 个"', () => {
+  const config = resolveRuntimeConfig({ maxCatalogLines: 3 })
   const catalog = new Map(
     ['b', 'a', 'C', 'd', 'e'].map((k) => [`mcp__${k}__x`, { name: `mcp__${k}__x`, description: 'a very long description here' }]),
   )
@@ -208,10 +208,22 @@ test('catalogSectionText: 按 code-unit 名序、截断、体积上限带"另有
   assert.equal(lines[0], '## Deferred tool catalog')
   assert.equal(truncated, 2)
   const toolLines = lines.filter((line) => line.startsWith('- '))
-  assert.deepEqual(toolLines, ['- mcp__C__x — a very lo…', '- mcp__a__x — a very lo…', '- mcp__b__x — a very lo…'], '超出上限的名字被截掉')
+  // 目录行**只有名字**：不带破折号、不带用途、更没有截断。用途由搜索（全文索引）负责，
+  // 这是 Claude Code 的做法（延迟工具在 prompt 里只有标识符），也是"不截断才没有截断风险"的唯一形态。
+  assert.deepEqual(toolLines, ['- mcp__C__x', '- mcp__a__x', '- mcp__b__x'], '超出上限的名字被截掉，行内只有名字')
   assert.ok(text.includes('2 more deferred tools are not listed here'), '截断必须提示还有多少，模型才知道要改用关键词查询')
-  // code-unit 序：大写 C 在小写字母之前。
-  assert.ok(lines.indexOf('- mcp__C__x — a very lo…') < lines.indexOf('- mcp__a__x — a very lo…'))
+  // code-unit 序：大写 C 在小写字母之前。排序键是完整名字，而同服务器的名字共享 `mcp__<server>__`
+  // 前缀——所以按名字排序天然按服务器聚簇，不需要另加分组头。
+  assert.ok(lines.indexOf('- mcp__C__x') < lines.indexOf('- mcp__a__x'))
+})
+
+test('catalogSectionText: 描述一个字都不进目录（截断风险从根上不存在）', () => {
+  const distinctive = 'USE THIS ONLY WHEN the user asks about quarterly revenue; never for monthly'
+  const catalog = new Map([['mcp__srv__report', { name: 'mcp__srv__report', description: distinctive }]])
+  const { text } = catalogSectionText(catalog, resolveRuntimeConfig())
+  assert.equal(text.includes('quarterly revenue'), false, '用途/描述不得出现在目录里')
+  assert.equal(text.includes('USE THIS ONLY WHEN'), false, '连前半句也不能出现——不存在"截断"，只有"不列"')
+  assert.ok(text.includes('- mcp__srv__report'), '名字必须在')
 })
 
 test('maskInstructionSections: 只清空被延迟服务器的指令段，且不改原对象', () => {
@@ -265,6 +277,10 @@ test('resolveRuntimeConfig: 缺省、maxDiscovered 下限抬到 maxResults、非
   assert.equal('minServerTools' in DEFAULTS, false, 'DEFAULTS 里不得再有 minServerTools')
   assert.throws(() => resolveRuntimeConfig({ threshold: 15 }), /threshold 已废弃/)
   assert.throws(() => resolveRuntimeConfig({ minServerTools: 10 }), /minServerTools 已废弃/)
+  // descriptionChars 同待遇：目录改 names-only 后它没有意义，写进来必须报错而不是被静默忽略——
+  // 否则用户以为自己调了截断，其实一个字都没影响（`threshold` 当初就是这么骗人的）。
+  assert.equal('descriptionChars' in DEFAULTS, false, 'DEFAULTS 里不得再有 descriptionChars')
+  assert.throws(() => resolveRuntimeConfig({ descriptionChars: 200 }), /descriptionChars 已废弃/)
   assert.throws(() => resolveRuntimeConfig({ maxResults: 1.5 }), /maxResults/)
 })
 
@@ -1011,9 +1027,11 @@ test('视图按 revision 缓存：配置与工具都不变时不重建，描述�
   const first = await assemble(fixture, assembly)
   const second = await assemble(fixture, assembly)
   assert.equal(first.sections.at(-1).text, second.sections.at(-1).text, '库存不变则目录字节稳定')
-  // 描述变了（同名、内容不同）→ revision 变 → 目录跟着变。
-  fixture.setSchemas(BIG_SCHEMAS.map((s) => (s.name === 'mcp__jshook__tool_0' ? { ...s, description: 'EDITED' } : s)))
-  const third = await assemble(fixture, assembly)
-  assert.ok(third.sections.at(-1).text.includes('EDITED'), '内容变化必须被 revision 捕捉')
+  // 描述变了（同名、内容不同）→ revision 必须变。目录**看起来**不会变（目录只有名字），
+  // 但搜索索引吃的是全文——不重建就意味着新描述永远搜不到。所以这条改成观测搜索，
+  // 而不是再去看目录文本（那正是放弃用途清单之后失去的观测量）。
+  fixture.setSchemas(BIG_SCHEMAS.map((s) => (s.name === 'mcp__jshook__tool_0' ? { ...s, description: 'EDITED capability word' } : s)))
+  const hit = await fixture.registered.get('tool_search').execute({ query: 'EDITED' }, { agent: fixture.agent })
+  assert.ok(JSON.stringify(hit).includes('mcp__jshook__tool_0'), '描述变化必须被 revision 捕捉：新词要能搜到')
   fixture.cleanup()
 })

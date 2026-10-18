@@ -125,11 +125,12 @@ When a newer version exists the panel shows a dismissible banner; pressing Upgra
 
 | Item | Verified |
 |---|---|
-| DeepSeek Harness | `0.2.0-rc.1` and above (verified up to `0.2.0-rc.2`, source-checked to `0.2.1-rc.2`) |
+| DeepSeek Harness | `0.2.0-rc.1` and above (`0.2.0-rc.2` and `0.2.1-rc.2` both run the full suite; the cordis 4.0.5 / loader 1.0.6 pair that ships with 0.2.1 is covered too) |
 | Node.js | the runtime DSH ships with / supports |
 | Platform | Windows; Linux and macOS use the same DSH Web contract |
 
 Requires 0.2.x or newer: ToolSearch depends on the per-agent presentation mode (`ctx.tools.modeFor(agent)`) and the `tools:sdk` manual section, and neither exists on 0.1.x. No downgrade branches are kept for older hosts.
+The supported surface is **the 0.2.0 and 0.2.1 lines**: between them the host swapped loader generations (1.0.3 → 1.0.6), which changed startup-error propagation and what a dispose writes to disk. The plugin adapts to both explicitly, each with a standing test.
 
 ## Development
 

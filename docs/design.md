@@ -178,7 +178,18 @@ DSH 宿主 API 通过 `peerDependencies` 以 `>=0.2.0-rc.1 <0.3.0` 声明（只�
    注意这条**只对宿主自己的闸门成立**：拿不带 `includePrerelease` 的严格 semver 去判，`0.2.1-alpha.1` 会被判为不满足 `>=0.2.0-rc.1 <0.3.0`（下限元组是 `0.2.0`，认不了 `0.2.1-rc.x`）。谁要复核这个范围，必须用宿主自己的 `evaluatePluginCompatibility`，而不是 `semver.satisfies(range)` 或 pnpm 的 peer 检查——那两者会给出相反的结论。`test/package-contract.test.mjs` 因此只钉窗口两端（`>=0.2.0-rc.1` / `<0.3.0`），不模拟 semver。
 3. **范围回答不了「装上还对不对」，而 CI 也只能盖住一半**。`0.1.6-alpha.2` 把 typert strict codec 从 `schema:`（zod v4 实例）换成 `create()`（进程内 realm 的懒工厂，registry 用 `record.value ??= record.create()` 物化）就是这么一次：它落在当时的 `>=0.1.5-rc.1 <0.2.0` 之内，插件的兼容性声明天生拦不住，2026-09-21 的漂移任务因此变红（那一次 130 项里唯一失败的就是加载期契约那条）。真正的保护分两层：**(a) 运行时契约**由 [`.github/workflows/upstream-drift.yml`](../.github/workflows/upstream-drift.yml) 每周把宿主整套换到 `latest` / `next` / `alpha` 三个渠道跑契约用例（`test/*.test.mjs` 去掉 `package-contract`，因为那份断言的是 pin 本身）；**(b) 宿主侧的加载期契约**（`lib/typert.js` 的形状由宿主 loader 校验，不由我们校验）由 `test/typert-manifest.test.mjs` 覆盖：它直接调宿主自己的 `validateTypertManifest` 验这份产物，形状一变就红；同一文件里还有一条**不依赖 loader 版本**的形状断言，钉住「strict codec 同时带 `schema` 与 `create()`」（下一条理由）——本地 devDependency 的 loader 是开发基线，看不见 alpha 的要求，只靠前者要等一周才知道。这一层原本是缺口——既有用例只保证 `lib/typert.js` 与 `lib/client.js` 两份产物彼此一致（`client-lifecycle.test.mjs`），宿主改了要求也不会变红，而后果是用户升级 DSH 后面板整个不可用。它也是 `@deepseek-ai/dsh-typert-loader` 只进 `devDependencies`、不进 peer 的原因：校验发生在宿主进程里，插件运行时不 import 它。
 
-**为什么 strict codec 两个键都写**（`lib/typert.js` 与 `lib/client.js` 各一份，`client-lifecycle.test.mjs` 钉住两者一致）：宿主在两个渠道上查**不同的键**，且都忽略对方的键——`0.1.5-rc.x`（= 当时的 `latest` / `next`，也就是 `npx` 默认装到的那条）查 `codec.schema.parse` 必须是 zod v4 实例；`0.1.6-alpha.2` 起查 `typeof codec.create === 'function'`。少写 `schema` 会在最新 RC 上加载即拒，少写 `create` 会在 alpha 上加载即拒；`mode: 'src-json'` 不是出路（loader 强制 invocation 的 codec 必须是 strict）。拿三个版本的 loader 直接跑自己的产物：
+4. **支持面就是 0.2.0 与 0.2.1 两条线**（用户 2026-10-18 定的口径：更旧的版本不再考虑，也不为它们保留分支）。这两条线之间宿主换了两代 loader，而**换的这层不在 dsh-\* 的 API 面上**——`@deepseek-ai/dsh@0.2.1-rc.2` 只是把依赖声明改成了 `cordis ~4.0.5` / `cordis-plugin-loader ~1.0.6`（0.2.0 是 `~4.0.2` / `^1.0.3`），破坏性全都在 `cordis-plugin-loader` 1.0.3 → 1.0.6 的重构里。实测两处差异，都在插件侧做了显式适配，各有一条**不依赖宿主版本**的常驻用例（`test/loader-compat.test.mjs`）：
+
+   | # | 差异 | 1.0.3（0.2.0） | 1.0.6（0.2.1） | 插件的适配 |
+   |---|---|---|---|---|
+   | L1 | 启动失败会不会冒到调用方 | `Entry.update()` 里 `throw updateError("apply", …)`，`loader.create()` 自己 reject | 改成 `logger.error/warn`，`create()` **总是 resolve**，错误只挂在 fiber 上 | 创建后 `await entry.fiber.await()`（cordis 4.0.2 与 4.0.5 的实现逐字相同，都会重抛启动错误）。不这么做，`add()` 的回滚分支永远进不去，patch 里留下一条连不上的行 |
+   | L2 | dispose 时会不会写盘 | unload 处理器有 `if (fiber.entry._disposing) return;` 早退 | **这行被删了**，`fiber.entry.parent.tree.write()` 真的执行；对 include 子树条目就是 `Include.write()`，写回 base + **其余 patch 行** | 移除条目前先置 `entry.options.disabled = true`——该处理器里唯一还能早退的判据就是它。不这么做，"删一台服务器"会把兄弟服务器的 patch 行烙进 `cordis.yml`，下次启动 base 一份 + patch insert 一份 = 重复条目 |
+
+   **L2 是宿主回归，不是我们的写法问题**：同一条路径在 0.2.0 上是干净的（`_disposing` 守卫挡住了）。上游若修回来，`disabled` 这一行仍然无害——它是一个即将被删除的条目，标记 disabled 不改变任何可见语义。真机端到端（0.2.1 `dsh web` 里逐条点穿）**仍未做**，见 `.tasks/mcp-tool-search/OPEN-ITEMS.md` 的"仍未做的"。
+
+   验证方式就是本仓库自己的漂移方法：隔离副本 + `pnpm add` 把 11 个 peer 宿主包整套换到目标版本，**再**按该 dsh 自己声明的 `dependencies.@deepseek-ai/cordis` / `cordis-plugin-loader` 换掉这两代（`upstream-drift.yml` 现在两件事都做）。0.2.1-rc.2 + cordis 4.0.5 + loader 1.0.6 的稳态是 **748/748**（`node --test`，去掉按定义会红的 `package-contract`）；0.2.0-rc.2 基线是 **796/796**。
+
+   **为什么 strict codec 两个键都写，以及 0.2 之后还剩不剩意义**（`lib/typert.js` 与 `lib/client.js` 各一份，`client-lifecycle.test.mjs` 钉住两者一致）：宿主在两个渠道上查**不同的键**，且都忽略对方的键——`0.1.5-rc.x`（= 当时的 `latest` / `next`，也就是 `npx` 默认装到的那条）查 `codec.schema.parse` 必须是 zod v4 实例；`0.1.6-alpha.2` 起查 `typeof codec.create === 'function'`。少写 `schema` 会在最新 RC 上加载即拒，少写 `create` 会在 alpha 上加载即拒；`mode: 'src-json'` 不是出路（loader 强制 invocation 的 codec 必须是 strict）。拿三个版本的 loader 直接跑自己的产物：
 
 | codec 形状 | loader `0.1.5-rc.2` | loader `0.1.6-alpha.1` | loader `0.1.6-alpha.2` |
 |---|---|---|---|
@@ -187,7 +198,7 @@ DSH 宿主 API 通过 `peerDependencies` 以 `>=0.2.0-rc.1 <0.3.0` 声明（只�
 | **双写** | PASS | PASS | PASS |
 | `mode: 'src-json'` | 拒 | 拒 | 拒 |
 
-`0.2.0-rc.2`（当前开发基线）的 loader 实测与 `0.1.6-alpha.2` 同列：只有 `create()` 通过、只有 `schema` 被拒。也就是说**基线已经落在「只查 `create()`」那一侧**，而只查 `schema` 的 `0.1.5-rc.x` 是更早的渠道——`latest`/`next` 在 2026-09-24 就一起推进到了 `0.1.7-rc.2`、2026-09-29 又一起推进到 `0.2.0-rc.2`，所以它不再是「npx 默认装到的版本」，但仍有用户停在那一批（peer 范围为 `>=0.1.5-rc.1 <0.2.0` 允许，`COMPAT_WINDOW` 不动的原因见上一条）。两个键都不能删，且本地测试已看不到 `schema` 那半边（由 `test/typert-manifest.test.mjs` 里那条不依赖 loader 版本的形状断言钉住）。
+`0.2.0-rc.2`（当前开发基线）与 `0.2.1-rc.2`（0.2.1 宿主）的 loader 实测都与 `0.1.6-alpha.2` 同列：只有 `create()` 通过、只有 `schema` 被拒，也就是说**受支持的两条线都只查 `create()`**，`schema` 是唯一一处**只为 0.1.5 存在**的遗产形状。它保留的理由是成本/收益而不是支持承诺：两个键互不干扰、宿主都忽略对方的键，删掉它的收益只是少两个键，代价是要在 0.2.0 与 0.2.1 两套宿主上重验加载期契约（`typert-manifest` 形状断言 + `client-admission` 真网关准入）。按 2026-10-18 定的支持口径，**这是一次独立的清理，不随兼容修复捆绑**；`test/typert-manifest.test.mjs` 里那条不依赖 loader 版本的形状断言仍然钉住两键并存。
 
 浏览器半（`@deepseek-ai/dsh-typert-registry` 的 `lib/client.js`）做同一份校验，所以 `lib/client.js` 里的 codec 必须同步改——只改 host 那份会变成「面板能加载，一调用就炸」。
 

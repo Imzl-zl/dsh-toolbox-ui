@@ -107,18 +107,18 @@ test('real include host: add and removeServer survive a restart without duplicat
   let ctx = await boot({ base, patch, server })
   try {
     // 生产形状：patch 里的条目由 include 子树物化，真 mcp-client 连真子进程。
-    await new Promise((r) => setTimeout(r, 800))
+    // 等条件而不是等固定时长：全量跑的时候 40+ 个用例并发，800ms 在负载下会偶发不够，
+    // 这条曾经因此以"include 子树里的条目必须真的连上"红过（与它要验的行为无关）。
+    assert.ok(await waitFor(() => ctx.get('tools').schemas().some((s) => s.name === 'mcp__a__echo')), 'include 子树里的条目必须真的连上')
     assert.deepEqual([...ctx.loader.entries()].map((e) => e.options.id).sort(), ['base-group', 'include', 'mcp-a'])
-    assert.ok(ctx.get('tools').schemas().some((s) => s.name === 'mcp__a__echo'), 'include 子树里的条目必须真的连上')
 
     // add(b)：根部创建，工具立刻活。
     const added = await ctx.get('mcpManager').add({ name: 'b', transport: 'stdio', command: process.execPath, args: [server, sentinelB] })
     assert.match(added.note, /开始连接/)
-    await new Promise((r) => setTimeout(r, 800))
+    assert.ok(await waitFor(() => ctx.get('tools').schemas().some((s) => s.name === 'mcp__b__echo')), '新服务器的工具必须立刻可见')
     const beta = [...ctx.loader.entries()].filter((e) => e.options.config?.serverName === 'b')
     assert.equal(beta.length, 1, 'add 必须创建条目')
     assert.equal(beta[0].parent, ctx.loader.root, '必须在根部创建（不走 include 子树）')
-    assert.ok(ctx.get('tools').schemas().some((s) => s.name === 'mcp__b__echo'), '新服务器的工具必须立刻可见')
 
     // 根部创建不得碰 base 配置：patch 条目还在 patch 里，base 一个字节没动。
     assert.equal(await readFile(base, 'utf8'), BASE_CONFIG, 'add 之后 base 配置必须原样（否则 Include.write() 把 patch 条目烙了进去）')
@@ -130,19 +130,19 @@ test('real include host: add and removeServer survive a restart without duplicat
   // ── 重启：patch 里的两条都必须各出现一次，且 base 仍然干净 ──
   ctx = await boot({ base, patch, server })
   try {
-    await new Promise((r) => setTimeout(r, 1200))
+    assert.ok(await waitFor(() => {
+      const names = ctx.get('tools').schemas().map((s) => s.name)
+      return names.includes('mcp__a__echo') && names.includes('mcp__b__echo')
+    }), '重启后两条连接都必须在')
     assert.deepEqual([...ctx.loader.entries()].map((e) => e.options.id).sort(), ['base-group', 'include', 'mcp-a', 'mcp-b'],
       '重启后每个条目必须恰好一条：base 一份 + patch insert 一份就是重复条目（O1 的核心风险）')
-    const names = ctx.get('tools').schemas().map((s) => s.name)
-    assert.ok(names.includes('mcp__a__echo') && names.includes('mcp__b__echo'), '重启后两条连接都必须在')
     assert.equal(await readFile(base, 'utf8'), BASE_CONFIG, '重启后 base 配置仍然原样')
 
     // removeServer(a)：条目停掉、子进程退出、patch 行删掉，base 不动。
     const removed = await ctx.get('mcpManager').removeServer('a')
     assert.match(removed.note, /停止运行中的连接/)
-    await new Promise((r) => setTimeout(r, 800))
+    assert.ok(await waitFor(() => !ctx.get('tools').schemas().some((s) => s.name === 'mcp__a__echo')), '工具必须消失')
     assert.equal([...ctx.loader.entries()].some((e) => e.options.id === 'mcp-a'), false, '条目必须被移除')
-    assert.equal(ctx.get('tools').schemas().some((s) => s.name === 'mcp__a__echo'), false, '工具必须消失')
     assert.ok(await waitFor(() => existsSync(sentinelA)), 'stdio 子进程必须退出')
     assert.doesNotMatch(await readFile(patch, 'utf8'), /serverName: a/, 'patch 行也要删掉')
     assert.equal(await readFile(base, 'utf8'), BASE_CONFIG, 'removeServer 之后 base 配置必须原样')
@@ -153,10 +153,9 @@ test('real include host: add and removeServer survive a restart without duplicat
   // ── 再重启：只剩 b，且没有残留 ──
   ctx = await boot({ base, patch, server })
   try {
-    await new Promise((r) => setTimeout(r, 1200))
+    assert.ok(await waitFor(() => ctx.get('tools').schemas().some((s) => s.name === 'mcp__b__echo')))
     assert.deepEqual([...ctx.loader.entries()].map((e) => e.options.id).sort(), ['base-group', 'include', 'mcp-b'],
       '二次重启后不得有被移除条目的残留')
-    assert.ok(ctx.get('tools').schemas().some((s) => s.name === 'mcp__b__echo'))
     assert.equal(ctx.get('tools').schemas().some((s) => s.name === 'mcp__a__echo'), false)
     assert.equal(await readFile(base, 'utf8'), BASE_CONFIG, '二次重启后 base 配置仍然原样')
   } finally {

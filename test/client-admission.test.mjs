@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import * as cordis from '@deepseek-ai/cordis'
 
@@ -34,8 +36,19 @@ const { Context } = cordis
 // 一个撞名的 endpoint，这里都会以宿主自己的诊断变红。
 const require = createRequire(import.meta.url)
 
-/** 客户端适配器里那条规则的权威位置（真机 app.asar 中同一份实现）。 */
-const GATEWAY_CLIENT = require.resolve('@deepseek-ai/dsh-api-gateway/client')
+/**
+ * 客户端适配器里那条规则的权威位置（真机 app.asar 中同一份实现）。
+ *
+ * ⚠️ 必须按 `browser` 条件取件，不能用 `require.resolve('@deepseek-ai/dsh-api-gateway/client')`：
+ * 0.2.1 起 `./client` 是条件导出（`node` → `client.node.js`，`browser` → `client.browser.js`），
+ * `require.resolve` 在 Node 下命中 `node` 条件，拿到的是 **Node 构建**——那一份不自注册
+ * `window.__ModuleLoader__`，`loadBundle` 于是永远等不到注册，用例会以"bundle 没有调用
+ * window.__ModuleLoader__.load"这种与被测行为无关的理由红掉。0.2.0 的 `./client` 只有
+ * `default`，回落到它即可（那一份就是浏览器 bundle）。
+ */
+const GATEWAY_PACKAGE = require.resolve('@deepseek-ai/dsh-api-gateway/package.json')
+const GATEWAY_EXPORTS = JSON.parse(readFileSync(GATEWAY_PACKAGE, 'utf8')).exports['./client']
+const GATEWAY_CLIENT = join(dirname(GATEWAY_PACKAGE), GATEWAY_EXPORTS.browser ?? GATEWAY_EXPORTS.default)
 
 /**
  * 载入一个浏览器 bundle（`window.__ModuleLoader__.load({ id, factory })` 形态）。

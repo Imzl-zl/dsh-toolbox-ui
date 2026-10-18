@@ -41,7 +41,7 @@
 > - `"notebook jupyter"` — keyword search, up to max_results best matches
 > - `"+slack send"` — require "slack" in the name, rank by remaining terms
 
-- 引导模式：**两处并存，不是二选一**。① 提示侧索引：系统提示里列出全部延迟工具的名字 + 一行用途（Piebald-AI 镜像 `tool-description-toolsearch-unfetched-tool-note.md`，v2.1.231："Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked"）；② 就近显式提醒：v2.1.221 系统提示 claude-in-chrome 段原话 *"If the `mcp__claude-in-chrome__*` tools are deferred (must be loaded via ToolSearch before use), load every tool you expect to need first."*。**修正（审查后）**：早前此处写"Claude Code 实际也不用总则"是以单处引语概括全局——Agent SDK 官方文档明确推荐总则式引导："You can also add a system prompt section listing available tool categories. This gives the agent context about what kinds of tools are available to search for."（code.claude.com/docs/en/agent-sdk/tool-search → Optimize tool discovery）。我们的实现两者都有（`tool-search:guidance` 静态总则 + `tool-search:catalog` 活库存），与官方建议一致。
+- 引导模式：**两处并存，不是二选一**。① 提示侧索引：系统提示里**只列出全部延迟工具的名字**（v2.1.7x 系统提示原文："Deferred tools appear by name in `<system-reminder>` messages. Until fetched, **only the name is known** — there is no parameter schema, so the tool cannot be invoked."；Piebald-AI 镜像 `tool-description-toolsearch-unfetched-tool-note.md`，v2.1.231 是同一句）。⚠️ **更正（2026-10-18）**：此处早前写"名字 + 一行用途"，与所引镜像不符——镜像里没有用途；把用途或它的截断版放进 prompt 是**我们自己加的**，已于同日删除（见 `.tasks/mcp-tool-search/TUNING-DECISIONS.md` F1/F5、Q1）。② 就近显式提醒：v2.1.221 系统提示 claude-in-chrome 段原话 *"If the `mcp__claude-in-chrome__*` tools are deferred (must be loaded via ToolSearch before use), load every tool you expect to need first."*。**修正（审查后）**：早前此处写"Claude Code 实际也不用总则"是以单处引语概括全局——Agent SDK 官方文档明确推荐总则式引导："You can also add a system prompt section listing available tool categories. This gives the agent context about what kinds of tools are available to search for."（code.claude.com/docs/en/agent-sdk/tool-search → Optimize tool discovery）。我们的实现两者都有（`tool-search:guidance` 静态总则 + `tool-search:catalog` 活库存），与官方建议一致。
 - 官方博客（[advanced tool use](https://www.anthropic.com/engineering/advanced-tool-use)）：开箱提供 regex 与 BM25 两种搜索后端；工具定义 >10K tokens 才值得用；<10 个工具不划算。
 - 官方文档：每次搜索默认返回最多 5 个；加载的工具在后续轮次保持可用，直到压缩后才需重搜。
 
@@ -121,11 +121,16 @@ DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四�
 - [studyzy/dsh-lazy-tools](https://github.com/studyzy/dsh-lazy-tools)：`ctx.tools.restrict()` 遮罩 + `tool_search` + `defer_execute_tool`；激活写入 agent 的 allow 集、下一轮生效；**仅全局工具**（README 明示"已注册在 agent 自身作用域的工具始终可见"）；无名字目录；resume 后从零（自述为避免写未注册的会话事件类型）；配置为 CodeBuddy 风格 `Defer(...)`/`NoDefer(...)`。
 - [lordqyxz/dsh-tool-search](https://github.com/lordqyxz/dsh-tool-search)：**与本文 L0+L1+L3 设计高度收敛**——常驻目录 section（系统提示每工具一行：名字+截断目的，注册表不变则字节稳定、变化重建）、BM25（名字+描述+参数文本，CJK 字符二元分词）、命中直调无 dispatcher、单调 guard 自愈、阈值 inert（threshold 15 / maxResults 5 / maxDiscovered 20）、**resume 用 presentation meta + 会话日志持久化**（解决了本文"resume 从零"的行为边界）；基准：120 工具 14632→3417 tokens（省 76.6%）、top-1 100%。
 
+  ⚠️ **2026-10-18：我们没有照抄它的"名字+截断目的"**。上面那个形状被实测证伪：27 个真实工具里
+  56% 的描述会被 110 字符切掉，其中 80% 的尾巴带 `only`/`when`/`unless` 这类约束词，而近义工具
+  （`read_file` / `read_text_file` / `read_media_file` / `read_multiple_files`）恰恰靠尾巴区分。
+  现在目录**只列工具名**。证据与取舍见 `.tasks/mcp-tool-search/TUNING-DECISIONS.md` F1/F5/F9/Q1。
+
 **对本设计的含义**：核心机制（目录 section + registry 遮罩 + 自愈）已获第三重复核（Claude Code + 两个生态实现），且带了基准数据。本文与参考实现的**真实差异**（早前"高度收敛"的说法不准确，粒度不同）：① **延迟粒度**——我们是 per-server defer（未列入的服务器天然稳定），它是"全延迟 + `alwaysVisible` 白名单"（默认白名单含 `skill`/`ask_user_question`/`report`/`submit_*`/`structured_output*`，说明它连内置工具一起延迟）；② **项目族**——两个生态实现都只做全局族，我们的 assembly 遮罩天然覆盖项目族（见决策 8①）；③ **MCP 管理 UI 集成**——现有实现均为配置文件驱动；④ **活配置**——我们的 deferServers/serverNames 是函数形态，开关改了下一次组装即生效，不需要重装。
 
 **照抄之外必须自己补的两件事**（早前遗漏，审查后补上）：
 - **MCP server instructions 也要遮**。`dsh-mcp-client` 给每个服务器注册一个 `mcp:<server>` prompt section（order 3100，`interpolate:false`，默认上限 `maxInstructionBytes` 32768 字节），只遮 tool schema 不遮它，延迟收益会被这八分之一上下文吃掉。参考实现用 `deferToolGuidance` 处理同类问题；我们对"还有未发现工具的服务器"清空该段，全部发现后恢复。（项目族不受影响：项目连接的 section 注册在兄弟作用域，本来就不进 agent 的 prompt——已实测。）
-- **目录必须有体积上界**。700+ 名字全量进 prompt 约 10 万字符（实测），超出 `maxCatalogLines` 的部分截断并提示"另有 N 个，用关键词或 `select:` 查询"。
+- **目录必须有体积上界。** 目录**只列工具名**（2026-10-18 起）：实测 27 个真实工具的名字均长 33.3 字符，每行 `- <name>` 约 35 字符，于是 300 行 ≈ 10.6k 字符 ≈ 2.6k tokens。超出 `maxCatalogLines` 的部分**不列出**并提示"另有 N 个，用关键词或 `select:` 查询"。旧形态（名字 + 110 字符用途）同样 27 工具实测 3401 字符，是现在的 **3.6 倍**，而且 56% 的描述会被切——**体积不是删它的理由，切掉区分性信息才是**。
 
 **策略决策（B：差异化，不做全自研）**：引擎层“稳”不求新——查询语法照抄 Claude Code 三形态、BM25/CJK 参数对照 lordqyxz 实测调、resume 用其 presentation meta 方案（消除本文“resume 从零”边界）；集成层“精”——per-server defer 开关进服务器列表 UI（生态零 UI）、项目族支持（生态空白，见决策 8①）、与 exclude 合并、加载状态与节省量面板可见。明确不做：重新发明搜索算法、自造 dispatcher、发明新查询语法。前提：三样“更多”（UI、项目级、管理器联动）做得出来，否则诚实放弃而非造平庸复制品。
 
@@ -253,7 +258,7 @@ DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四�
 > 在补上之前，这几条只能算**一次性的手工测量**，`maxResults: 10` 与 `stem: true` 的默认值就建立在它之上。
 
 - `tool-search-index`（纯函数）：三种查询语法解析（含 `+` 约束对含 `-`/`_` 服务器名）、BM25 排序 fixture、max_results、空查询/无命中、CJK 分词、平手 code-unit 序
-- `tool-search-runtime`（mock tools service）：`uniqueOwner` 歧义、`partitionSchemas`、`applyServerFloor`（per-server 下限）、`filterManagedTools` 黑名单语义、`guardDecision`、`clampDiscovered`、`discoveredFromMessages`（含非本工具/错误结果/非 JSON）、`viewRevision` 纯度、`buildToolSearchView`（聚合阈值 + per-server 下限）、`activeMaskedServers`、`catalogSectionText`（截断 + code-unit 序）、`maskInstructionSections`（不 mutate）、装配层（只订阅 assemble、目录 interpolate:false、指令段清空、fail-open、agent-less 显式失败、活配置、revision 缓存）
+- `tool-search-runtime`（mock tools service）：`uniqueOwner` 歧义、`partitionSchemas`、`filterManagedTools` 黑名单语义、`guardDecision`、`clampDiscovered`、`discoveredFromMessages`（含非本工具/错误结果/非 JSON）、`viewRevision` 纯度、`buildToolSearchView`、`activeMaskedServers`、`catalogSectionText`（**只列名字**、code-unit 序、行数上限、描述一个字都不进目录）、`maskInstructionSections`（不 mutate）、装配层（只订阅 assemble、目录 interpolate:false、指令段清空、fail-open、agent-less 显式失败、活配置、revision 缓存）
 - 挂载边界：宿主视图抛错时零干预（fail-open），不炸会话
 - **项目级 defer 端到端**：`projectMcpServers` + `serverDeferTable` 把项目族并进同一张表（`workspace-runtime` 用例）
 - **PTC 模式不装配**（`tool-search-wiring` 用例）
@@ -284,7 +289,7 @@ DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四�
 | 6 | MCP server instructions（每服默认上限 32KB）完全没遮 | `dsh-mcp-client:736-743` 注册 `mcp:<server>` section（order 3100）。参考实现用 `deferToolGuidance` 处理同类问题，我们漏了 | 视图带 `managedByServer`，assemble 时对"还有未发现工具的服务器"清空该段（返回新对象，不 mutate），全部发现后恢复 |
 | 7 | 阈值语义 UI 与运行时不一致；决策 2 承诺的 per-server 豁免**没实现** | 运行时是聚合 `managed.size >= 15`，UI 行级用 `toolCount < 15` | 两条规则都实现且分工明确：per-server `> minServerTools(10)` 才可延迟（行级文案只说这条），聚合 `>= threshold(15)` 才启用机制（会话级，行级不说） |
 | 8 | 用了宿主标注"new calls are prohibited"的 `snapshotEvents()` | dsh-session:1358/1370 双处 `@deprecated` | 改走受支持的 `deriveMessages()`，扫 protocol JSON。真 Session 验证两条路径等价，且净减代码（去掉配对与 ptc-dispatch 特例） |
-| 9 | 目录无体积上界、每次组装全量重渲染 | 实测 735 工具：`catalogSectionText` 11.1ms/次、正文 100,914 字符 | 加 `maxCatalogLines`（默认 300）+ "另有 N 个" 提示；视图按 revision 缓存（实测 revision 3.08ms vs 重建 52.8ms） |
+| 9 | 目录无体积上界、每次组装全量重渲染 | 实测 735 工具：`catalogSectionText` 11.1ms/次、正文 100,914 字符 | 加 `maxCatalogLines`（默认 300）+ "另有 N 个" 提示；视图按 revision 缓存（实测 revision 3.08ms vs 重建 52.8ms）。**2026-10-18 重算口径**：100,914 / 735 = **每行 137 字符**，证明那次的"100,914 字符"是**含用途**的旧形态（名字 33 + 分隔 + 110 用途）；names-only 同规模约 26k 字符（每行 35.3，见 TUNING-DECISIONS F9）。`maxCatalogLines` 维持 300 不变——外推不足以改数 |
 | 10 | `estimateSchemaTokens` 的 chars/4 对中文低估 2.7–4× | 算术推断（本机无 DeepSeek tokenizer），但方向确定 | 改 CJK 感知：CJK 字符按 1、其余按 `charactersPerToken`；纯 ASCII 走快路径，数值与旧版一致。**⚠️ 这条已被 §12.3 #23 推翻并作废**：估算器整套撤除， chars/4 与 CJK 粗估都不再存在。留下的判断材料是真实数据（工具数）与 per-server 规则 |
 | 11 | PTC 模式下遮罩与 guard **双失效**，设计只承认前者 | `tools:sdk` 是独立投影路径（dsh-tools `sdkSection`→`sdkSchemas`）；且 `collapses` 直接拒 model-direct 调用，guard 根本不跑 | PTC 部署下**整体不装配**并在日志明说。要支持需先补 `shapeSdkSection`，那是另一个改动。**⚠️ 第十轮已推翻本条的后半**：guard **没有**失效——`run_code` 的嵌套派发（`dsh-tools:1306` 的 `parent: exec.token`）绕过 `collapses` 但走完整管线含 `guardReason`，真 token 实测四向对照通过；"整体不装配"也被取代（改为 per-agent 判据 + 裁 `tools:sdk`）。见 §12.7 与 `.tasks/mcp-tool-search/DECISIONS.md` |
 | 12 | 决策 8③/11 引的"UNKNOWN_TOOL 先于 guard"是错的 | `prepareExecution` 的 `guardReason`（dsh-tools:3241）在 `dispatchToolBody` 抛 `ToolNotFoundError`（:3308；早前写的 :3307 是 `resolveExecution` 那一行，复核时按安装包逐行核对）之前；`createExecution` 对不可见工具返回 `kind:"ready"`（:3188） | 改文档论据。结论不变（assembly 过滤仍是对的），但真实优势只剩 ①②④⑤ |
@@ -388,6 +393,12 @@ not only on disk`（夹具 = 临时技能根 × 真 `SkillRegistry` × 真 `dsh-
 | 35 | **`test/tool-search-real-host.test.mjs` 顶部 `const DEFER_CONFIG = …` 声明后从未使用** | 全文件只有声明那一处命中（`Select-String`） | 删除，并把 `globalTools(server, count = 16)` 参数化以支撑 #32 的 30 工具夹具 |
 
 **变异复验补强（同轮）**：四处核心逻辑改坏后全量曾仍绿，逐条补了"能区分"的夹具——`NAME_BONUS 12→0`（旧用例的查询词恰好等于裸工具名，走 `isExactName` 的 `Infinity` 分支把加分支路；新用例让两个文档命中同一个词、只有名字命中侧拿 bonus）、去掉平手 tie-break（旧 fixture 输入序**恰好就是**期望序，V8 稳定排序本身就给出同样结果；新 fixture 把输入序反过来）、`deferring: managed.size >= threshold` 改成 `>`（旧用例只有 16 与 14，两者在两种写法下同结果——边界这个数用 `DEFAULTS.threshold` 现取，不再写字面量）、`viewRevision` 里删 `servers`（`serverNames` 是活输入：项目 MCP 晚连会多出名字；新增单独变 `serverNames` 的断言）。`descriptionChars` / `maxCatalogLines` / `threshold` 仍不进测试：它们是**安装期固定值**，会话内不可能变，删了没有 stale 风险（读码结论，非实测）。
+
+> ⚠️ **2026-10-18 更正**：上面这句仍然成立的部分只剩 `maxCatalogLines`（和已删除的 `threshold`）。
+> `descriptionChars` 当天已从代码里删除——目录改 names-only 之后它没有意义，写进配置会**显式报错**
+> （有单测钉住）。顺带更正一个当时的误判：把 `maxCatalogLines` 归为"不进测试"是对的，
+> 但 `descriptionChars` 的问题从来不是"没 stale 风险"，而是**这个数字本身没有依据**——
+> 详见 `.tasks/mcp-tool-search/TUNING-DECISIONS.md` F5/Q1。
 
 **仍未实测、也不许当成已验证的两项**：
 - **PTC 组合（已实测，缺陷确认）**：部署默认 `native` 时插件照装（装配判据读的是 `ctx.tools.modeFor()`，**不传 scope = 部署默认层**），而 `dsh-agent-tool-presentation` 会给某个 agent preset 的 scope 调 `presentAs('ptc')`。真宿主探针（`ctx.provide('ptcRuntime', { language: 'typescript' })` 最小 stub + 真 `presentAs('ptc')`）：该 agent 的 `tools:sdk` 段里 **30/30 个 mcp 工具 schema 全在**（含 `tool_search` 自己），而 `assembly.tools` 里 0 个——**遮罩对它是 no-op**；直调 `tool_search` → `isError:true`「only `run_code` is callable directly」；对照同进程 native agent → `isError:false`。即"半失效比不装更坏"这条判断在**跨 scope 组合**下真实发生。修法方向：装配判据改成按 agent 判 `agent.ctx.tools.modeFor(agent)`（装配时读一次全局默认做不到），但 `installToolSearchRuntime` 目前是全局装配、`assemble`/`guard` 里才拿得到 agent，要动装配结构——**本轮只取证、未改**。

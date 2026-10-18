@@ -68,27 +68,54 @@ jobs:
             # 由 pnpm 一起带到同一版本。
             #
             # 注意这里换的是 devDependencies（本地开发副本），不是插件的 peer 声明：
-            # 三个渠道的版本都落在 COMPAT_WINDOW（>=0.1.5-rc.1 <0.2.0）内——宿主自己的
+            # 三个渠道的版本都落在 COMPAT_WINDOW（>=0.2.0-rc.1 <0.3.0）内——宿主自己的
             # evaluatePluginCompatibility 用 includePrerelease 比较，预发布按数值参与，
-            # 所以 0.1.5-rc.x / 0.1.7-alpha.2 都算满足。pnpm 的 peer 警告不是判定依据。
+            # 所以 0.2.x-rc.* 都算满足。pnpm 的 peer 警告不是判定依据。
+            #
+            # 列表必须覆盖 package.json 里**每一个** peer 宿主包：漏掉的那个会留在开发基线
+            # 版本上，这一轮"换版本"其实只换了一半（dsh-skill / dsh-skill-filesystem /
+            # dsh-api-gateway 曾经就是这样漏着的）。
             #
             # minimumReleaseAgeExclude 需要手工维护：pnpm 不会自行补充（只有
             # `pnpm audit --fix` 会），这里新增高版本号时记得同步 pnpm-workspace.yaml。
-            if pnpm add -D \
-              "@deepseek-ai/dsh-agent@$version" \
-              "@deepseek-ai/dsh-agent-loop@$version" \
-              "@deepseek-ai/dsh-atomic-write@$version" \
-              "@deepseek-ai/dsh-mcp-client@$version" \
-              "@deepseek-ai/dsh-scope@$version" \
-              "@deepseek-ai/dsh-tools@$version" \
-              "@deepseek-ai/dsh-typert-loader@$version" \
-              "@deepseek-ai/dsh-typert-protocol@$version"; then
+            host_packages=(
+              "@deepseek-ai/dsh-agent@$version"
+              "@deepseek-ai/dsh-agent-loop@$version"
+              "@deepseek-ai/dsh-api-gateway@$version"
+              "@deepseek-ai/dsh-atomic-write@$version"
+              "@deepseek-ai/dsh-mcp-client@$version"
+              "@deepseek-ai/dsh-scope@$version"
+              "@deepseek-ai/dsh-skill@$version"
+              "@deepseek-ai/dsh-skill-filesystem@$version"
+              "@deepseek-ai/dsh-tools@$version"
+              "@deepseek-ai/dsh-typert-loader@$version"
+              "@deepseek-ai/dsh-typert-protocol@$version"
+            )
+            if pnpm add -D "${host_packages[@]}"; then
               # 不解析输出、不吞失败：失败时整段用例输出留在日志里供判读。
               node --test $files || failed=1
             else
               # 装不上就不能拿旧版本的结果冒充通过。
               echo "::error::安装 @deepseek-ai/dsh@$version 失败"
               failed=1
+            fi
+
+            # 同一批 dsh-* 再配**它自己那一代 cordis**：0.2.0 宿主是 cordis ~4.0.2 +
+            # cordis-plugin-loader ~1.0.3，0.2.1 是 ~4.0.5 + ~1.0.6，而这两代 loader 在两个
+            # 行为上不同（启动错误是否 rethrow、dispose 时会不会把 include 树写回 base），
+            # 守卫在 test/loader-compat.test.mjs。cordis 版本从该 dsh 自己的依赖里取，不在
+            # 这里另抄一份——上游 bump 时这条会自动跟上。
+            cordis="$(npm view "@deepseek-ai/dsh@$version" "dependencies.@deepseek-ai/cordis" 2>/dev/null || true)"
+            loader="$(npm view "@deepseek-ai/dsh@$version" "dependencies.@deepseek-ai/cordis-plugin-loader" 2>/dev/null || true)"
+            if [ -n "$cordis" ] && [ -n "$loader" ]; then
+              echo "::group::$tag → $version + cordis $cordis + loader $loader"
+              if pnpm add -D "@deepseek-ai/cordis@$cordis" "@deepseek-ai/cordis-plugin-loader@$loader"; then
+                node --test $files || failed=1
+              else
+                echo "::error::安装 cordis $cordis / cordis-plugin-loader $loader 失败"
+                failed=1
+              fi
+              echo "::endgroup::"
             fi
             echo "::endgroup::"
           done

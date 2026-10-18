@@ -79,6 +79,10 @@
 > 3. **面板参数表单（C2）**：下一轮的事。`ctx.agents.list()` 可用这件事没变（F21），
 >    "显示真实生效状态"仍可做。
 > 4. **`complete section` 部署下裁手册**：仍未验（那种部署会吞掉所有 section）。
+> 5. ✅ **已修（2026-10-18）目录形态与 `descriptionChars`**：目录改成**只列工具名**（对齐 Claude Code：
+>    延迟工具在 prompt 里只有标识符），`descriptionChars` 与截断逻辑连同该配置键一起删除
+>    （写进配置显式报错），三处模型可见文案同步。证据、其余参数的证据等级、以及
+>    `maxDiscovered` 的推导见 `TUNING-DECISIONS.md`。**仍欠**：目录体积重量（Q4）与真机点穿。
 
 ---
 
@@ -207,6 +211,12 @@ toggle[aria-checked=true]    = rgb(249,250,251)
 真 loader 夹具里，一个 mcp-client 连接会把夹具服务器进程拉起**两次**（实测：两次启动间隔 143ms，同父进程、同 argv）。审查轮已排除两种流行解释：MCP SDK 每 transport 只 spawn 一次（`@modelcontextprotocol/client` stdio.mjs:66 `if (this._process) throw`）；mcp-client 默认重连初始延迟 500ms（dsh-mcp-client lib:436）也与之不符。
 
 形态上 = 同一 config 两个连接 owner，最可能是夹具把同一 mcp-client 配置挂了两个 owner；真 loader 夹具已删，无法回看——**未验证**。对 pid 集合整体换新的判据无影响，但间歇性双 spawn 会让 pid 断言 flaky。
+
+🆕 **2026-10-18 真机复现（仍未定性）**：隔离 `DSH_HOME` + 发布的 `dsh@0.2.0-rc.2` `headless`，
+一台真 stdio 夹具服务器，一次连接期间日志里出现**两个不同的 `server-start`**（tally 不同：651218、205276），
+`tools-call` 落在第二个。也就是说"双 spawn"**不只是夹具现象**，真宿主 + 真实 MCP 服务器也能复现。
+本次没抓时间差/父进程/连接 owner，所以仍不能定性；但**它已经够格升为 O5b**：若要修，先按
+`loader.entries()` 与 `ctx.get('mcpClient')` 侧统计"同一 config 的 owner 数"。
 
 ---
 
