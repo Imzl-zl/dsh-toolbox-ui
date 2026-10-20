@@ -251,6 +251,13 @@ peer 怎么被解析到也很关键：官方 profile 的 `pnpm-workspace.yaml` �
 
 这条规则收在 `lib/import-admission.js` 的 `admitImportedServers` 里，并由两个写盘入口（`applyManagedImport` / `applyWorkspaceImport`）各自调用一次（幂等）：写盘口不依赖调用方记得做，以后新增的导入器也不会漏。`normalizeMcpImport` 只负责归一化与**检测**同名（`duplicateServerNames`），不做策略——策略属于知道赌注的那个边界。
 
+**但「写盘时不许造出同名」不等于「加载时不会出现同名」**：bundle 自带的 patch、Agent preset、被历史 bug 写脏的 `cordis.yml`（见上文 L2 那一行的 `Include.write()`）都能让同名条目绕过所有写盘口出现在 loader 里。所以面板上「这台服务器能不能改」与「有没有同名条目」必须是**两个判据**：
+
+- **能不能改**：只看 `entry.options.id` 是否等于 profile patch 里那一行的 id（`resolveManagedEntry`）。名字只用于在我们自己这一层定位那条配置，不参与身份判定。曾经这里还要求「全场只有一条同名条目」，结果是别人多一条同名条目就把自己那条锁死——真机上表现为「一行、两条条目、编辑/停用/移除全灰」。
+- **有几条同名**：`summarize()` 的 `conflict` 与 `duplicates: [{ id, phase, disabled }]`，只作展示。行上必须点出另一条的 id 与状态，因为 mcp-client 在 apply 期按作用域判重、同名条目里只有一条连得上——用户看到「连接失败」时必须能分清失败的是哪一条、另一条是谁的。
+
+两条配套的诚实要求：移除后若还剩下别层的同名条目，note 要把「剩下的是谁、要重启宿主才会重新连接」写出来（否则删完仍看到失败日志，用户会以为移除没生效）；而**导入**路径维持上面的跳过语义不变——那是"要不要再写一行进去"，写下去就是第三条同类条目，与"改自己那条"不是一件事。
+
 `!!js` 语法只在 `lib/env-expression.js` 里实现（生成 / 校验 / 抽取变量名 / 反转模板 / 求值）。**不要在其他文件里另写解析**：接受面比产出面宽一格，就足以让裸引用直通、把宿主拖下水。
 
 ## 工作区复制与导出的边界

@@ -492,3 +492,23 @@ test('延迟芯片：开=「延迟」、关=「全量」，状态走 aria-presse
   assert.match(readonly.props.className, /\bro\b/)
 })
 
+
+test('MCP 详情：同名条目的另一条被点名，本行仍然可编辑', () => {
+  const { ServerDetail } = loadInternals()
+  const tree = ServerDetail(serverProps({
+    server: server({ conflict: true, managed: true, duplicates: [{ id: 'mcp-github-external', phase: 'failed' }] }),
+  }))
+  const text = textOf(tree).join(' | ')
+  // 「还有几条同名」这一行必须指名道姓：只写"冲突"时，用户既不知道另一条是谁，
+  // 也不知道该去哪个配置层改它。
+  assert.match(text, /mcp-github-external/, '另一条同名条目必须被点名')
+  assert.match(text, /另有 1 条同名条目/, '配置来源要说清同名条目的数量')
+  // 身份按 id：本 profile 拥有其中一条 → 编辑/停用/移除都仍然可用（旧行为是整块只读）。
+  const edit = collectAll(tree, (node) => node?.props?.icon === 'edit')[0]
+  assert.notEqual(edit, undefined, '编辑按钮应当存在')
+  assert.ok(!edit.props.disabled, '同名条目在别层存在，不构成"自己这条不可编辑"的理由')
+  // 反向下限：不归本 profile 的条目（managed=false）必须仍然是禁用的，别把这条一起放开。
+  const foreign = ServerDetail(serverProps({ server: server({ managed: false, conflict: true }) }))
+  const foreignEdit = collectAll(foreign, (node) => node?.props?.icon === 'edit')[0]
+  assert.equal(foreignEdit.props.disabled, true, '别层的条目仍然只读')
+})

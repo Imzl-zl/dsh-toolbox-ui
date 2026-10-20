@@ -63,10 +63,10 @@ See every installed skill's **real scope** and cross-scope shadowing, enable/dis
 
 ```sh
 # Recommended: from npm — `dsh plugin update` then upgrades within ^1.x
-dsh plugin --profile web add dsh-toolbox-ui@^1.8.1
+dsh plugin --profile web add dsh-toolbox-ui@^1.8.2
 
 # Or pin a GitHub release tag (no automatic upgrades; re-add with a new tag)
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.8.1
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.8.2
 ```
 
 Then **restart `dsh web`**. To uninstall (your existing MCP entries stay):
@@ -85,13 +85,20 @@ dsh plugin --profile web update dsh-toolbox-ui
 
 When a newer version exists the panel shows a dismissible banner; pressing Upgrade runs DSH's official pluginManager.
 
-> ⚠️ **1.6.1 and earlier will not announce 1.6.2 or anything after it.** Their update check read this repository's release feed, whose only `latest` entry is held by the legacy package `dsh-mcp-manager-ui` (frozen at 1.5.5) — so it always answered "up to date". 1.6.2 fixed that by querying **this package's latest on npm**, and the fix can only ship inside a newer version: upgrade once by hand, then the banner works again.
+> ⚠️ **1.6.1 and earlier will not announce 1.6.2 or anything after it.** Their update check read this repository's release feed, whose only `latest` entry was held by the legacy package `dsh-mcp-manager-ui` (frozen at 1.5.5) during that period — so it always answered "up to date". 1.6.2 fixed that by querying **this package's latest on npm**, and the fix can only ship inside a newer version: upgrade once by hand, then the banner works again.
 >
 > ```sh
 > dsh plugin --profile web update dsh-toolbox-ui
 > ```
 >
-> Still on the legacy package (≤1.5.3)? Use the **migration** path: press Upgrade in the panel to reach 1.5.5, then press "Migrate" (it installs this package and removes the old one). See [Install & upgrade](docs/installation.md).
+> Still on the legacy package (≤1.5.5)? 1.5.5 keeps a permanent banner at the top of its panel — press "Migrate" and it installs this package and removes the old one. If the panel's Upgrade button reports `ERR_PNPM_NO_MATCHING_VERSION`, the legacy upgrade source has been retired (this repository's `latest` points at this package since v1.8.2); use the two commands instead:
+>
+> ```sh
+> dsh plugin --profile web remove dsh-mcp-manager-ui
+> dsh plugin --profile web add dsh-toolbox-ui
+> ```
+>
+> See [Install & upgrade](docs/installation.md).
 
 ## Quick start
 

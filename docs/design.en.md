@@ -240,6 +240,13 @@ The same place must also guarantee **`serverName` uniqueness within the same sco
 
 This rule lives in `admitImportedServers` in `lib/import-admission.js`, and is called once (idempotently) by each of the two write entry points (`applyManagedImport` / `applyWorkspaceImport`): the write gate does not depend on the caller remembering to do it, so future importers cannot miss it either. `normalizeMcpImport` is responsible only for normalization and for **detecting** duplicate names (`duplicateServerNames`), not for policy — policy belongs to the boundary that knows the stakes.
 
+**But "the write gate must not create duplicates" is not the same as "no duplicates can exist at load time"**: a bundle's own patch, an Agent preset, or a `cordis.yml` soiled by an older bug (the `Include.write()` case in row L2 above) can all put same-named entries into the loader past every write gate. So "can I change this server" and "are there same-named entries" must stay **two separate judgements**:
+
+- **Can I change it**: only whether `entry.options.id` equals the id of that server's line in the profile patch (`resolveManagedEntry`). The name is used solely to locate our own line in our own layer; it is not part of identity. This used to additionally require "exactly one same-named entry in the whole tree", which meant somebody else's same-named entry locked down ours — on real hardware that showed up as "one row, two entries, edit/disable/remove all grey".
+- **How many are same-named**: `conflict` and `duplicates: [{ id, phase, disabled }]` on the row from `summarize()`, informational only. The row must name the other entry's id and state, because `mcp-client` deduplicates per registration scope at apply time and only one of the same-named entries can connect — when the user sees "connection failed", they have to be able to tell which one failed and whose the other one is.
+
+Two accompanying honesty requirements: if removal leaves a same-named entry from another layer behind, the note must say who is left and that it only retries after a host restart (otherwise the user still sees failure logs and concludes removal did nothing); and the **import** path keeps the skip semantics above — that question is "should I write another line", which would create a third entry of the same kind, not "should I edit my own".
+
 The `!!js` syntax is implemented only in `lib/env-expression.js` (generation / validation / variable-name extraction / template reversal / evaluation). **Do not write another parser in other files**: an acceptance surface one notch wider than the production surface is enough to let bare references through and drag the host down with them.
 
 ## The boundary of workspace copy and export

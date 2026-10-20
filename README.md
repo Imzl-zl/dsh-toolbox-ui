@@ -63,10 +63,10 @@
 
 ```sh
 # 推荐：npm 安装 —— 之后 `dsh plugin update` 在 ^1.x 内自动升小版本
-dsh plugin --profile web add dsh-toolbox-ui@^1.8.1
+dsh plugin --profile web add dsh-toolbox-ui@^1.8.2
 
 # 或固定 GitHub release tag（不自动跨版本，升级要换 tag 重新 add）
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.8.1
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.8.2
 ```
 
 装完**重启 `dsh web`**。卸载（不会删除 profile 里已有的 MCP 条目）：
@@ -85,13 +85,20 @@ dsh plugin --profile web update dsh-toolbox-ui
 
 面板顶部有新版时会显示可关闭的提示条，点「升级」走 DSH 官方的 pluginManager。
 
-> ⚠️ **1.6.1 及更早的版本不会提示 1.6.2 及之后的新版。** 它们的更新检查读的是本仓库的 release feed，而那条 feed 的 latest 被另一条产品线、即已冻结在 1.5.5 的旧包占着，于是永远显示「已是最新」。这个缺陷在 1.6.2 修掉了（改成查**本包在 npm 上的 latest**），修复只能装在新版里——所以请**手动升一次**，之后就恢复正常：
+> ⚠️ **1.6.1 及更早的版本不会提示 1.6.2 及之后的新版。** 它们的更新检查读的是本仓库的 release feed，而那段时间该 feed 的 latest 被另一条产品线（已冻结在 1.5.5 的旧包）占着，于是永远显示「已是最新」。这个缺陷在 1.6.2 修掉了（改成查**本包在 npm 上的 latest**），修复只能装在新版里——所以请**手动升一次**，之后就恢复正常：
 >
 > ```sh
 > dsh plugin --profile web update dsh-toolbox-ui
 > ```
 >
-> 仍装着旧包 `dsh-mcp-manager-ui`（≤1.5.3）的话走**迁移**：面板点「升级」升到 1.5.5，再点「迁移」即可（它会装本包、卸掉旧包），详见[安装与升级](docs/installation.md)。
+> 仍装着旧包 `dsh-mcp-manager-ui`（≤1.5.5）的话走**迁移**：1.5.5 面板顶部有一条常驻提示，点「迁移」即装本包、卸掉旧包。若面板里的「升级」按钮报 `ERR_PNPM_NO_MATCHING_VERSION`，那是旧线的升级源已停用（本仓库的 latest 自 v1.8.2 起指向本包），直接用两条命令：
+>
+> ```sh
+> dsh plugin --profile web remove dsh-mcp-manager-ui
+> dsh plugin --profile web add dsh-toolbox-ui
+> ```
+>
+> 详见[安装与升级](docs/installation.md)。
 
 ## 快速上手
 

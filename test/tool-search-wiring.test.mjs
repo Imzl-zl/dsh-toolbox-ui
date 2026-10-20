@@ -39,8 +39,12 @@ async function mountPlugin(deferEntries, { toolsMode, patchBody = '[]\n', occupi
   // 稳定引用的 entry 对象：真实 loader 的 entries 是持久对象，每次调用返回同一批引用。
   // 若每次新建对象，任何"把新配置写回内存 entry"的路径都会改到一次性副本上——
   // 那恰好会把这类同步变成无声无息的无操作，于是测试全绿而真机不生效。
-  const mcpEntries = deferEntries.map((config) => ({
-    options: { id: `mcp-${config.serverName}`, name: '@deepseek-ai/dsh-mcp-client', config },
+  //
+  // `entryId` 可选：真实 loader 里 id 是主键、同一个 serverName 的两条条目 id 必然不同。
+  // 需要"同名两条"的用例必须显式给第二条一个不同的 id，否则夹具会把两条造得一模一样，
+  // 而"身份按 id"的判定就测不出差别（也测不出它是否真的没动到另一条）。
+  const mcpEntries = deferEntries.map(({ entryId, ...config }) => ({
+    options: { id: entryId ?? `mcp-${config.serverName}`, name: '@deepseek-ai/dsh-mcp-client', config },
   }))
   const includeEntry = { options: { id: 'include', name: 'cordis:include', config: { path: pathToFileURL(patch).href } } }
   // create/remove 必须补：add / removeServer / installBuiltins 靠它们在**运行中的进程**里
@@ -104,7 +108,7 @@ async function mountPlugin(deferEntries, { toolsMode, patchBody = '[]\n', occupi
     },
   })
   await ctx.plugin(McpManagerGateway, {})
-  return { ctx, registered, guards, sections, patchPath: patch, dispose: () => rm(root, { recursive: true, force: true }) }
+  return { ctx, registered, guards, sections, patchPath: patch, entries: loaderEntries, dispose: () => rm(root, { recursive: true, force: true }) }
 }
 
 // ── 一键「全部延迟」的 Host RPC ────────────────────────────────────────────
@@ -169,13 +173,14 @@ test('setDeferAll 一次把本 profile 的所有 MCP 切到延迟，且不丢字
   }
 })
 
-test('setDeferAll 跳过同名冲突的服务器，其余照改', async () => {
-  // loader 里 alpha 有两条（serverName 冲突）。这时 `managedLiveEntry` 定位不到唯一活条目，
-  // 与 update 的拒绝语义一致——一键全部不能猜一个改。beta 没有冲突，必须照改。
+test('setDeferAll 只改本 profile 自己那条，同名的别层条目原样保留', async () => {
+  // loader 里 alpha 有两条：mcp-alpha（本 profile 的 patch 行）与 mcp-alpha-external（别层）。
+  // 「有几条同名」是展示事实，「能改哪条」按 id 决定——所以一键全部要改到自己那条，
+  // 别层条目一个字段都不能动。旧语义是"冲突就整台跳过"，那会让用户既改不了也删不掉。
   const mounted = await mountPlugin(
     [
       { serverName: 'alpha', transport: 'stdio', command: 'node' },
-      { serverName: 'alpha', transport: 'stdio', command: 'other' },
+      { serverName: 'alpha', transport: 'stdio', command: 'other', entryId: 'mcp-alpha-external' },
       { serverName: 'beta', transport: 'stdio', command: 'node' },
     ],
     { patchBody: TWO_ENTRY_PATCH },
@@ -183,13 +188,17 @@ test('setDeferAll 跳过同名冲突的服务器，其余照改', async () => {
   try {
     const manager = mounted.ctx.get('mcpManager')
     const result = await manager.setDeferAll({ defer: true })
-    assert.equal(result.changed, 1, '冲突的 alpha 被跳过，只剩 beta 可改')
+    assert.equal(result.changed, 2, 'alpha 与 beta 都是本 profile 的条目，都要改')
 
     const written = await readFile(mounted.patchPath, 'utf8')
-    assert.equal((written.match(/defer: true/g) || []).length, 1)
-    assert.match(written, /id: mcp-beta/)
-    assert.doesNotMatch(written, /id: mcp-alpha\n\s+name: '@deepseek-ai\/dsh-mcp-client'\n\s+config:\n\s+transport: stdio\n\s+serverName: alpha\n\s+command: node\n\s+defer: true/, '冲突条目的 config 不得被改写')
+    assert.equal((written.match(/defer: true/g) || []).length, 2)
+    assert.match(written, /id: mcp-alpha[\s\S]*?defer: true/)
+    assert.match(written, /id: mcp-beta[\s\S]*?defer: true/)
     assert.match(written, /command: node/, 'beta 的配置要留在原处')
+    // 别层那条：同一个 serverName，但不是我们的条目。
+    const other = mounted.entries.find((entry) => entry.options.id === 'mcp-alpha-external')
+    assert.notEqual(other, undefined, '夹具里必须真的有那条外部条目')
+    assert.equal(other.options.config.defer, undefined, '别层条目不得被改写')
   } finally {
     await mounted.dispose()
   }

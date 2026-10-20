@@ -101,14 +101,22 @@ jobs:
       # （旧包 dsh-mcp-manager-ui 已冻结在 1.5.5，现在是 dsh-toolbox-ui），写死会让其中一条
       # 的 Release 标题挂上另一条的包名（v1.6.0 的稿子当初就是这么错的）。
       #
-      # ⚠️⚠️ **必须带 `--prerelease`**：两条线共用一个 `releases/latest`，而老线（≤1.5.3）面板的
-      # 「升级」按钮读的就是它、下发的却是**旧包名**的新版本。本线的 Release 一旦成为
-      # "latest release"，老用户点「升级」就会去装「旧包名@^<本线版本>」——那个版本永远不存在，
-      # 必然报错（真机验证过）。标成 pre-release 后 GitHub 的 "latest release" 会跳过它，老线的
-      # 面板因此看到**旧线自己的最新版**（如 v1.5.5），点一下升到中转版、再点「迁移」过来。
+      # 为什么**不再带** `--prerelease`（v1.8.2 起）：两条线共用一个 `releases/latest`，而老线面板
+      # 的「升级」按钮读的就是它、下发的却是旧包名的新版本——所以 1.6.0–1.8.1 一律标 pre-release，
+      # 让 latest 停在旧线的 v1.5.5 上（那是旧线唯一的升级/迁移入口）。
       #
-      # 本线自己的更新提示因此**必须**问自己包在 npm 上的 latest（lib/index.js 的 updateLatestUrl）：
-      # 它曾经问的是这个 feed，于是被 pre-release 规则永远挡在旧线版本上——提示恒为「已是最新」，
+      # 现在翻过来的依据（2026-10-20 复核）：
+      #   - 旧线对我们已经是硬不兼容：DSH `0.2.1-rc.1/rc.2`（10-17 发布）要求 peer 落在
+      #     `>=0.2.0-rc.1 <0.3.0`，而老包钉的是 `>=0.1.5-rc.1 <0.2.0`。用户升级宿主后旧包直接
+      #     加载不了，只能按 CLI 迁移——latest 留给他们已经没有下文。
+      #   - 老包的 npm 下载已回落成发版尾流：10-12..10-18 合计 108 次，其中 62 次在 1.5.5 发版
+      #     次日，其余几天 0–19；同期本包 958 次。
+      #   - 残留风险只剩一条：仍停在 DSH 0.1.x、且旧包 <1.5.5 的用户点「升级」会看到 pnpm 的
+      #     `ERR_PNPM_NO_MATCHING_VERSION`（不会卸载任何东西）。补偿是两处常驻说明——1.5.5 的
+      #     迁移横幅不依赖更新查询，v1.5.5 的 Release 里也写着两条 CLI 迁移命令。
+      #
+      # 本线自己的更新提示**必须**问自己包在 npm 上的 latest（lib/index.js 的 updateLatestUrl），
+      # 不读这个 feed：它曾经读 feed，被 pre-release 规则永远挡在旧线版本上——提示恒为「已是最新」，
       # v1.6.2 发出去 1.6.1 的用户什么也看不到（有专门用例钉住数据源）。别把这条改回去。
       - name: Create GitHub Release
         if: ${{ !inputs.dry_run }}
@@ -120,9 +128,9 @@ jobs:
           if [ -f "$notes" ]; then
             gh release create "$GITHUB_REF_NAME" \
               --title "${name} ${GITHUB_REF_NAME}" \
-              --notes-file "$notes" --verify-tag --prerelease
+              --notes-file "$notes" --verify-tag
           else
             gh release create "$GITHUB_REF_NAME" \
               --title "${name} ${GITHUB_REF_NAME}" \
-              --generate-notes --verify-tag --prerelease
+              --generate-notes --verify-tag
           fi

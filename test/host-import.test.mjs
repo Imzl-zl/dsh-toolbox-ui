@@ -440,7 +440,10 @@ test('replace import removes absent MCPs and applies directTools enablement mapp
   }
 })
 
-test('duplicate cross-layer server names are exposed once as a read-only conflict', async () => {
+test('duplicate cross-layer server names collapse into one row, and the profile-owned entry stays editable', async () => {
+  // 语义：**同名条目有几条**是展示事实（conflict/duplicates），**能不能改**只看 id 是否属于
+  // 本 profile（managed）。旧行为把两者合成一个开关（有冲突 ⇒ managed=null ⇒ 全灰），
+  // 真机上表现为「一行、两条条目、无法编辑和卸载」——正是这次要修的死胡同。
   const { McpManagerGateway } = await import('../lib/index.js')
   const patch = `- insert:\n    - id: mcp-shared-profile\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: shared\n        transport: stdio\n        command: node\n`
   const external = { options: { id: 'mcp-shared-external', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'shared', transport: 'stdio', command: 'external' } }, disabled: false, fiber: null }
@@ -450,19 +453,20 @@ test('duplicate cross-layer server names are exposed once as a read-only conflic
 
   try {
     const result = await McpManagerGateway.prototype.list.call({ ctx: fixture.ctx })
+    // 一行：按 serverName 归组，用户眼里就是一台服务器。
     assert.equal(result.servers.length, 1)
     assert.equal(result.servers[0].serverName, 'shared')
-    assert.equal(result.servers[0].managed, false)
     assert.equal(result.servers[0].conflict, true)
+    assert.equal(result.servers[0].managed, true, '本 profile 拥有其中一条，就必须能改它')
+    // 另一条不是「不存在」，而是「不是你的」：id 必须能说出来，否则用户没有任何线索。
+    assert.deepEqual(result.servers[0].duplicates.map((other) => other.id), ['mcp-shared-external'])
+
     const gateway = { ctx: fixture.ctx }
-    await assert.rejects(
-      McpManagerGateway.prototype.update.call(gateway, { name: 'shared', transport: 'stdio', command: 'node' }),
-      /同名冲突|不能编辑/,
-    )
-    await assert.rejects(
-      McpManagerGateway.prototype.removeServer.call(gateway, 'shared'),
-      /同名冲突|不能移除/,
-    )
+    await McpManagerGateway.prototype.update.call(gateway, { name: 'shared', transport: 'stdio', command: 'node-edited' })
+    assert.equal(profile.options.config.command, 'node-edited', '编辑必须落到自己那条上')
+    assert.equal(external.options.config.command, 'external', '别的配置层的条目一个字节都不能动')
+
+    // 导入仍然跳过同名：再写一行下去就是**第三条**同作用域条目，那才是真的制造冲突。
     const preview = await McpManagerGateway.prototype.previewImport.call(gateway, {
       mode: 'merge',
       json: { mcpServers: { shared: { command: 'updated' } } },
@@ -480,6 +484,16 @@ test('duplicate cross-layer server names are exposed once as a read-only conflic
     const written = await readFile(fixture.patchPath, 'utf8')
     assert.match(written, /serverName: shared/)
     assert.equal(written.includes('updated'), false, '被其他层占用的条目不得被覆盖')
+
+    // 移除只删自己那条：别层的条目必须原样留着（它不在我们的 patch 里，也不归我们管），
+    // 而且必须把「还剩下谁」说出来——否则删完仍看到失败日志，用户会以为移除没生效。
+    const removed = await McpManagerGateway.prototype.removeServer.call(gateway, 'shared')
+    assert.match(removed.note, /另有 1 条同名条目/)
+    assert.match(removed.note, /mcp-shared-external/)
+    const after = fixture.entries.filter((entry) => entry.options.name === '@deepseek-ai/dsh-mcp-client')
+    assert.deepEqual(after.map((entry) => entry.options.id), ['mcp-shared-external'], '只有自己那条被移除')
+    const rewritten = await readFile(fixture.patchPath, 'utf8')
+    assert.equal(rewritten.includes('shared'), false, '移除后 patch 里不再有这一行')
   } finally {
     await fixture.cleanup()
   }

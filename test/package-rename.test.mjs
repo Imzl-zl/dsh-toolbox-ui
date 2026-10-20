@@ -131,6 +131,10 @@ test('the old package name survives only where it is still factually correct', (
     { pattern: /^(?:'|\s)*'?(?:link:|file:)[^']*dsh-mcp-manager-ui/, why: '「已装旧包」的 source 夹具' },
     // localStorage 键的两种分隔符写法已在上面覆盖；这里补「文档里举例说明键名」的行。
     { pattern: /dsh-mcp-manager-ui[./](?:entry|fab-pos|updateHint|whatsNew)/, why: '文档里举例说明 localStorage 键名' },
+    // 迁移命令里要**卸掉**的正是旧包：这条命令写新名就等于没卸，旧插件会和本包同时在场。
+    { pattern: /dsh plugin[^\n]*remove dsh-mcp-manager-ui/, why: '迁移命令里要被卸掉的旧包名（写新名就是错的）' },
+    // 迁移说明里必须指出「你现在装的是旧包」才有意义（否则读者不知道自己该不该走这条路）。
+    { pattern: /仍装着旧包|Still on the legacy package/, why: '迁移说明里指认读者当前装的是旧包' },
     // npm Trusted Publisher 的 repository 字段 = GitHub 仓库名（仍叫旧名）。
     // npm Trusted Publisher 的 repository 字段、以及 workflow 注释里的同一件事：
     // 值是 **GitHub 仓库名**（仓库仍叫旧名），分隔符按写法可能是 `=` 也可能被反引号包着。
