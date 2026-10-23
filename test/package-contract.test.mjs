@@ -46,7 +46,7 @@ const CORDIS_LOADER_PEER = '^1.0.3'
 
 test('package exposes one Web bundle entry', () => {
   assert.equal(packageJson.dsh?.bundle?.patch, './cordis.patch.yml')
-  assert.equal(packageJson.version, '1.8.2')
+  assert.equal(packageJson.version, '1.8.3')
   assert.equal(packageJson.dsh?.client?.platform, 'web')
   // dsh.client.inject 是客户端图里的「工厂先到」依赖边，只能写真实的 client 包名：
   //   @deepseek-ai/dsh-client-runtime  —— 上游 2026-08-22 已删除（be531688 "remove Runtime"）
@@ -88,12 +88,18 @@ test('package declares the DSH compatibility window and pins development to a ve
 
 test('every host contract this plugin actually depends on is declared as a peer', () => {
   // 不声明就等于隐式依赖：下面每一项都有硬依赖的契约，它们一变本插件就会静默失效。
-  //   dsh-tools      → tools.schemas(scope)/get(name, scope) 的作用域视图，整个投射模型的地基
+  //   dsh-tools      → 插件只用公开读面 `get(name, scope)` / `schemas(scope)`（`register`/`restrict` 同理）。
+  //                    `view()` 与 `schemaOf()` 是宿主 private 方法（core/tools/src/index.ts:1186/1290），
+  //                    插件不碰；因此「读一条连接的全部定义」只能 1 次 schemas + 逐名 get，靠代次哨兵
+  //                    把稳态压到一次 get —— 见 issue #8。
+  //   dsh-scope      → createScope/quiesceFiber（共享连接的隔离作用域与可 await 的 teardown）。
+  //                    scope 链是单父：桌面版 agent 的父级槽位由 preset 占用（session-controller 的
+  //                    setup 会 presets.mount），所以「绑定继承」这条路不可行，项目工具只能投射进
+  //                    agent 自己的层
   //   dsh-agent      → `agent/created` 是**被 await 的串行事件**（announce() 里 await ctx.serial），
   //                    载荷带 agent.ctx/session；监听器抛错会否决会话创建
   //   dsh-agent-loop → 创建事务在 publish 之前 await 调用方的 setup，并用 raceAbort 抛弃它；
   //                    会话作用域可能在本插件建连期间就被销毁（引用归还依赖这一条）
-  //   dsh-scope      → createScope/quiesceFiber（共享连接的隔离作用域与可 await 的 teardown）
   //   dsh-mcp-client → serverName 注册表、工具名前缀、日志 label
   // 注意 dsh-agent-loop 现在**不是**挂载点（挂载走 agent/created 事件），但会话生命周期仍按它的
   // 语义写：作用域销毁早于建连完成这件事只有它保证，所以它仍是必须声明的契约。
