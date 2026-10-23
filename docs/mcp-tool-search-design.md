@@ -207,11 +207,11 @@ DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四�
 | `tools.restrict({ deny })` | per-agent 作用域遮罩，返回 disposer；**只管全局工具**：未知名与 scope-local 名都会抛错；scoped 注册不受影响、restrictions 相交。**本实现不用它**（决策 8①：遮不到项目族） | `dsh-tools/lib/index.js:2888-2910` |
 | `tools.register(definition)` | 全局层注册，返回 disposer；定义**必填 `output { schema, render }`**（`render` 须为函数，缺了直接 TypeError）；`defineTool({ name, description, parameters, execute, output, timeoutMs? })`，完整签名实现时按 schema.d.ts 钉死 | `dsh-tools/lib/index.js:2878-2887`、`schema.d.ts:248` |
 | `tools.schemas(scope)` | 模型可见 schema；被 restrict 的工具"reads as absent"——**会话视图只含可见工具，被 restrict 遮掉的工具不在内**。本实现不 restrict，所以 `schemas(agent)` 就是全量索引源（见决策 8④）；§4 架构图里"会话视图不能当索引源"那句是 restrict 时代的残留，已作废 | `dsh-tools/lib/index.js:3023`、`view()` 2959-2985 |
-| `readScopedToolSchemas(ctx, entry)`（插件自有） | 项目族工具的唯一枚举通路（工具在共享作用域层，全局视图看不到），含失败语义（抛错记账、空集≠无工具） | `lib/workspace-runtime.js:710-744` |
+| `readConnectionTools(ctx, entry)`（插件自有） | 项目族工具的唯一枚举通路（工具在共享作用域层，全局视图看不到）：只用宿主公开读面 —— `schemas(scopeKey)` 一次拿名字（全量深拷贝，只在**换代**时付）、`get(name, scopeKey)` 逐个拿定义；稳态靠**代次哨兵**（缓存一个定义对象的身份，mcp-client 每次 tools/list 同步都整批重建定义，哨兵换人即换代）短路成一次 `get()`。`view()`/`schemaOf()` 是宿主 private 方法（TS `private`，运行期可达但非契约），不碰。同时按**定义身份**对账，重连/就地重载后把旧定义换掉（只按名字会把死工具留在会话里）。返回值只有 `{definitions, error, failed}`；`readScopedToolSchemas()` 只给面板（5s 轮询）用 | `lib/workspace-runtime.js:763-845` |
 | 每步重建工具清单 | assembly 每步重算（agent-loop preStep）→ 新遮罩对运行中会话**下一轮请求即生效** | `dsh-agent-loop/lib/index.js:907` |
-| `agent/created` / `tools/change` / `agent/disposed` | **本功能一个都不订阅**（见 §4）。列在这里只为说明"为什么不需要"：视图按 revision 自愈，预热与脏标记都是冗余门，标志是要人记得置的 | `lib/workspace-runtime.js:1258-1271` |
+| `agent/created` / `tools/change` / `agent/disposed` | **本功能一个都不订阅**（见 §4）。列在这里只为说明"为什么不需要"：视图按 revision 自愈，预热与脏标记都是冗余门，标志是要人记得置的 | `lib/workspace-runtime.js:1408`（MCP 运行时自己的订阅） |
 | agent-loop 自动记账 | 工具集相对基线变化时自动追加 `developer/message`（tool-addition/removal）——掀罩后的历史位置一致性由宿主保证，插件无需自理 | `dsh-agent-loop/lib/index.js:1233` 附近、`dsh-llm` `projectToolUpdates` |
-| `ctx.effect(() => () => cleanup, label)` | 生命周期归属 | `lib/workspace-runtime.js:1239` |
+| `ctx.effect(() => () => cleanup, label)` | 生命周期归属 | `lib/workspace-runtime.js:1390` |
 | `exec.agent` | 调用所属 agent，`agent.ctx` 即作用域上下文 | `dsh-tools/lib/types/index.d.ts:228-229` |
 
 实现时待钉（不影响设计）：`defineTool` 的完整选项签名（已知 `output { schema, render }` 必填，其余字段实现时按 `schema.d.ts` 钉死）；`exec.agent` 为 undefined 的 agent-less 执行路径可达性（可达则显式失败并说明，不静默降级）。搜索索引按会话构建（`schemas(agent)`，含本会话投射的项目工具），不用全局视图。
@@ -625,6 +625,3 @@ not only on disk`（夹具 = 临时技能根 × 真 `SkillRegistry` × 真 `dsh-
 **验证**：真 loader 用例「单台延迟开关只改那一台，并同步内存活条目」（盘上用生产解析器
 读回、内存活条目同步、名字不存在时报错）；客户端侧用例覆盖芯片两态、只读态、`aria-pressed`、
 点它不顺带选中行、两个作用域的列表都接上线；i18n 双语同步。
-
-
-

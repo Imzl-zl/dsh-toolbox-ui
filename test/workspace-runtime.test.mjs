@@ -72,7 +72,7 @@ function makeInactiveEffect() {
 // deferTools 默认 true = 生产时序：真实 mcp-client 的 apply 在 cordis 的微任务里才跑，工具要等
 // connect + tools/list 才注册，所以 setup 当场看到的一定是空集，投射完全依赖后续 tools/change。
 // 需要「工具已就绪」的用例显式调用 await fixture.connectAll()。
-async function createRuntimeFixture({ deferTools = true, extraServers = {}, idleTimeoutMs, readyTimeoutMs, pendingFiber = false, fiberErrors = {} } = {}) {
+async function createRuntimeFixture({ deferTools = true, extraServers = {}, idleTimeoutMs, readyTimeoutMs, pendingFiber = false, fiberErrors = {}, exclude = ['github'] } = {}) {
   const wsRoot = await mkdtemp(join(tmpdir(), 'dsh-mcp-rt-'))
   await mkdir(join(wsRoot, '.dsh'), { recursive: true })
   await writeFile(join(wsRoot, '.dsh', 'mcp.json'), JSON.stringify({
@@ -85,7 +85,7 @@ async function createRuntimeFixture({ deferTools = true, extraServers = {}, idle
       },
       ...extraServers,
     },
-    exclude: ['github'],
+    exclude,
   }, null, 2))
   const restrictCalls = []
   const mounts = []
@@ -202,6 +202,22 @@ async function createRuntimeFixture({ deferTools = true, extraServers = {}, idle
   }
   // 全局工具的真相源：作用域故障判定要能造出「工具出现在全局视图」这一事实，所以它是可写的。
   const globalSchemas = [{ name: 'mcp__github__a' }, { name: 'mcp__exa__b' }]
+  // 读面调用账本：宿主里 `get(name, scope)` 就是 `view(scope).visible.get(name)`，所以逐工具
+  // get() 等于把整张表重建 N 次。替身必须把这几种重建暴露出来，否则这类 N+1 在测试里不可见。
+  const toolReads = { views: [], schemas: 0, gets: 0 }
+  let failToolReads = false
+  // 真宿主的 register() 会同步派发 tools/change；替身默认关掉（否则每个用例都要处理重入），
+  // 需要验证这条时序的用例显式打开。
+  const registerCalls = []
+  let emitsOnRegister = false
+  // 合并视图对同一个工具必须返回**同一个对象**（真实宿主如此），否则「身份相同 ⇒ 不是我注册的」
+  // 这条归属判定在替身里永远不成立，测试会假绿。
+  const globalDefs = new Map()
+  const globalDefOf = (schema) => {
+    let definition = globalDefs.get(schema.name)
+    if (!definition) { definition = { name: schema.name }; globalDefs.set(schema.name, definition) }
+    return definition
+  }
   const ctx = {
     loader: {
       entries: () => [
@@ -215,12 +231,32 @@ async function createRuntimeFixture({ deferTools = true, extraServers = {}, idle
       },
     },
     // 全局工具（用于 exclude/restrict 展开）在无 scope 时返回；带 scopeKey 时返回该共享连接注册的工具。
+    // 形状照抄 dsh-tools：view() 是唯一的重建入口，get()/schemas() 都是它上面的投影。
     tools: {
-      schemas: (scope) => {
-        if (scope !== undefined && scopedTools.has(scope)) return [...scopedTools.get(scope).values()].map((d) => ({ name: d.name }))
-        return globalSchemas
+      view(scope) {
+        toolReads.views.push(scope)
+        if (failToolReads) throw new Error('host tool view unavailable')
+        const visible = new Map(globalSchemas.map((schema) => [schema.name, globalDefOf(schema)]))
+        if (scope !== undefined) {
+          for (const [name, definition] of scopedTools.get(scope) ?? []) visible.set(name, definition)
+        }
+        return { visible, knownNames: new Set(visible.keys()), restrictableNames: new Set(visible.keys()) }
       },
-      get: (name, scope) => (scope !== undefined ? scopedTools.get(scope)?.get(name) : undefined),
+      schemas(scope) {
+        toolReads.schemas += 1
+        if (failToolReads) throw new Error('host tool view unavailable')
+        return [...this.view(scope).visible.values()].map((definition) => this.schemaOf(definition, true))
+      },
+      schemaOf(definition, detachParameters) {
+        // detach=true 在宿主里是深拷贝（snapshotJsonValue）；替身照做，免得投影形状与宿主分岔。
+        const parameters = detachParameters ? structuredClone(definition.parameters) : definition.parameters
+        return { name: definition.name, description: definition.description, parameters }
+      },
+      get(name, scope) {
+        toolReads.gets += 1
+        if (failToolReads) throw new Error('host tool view unavailable')
+        return this.view(scope).visible.get(name)
+      },
     },
     get(name) {
       if (name === 'agents') return agentsService;
@@ -243,6 +279,16 @@ async function createRuntimeFixture({ deferTools = true, extraServers = {}, idle
   const fixture = {
     wsRoot, agentCtx, agentsService, ctx, restrictCalls, mounts, effects, handlers, warns, errors, scopedTools, agentOwnTools, createdScopes,
     globalSchemas,
+    toolReads,
+    registerCalls,
+    emitsOnRegister() { return emitsOnRegister },
+    setEmitsOnRegister(on) { emitsOnRegister = on === true },
+    resetRegisterCalls() { registerCalls.length = 0 },
+    setGlobalTools(names) { globalSchemas.splice(0, globalSchemas.length, ...names.map((name) => ({ name }))) },
+    failToolReads(on) { failToolReads = on === true },
+    resetToolReads() { toolReads.views.length = 0; toolReads.schemas = 0; toolReads.gets = 0 },
+    scopedViewReads() { return toolReads.views.filter((scope) => scope !== undefined) },
+    globalViewReads() { return toolReads.views.filter((scope) => scope === undefined) },
     sessionDisposers,
     get connectionCount() { return connectionCount },
     sharedClientCalls,
@@ -260,6 +306,21 @@ async function createRuntimeFixture({ deferTools = true, extraServers = {}, idle
       await handlers['tools/change']?.()
     },
     ownToolNames(session) { return [...(agentOwnTools.get(session.sessionAgent) ?? new Map()).keys()].sort() },
+    ownDefinitions(session) { return new Map(agentOwnTools.get(session.sessionAgent) ?? new Map()) },
+    // mcp-client 的每一次 tools/list 同步都重建定义对象（同一批名字、新对象）：重连、list_changed 都是这个形状。
+    republish(serverName) {
+      for (const [scopeKey, name] of publishTargets) {
+        if (name === serverName && scopedTools.has(scopeKey)) publish(scopeKey, serverName)
+      }
+    },
+    currentDefinition(serverName, rawName) {
+      for (const [scopeKey, name] of publishTargets) {
+        if (name !== serverName) continue
+        const found = scopedTools.get(scopeKey)?.get(`mcp__${serverName}__${rawName}`)
+        if (found !== undefined) return found
+      }
+      return undefined
+    },
     // 模拟 mcp-client 写一条日志（正文带 mcp-client(<serverName>)，与官方 label 一致；真实
     // cordis 的 message.name 是 hyphenate(fiber.name) = 'mcp-client'，不含括号）。
     emitMcpLog(type, text) {
@@ -294,7 +355,18 @@ function makeSession(fixture, id, effectSink = null) {
     plugin: () => { throw new Error('会话不应直接挂 mcp-client') },
     tools: {
       restrict: () => () => {},
-      register(def) { const table = fixture.agentOwnTools.get(sessionAgent) ?? new Map(); table.set(def.name, def); fixture.agentOwnTools.set(sessionAgent, table); return () => table.delete(def.name) },
+      // 与真宿主一致：同一层里同名工具重复注册**直接抛错**（dsh-tools 的 NamedEntries 语义），
+      // 并且 register() 会同步派发 tools/change（ScopedLayers.onChange）—— 这两条都是真宿主上
+      // 会咬人的时序，替身不建模就只能靠隔离进程才发现。
+      register(def) {
+        fixture.registerCalls.push(def.name)
+        const table = fixture.agentOwnTools.get(sessionAgent) ?? new Map()
+        if (table.has(def.name)) throw new Error(`tool "${def.name}" is already registered in this scope`)
+        table.set(def.name, def)
+        fixture.agentOwnTools.set(sessionAgent, table)
+        if (fixture.emitsOnRegister()) fixture.handlers['tools/change']?.()
+        return () => table.delete(def.name)
+      },
     },
     // cordis 的 effect() 开头就 assertActive()：作用域销毁后再登记生命周期会直接抛。
     // 这正是本模块赖以判定「会话已在建连期间结束」的官方面，必须在替身里如实建模。
@@ -376,7 +448,7 @@ test('tools/change reconciles workspace restrict when global tools change', asyn
     const before = fixture.restrictCalls.length
 
     // 全局工具集变化（新增 github 工具），reconcile 重新应用 restrict（key 变化）。
-    fixture.ctx.tools.schemas = () => [{ name: 'mcp__github__a' }, { name: 'mcp__github__b' }, { name: 'mcp__exa__c' }]
+    fixture.setGlobalTools(['mcp__github__a', 'mcp__github__b', 'mcp__exa__c'])
     await fixture.handlers['tools/change']()
     assert.ok(fixture.restrictCalls.length > before)
     assert.deepEqual(fixture.restrictCalls.at(-1).deny, ['mcp__github__a', 'mcp__github__b'])
@@ -403,7 +475,7 @@ test('exclude owner disambiguation never denies ambiguous names (double undersco
       ],
       import: async () => ({ apply: () => {}, inject: [], name: 'mcp-client', Config: undefined }),
     }
-    fixture.ctx.tools.schemas = () => [{ name: 'mcp__my__server__x' }]
+    fixture.setGlobalTools(['mcp__my__server__x'])
     await writeFile(join(fixture.wsRoot, '.dsh', 'mcp.json'), JSON.stringify({
       mcpServers: { db: { command: 'psql' } },
       exclude: ['my__server'],
@@ -833,6 +905,116 @@ test('shared project connection: two sessions of one project reuse ONE mcp-clien
     await fixture.connectAll()
     assert.deepEqual(fixture.ownToolNames(A), ['mcp__db__x', 'mcp__db__y'])
     assert.deepEqual(fixture.ownToolNames(B), ['mcp__db__x', 'mcp__db__y'])
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+// ── issue #8：一次无关事件的代价必须与「已加载的工具数」无关 ──
+// 宿主公开读面只有 `get(name, scope)`（每次重建整张表）与 `schemas(scope)`（全量深拷贝 parameters）。
+// 所以重算不能「每次全量读」，而是用**一个哨兵定义的对象身份**判断连接的代次：mcp-client 每次
+// tools/list 变化都整批重建定义，哨兵没换 ⇒ 这条连接的工具集没变 ⇒ 一次 get() 就够。
+test('tools/change 稳态重算只付一次哨兵 get()，不读 schemas', async () => {
+  const { installAgentRuntime: install } = await import('../lib/workspace-runtime.js')
+  const fixture = await createRuntimeFixture({ exclude: [] })
+  try {
+    install(fixture.ctx)
+    const A = makeSession(fixture, 'A')
+    await (await fixture.agentsService.create({ setup: undefined })).setup(A, A.sessionAgent)
+    await fixture.connectAll()
+    assert.deepEqual(fixture.ownToolNames(A), ['mcp__db__x', 'mcp__db__y'], '前置：投射已就位')
+
+    fixture.resetToolReads()
+    await fixture.handlers['tools/change']()
+    assert.deepEqual(fixture.ownToolNames(A), ['mcp__db__x', 'mcp__db__y'], '重算必须仍然幂等')
+    assert.equal(fixture.toolReads.schemas, 0, '稳态不得读 schemas：那是对全部 parameters 的深拷贝')
+    assert.equal(fixture.toolReads.gets, 1, '稳态只付一次哨兵 get()，与工具数量无关')
+    assert.equal(fixture.toolReads.views.length, 1, '一次哨兵 get 就是一次读取')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+// ── 重连 / tools/list 刷新后必须换上新定义 ──
+// mcp-client 每一代都重建定义对象（connection.ts：先 dispose 旧代再 register 新代），旧定义指向已经
+// 关掉的 client。只按名字对账会把「名字没变但定义换人」当成无事发生，把死工具留在会话里。
+test('连接重建定义后，会话里的投射必须刷新成新定义', async () => {
+  const { installAgentRuntime: install } = await import('../lib/workspace-runtime.js')
+  const fixture = await createRuntimeFixture({ exclude: [] })
+  try {
+    install(fixture.ctx)
+    const A = makeSession(fixture, 'A')
+    await (await fixture.agentsService.create({ setup: undefined })).setup(A, A.sessionAgent)
+    await fixture.connectAll()
+    const before = fixture.ownDefinitions(A)
+    assert.equal(before.get('mcp__db__x'), fixture.currentDefinition('db', 'x'), '前置：投射的是连接当前那一版定义')
+
+    // 同一批名字、全新的定义对象 —— mcp-client 每次同步都是这个形状。
+    fixture.republish('db')
+    await fixture.handlers['tools/change']()
+
+    const after = fixture.ownDefinitions(A)
+    assert.deepEqual([...after.keys()].sort(), ['mcp__db__x', 'mcp__db__y'], '名字集合不变')
+    assert.notEqual(after.get('mcp__db__x'), before.get('mcp__db__x'), '必须换成新定义对象')
+    assert.equal(after.get('mcp__db__x'), fixture.currentDefinition('db', 'x'), '投射必须与连接当前那一版同源')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+// ── 读不到 ≠ 没有工具：宿主视图读取失败时不得卸载已投射的工具 ──
+// `readScopedToolSchemas()` 读取失败时返回空集。若把它当成「这个 server 现在一个工具都没有」，
+// 下一轮 tools/change 就会把会话已注册的项目工具全部 dispose()，等再下一次变化又装回来 ——
+// 用户看到的是工具时灵时不灵。读取失败应当保持现状（不增不删），只如实记账。
+test('作用域视图读失败时不得卸载已投射的项目工具', async () => {
+  const { installAgentRuntime: install, workspaceScopeErrorsView } = await import('../lib/workspace-runtime.js')
+  const fixture = await createRuntimeFixture()
+  try {
+    install(fixture.ctx)
+    const A = makeSession(fixture, 'A')
+    await (await fixture.agentsService.create({ setup: undefined })).setup(A, A.sessionAgent)
+    await fixture.connectAll()
+    assert.deepEqual(fixture.ownToolNames(A), ['mcp__db__x', 'mcp__db__y'], '前置：投射已就位')
+
+    fixture.failToolReads(true)
+    await fixture.handlers['tools/change']()
+    assert.deepEqual(fixture.ownToolNames(A), ['mcp__db__x', 'mcp__db__y'], '读失败不得被当成“工具消失”')
+    assert.match(workspaceScopeErrorsView(fixture.wsRoot)[0]?.error ?? '', /读取作用域工具视图失败/)
+
+    // 恢复后照旧：既不缺工具，也不会重复注册。
+    fixture.failToolReads(false)
+    await fixture.handlers['tools/change']()
+    assert.deepEqual(fixture.ownToolNames(A), ['mcp__db__x', 'mcp__db__y'])
+    assert.deepEqual(workspaceScopeErrorsView(fixture.wsRoot), [], '读成功必须清掉这条诊断')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+// ── 真宿主的 emit 时序：register() 会同步派发 tools/change，不能因此把同名工具注册两次 ──
+// 每个 register() 都会同步再排一轮重算（事件被合并成一轮，但排程就发生在这个同步块里）；如果本次
+// 注册还没落进 projected，重入的一轮就会对同一个名字再注册一次。真宿主上这表现为
+// 「tool ... is already registered」告警 + 一条假失败记录，每个会话挂载时报一次。
+test('注册工具时同步派发的 tools/change 不会让同一工具注册两次', async () => {
+  const { installAgentRuntime: install, workspaceMountErrorsView } = await import('../lib/workspace-runtime.js')
+  const fixture = await createRuntimeFixture()
+  try {
+    install(fixture.ctx)
+    fixture.setEmitsOnRegister(true)
+    // A：先让共享连接就绪并完成投射。
+    const A = makeSession(fixture, 'A')
+    await (await fixture.agentsService.create({ setup: undefined })).setup(A, A.sessionAgent)
+    await fixture.connectAll()
+    assert.deepEqual(fixture.ownToolNames(A), ['mcp__db__x', 'mcp__db__y'])
+
+    // B：工具已在连接里，挂载路径当场注册 —— 每个 register() 同步再进一次重算。
+    fixture.resetRegisterCalls()
+    const B = makeSession(fixture, 'B')
+    await (await fixture.agentsService.create({ setup: undefined })).setup(B, B.sessionAgent)
+    assert.deepEqual(fixture.ownToolNames(B), ['mcp__db__x', 'mcp__db__y'])
+    const registered = fixture.registerCalls.filter((name) => name.startsWith('mcp__db__')).sort()
+    assert.deepEqual(registered, ['mcp__db__x', 'mcp__db__y'], `每个工具只应注册一次，实际：${JSON.stringify(registered)}`)
+    assert.deepEqual(workspaceMountErrorsView(fixture.wsRoot), [], '重入不得被记成一次注册失败')
   } finally {
     await fixture.cleanup()
   }
@@ -1655,3 +1837,4 @@ test('a workspace registry failure is reported once instead of silently showing 
     await fixture.cleanup()
   }
 })
+
