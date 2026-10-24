@@ -7,7 +7,7 @@
 
 ## 环境要求
 
-- DeepSeek Harness `0.2.0-rc.1` 及以上（`0.2.0-rc.2` 与 `0.2.1-rc.2` 都跑过全量；0.2.1 宿主自带的 cordis 4.0.5 / loader 1.0.6 也在覆盖内）
+- DeepSeek Harness `0.2.0-rc.1` 及以上（`0.2.0-rc.2`、`0.2.1-rc.2` 与 `0.2.1-rc.3` 都跑过全量；0.2.1 宿主自带的 cordis 4.0.5 / loader 1.0.6 也在覆盖内）
 - 已初始化的 `web` profile
 - Node.js 和 pnpm 可由 DSH 的插件命令正常调用
 

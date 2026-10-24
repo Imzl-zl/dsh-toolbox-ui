@@ -187,7 +187,7 @@ DSH 宿主 API 通过 `peerDependencies` 以 `>=0.2.0-rc.1 <0.3.0` 声明（只�
 
    **L2 是宿主回归，不是我们的写法问题**：同一条路径在 0.2.0 上是干净的（`_disposing` 守卫挡住了）。上游若修回来，`disabled` 这一行仍然无害——它是一个即将被删除的条目，标记 disabled 不改变任何可见语义。真机端到端（0.2.1 `dsh web` 里逐条点穿）**仍未做**，见 `.tasks/mcp-tool-search/OPEN-ITEMS.md` 的"仍未做的"。
 
-   验证方式就是本仓库自己的漂移方法：隔离副本 + `pnpm add` 把 11 个 peer 宿主包整套换到目标版本，**再**按该 dsh 自己声明的 `dependencies.@deepseek-ai/cordis` / `cordis-plugin-loader` 换掉这两代（`upstream-drift.yml` 现在两件事都做）。0.2.1-rc.2 + cordis 4.0.5 + loader 1.0.6 的稳态是 **748/748**（`node --test`，去掉按定义会红的 `package-contract`）；0.2.0-rc.2 基线是 **796/796**。
+   验证方式就是本仓库自己的漂移方法：隔离副本 + `pnpm add` 把 11 个 peer 宿主包整套换到目标版本，**再**按该 dsh 自己声明的 `dependencies.@deepseek-ai/cordis` / `cordis-plugin-loader` 换掉这两代（`upstream-drift.yml` 现在两件事都做）。0.2.1-rc.2 + cordis 4.0.5 + loader 1.0.6 的稳态是 **748/748**（`node --test`，去掉按定义会红的 `package-contract`）；0.2.1-rc.3 + 同一对 cordis/loader 在 2026-10-24 复跑是 **785/785**（仓库 1.8.3，套件已比上面那次长；首次跑的唯一一条红是环境问题——该用例读 `process.env.HOME`，而 PowerShell 只设 `USERPROFILE`，补上 `HOME` 即绿，同一份用例在 0.2.0-rc.2 基线上同样红）；0.2.0-rc.2 基线是 **796/796**。
 
    **为什么 strict codec 两个键都写，以及 0.2 之后还剩不剩意义**（`lib/typert.js` 与 `lib/client.js` 各一份，`client-lifecycle.test.mjs` 钉住两者一致）：宿主在两个渠道上查**不同的键**，且都忽略对方的键——`0.1.5-rc.x`（= 当时的 `latest` / `next`，也就是 `npx` 默认装到的那条）查 `codec.schema.parse` 必须是 zod v4 实例；`0.1.6-alpha.2` 起查 `typeof codec.create === 'function'`。少写 `schema` 会在最新 RC 上加载即拒，少写 `create` 会在 alpha 上加载即拒；`mode: 'src-json'` 不是出路（loader 强制 invocation 的 codec 必须是 strict）。拿三个版本的 loader 直接跑自己的产物：
 
