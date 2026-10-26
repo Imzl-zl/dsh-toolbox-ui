@@ -450,7 +450,7 @@ test('resolveRuntimeConfig: 缺省、maxDiscovered 下限抬到 maxResults、非
 
 // ── 装配集成（高保真夹具：契约如实，ctx 与 agent 分离）──
 
-function createFixture({ schemas = [], events = [], messages = [], config = {}, throwOnSchemas = false, toolsMode, ptcRuntime, projections } = {}) {
+function createFixture({ schemas = [], events = [], messages = [], config = {}, throwOnSchemas = false, toolsMode, ptcRuntime, projections, logger } = {}) {
   const handlers = new Map()
   const guards = []
   const sections = []
@@ -534,7 +534,7 @@ function createFixture({ schemas = [], events = [], messages = [], config = {}, 
         return () => sections.splice(sections.indexOf(section), 1)
       },
     },
-    logger: { warn: () => {}, error: () => {} },
+    logger: logger ?? { warn: () => {}, error: () => {} },
   }
   return {
     ctx, agent, handlers, guards, sections, registered,
@@ -1254,3 +1254,45 @@ test('C2：换参数重装运行时后，已发现集从会话投影恢复（不
   }
 })
 
+
+// ── C 档：目录被预算截断时必须对人可见（模型能看到数量，但运维看不到）──
+
+test('目录被预算截断时记一次日志，同一 revision 不刷屏', async () => {
+  const warns = []
+  const fixture = createFixture({
+    schemas: BIG_SCHEMAS,
+    config: { ...DEFER_CONFIG, maxCatalogChars: 120 },
+    logger: { warn: (message) => warns.push(message), error: () => {} },
+  })
+  // 只看"截断"这一类日志：同一 ctx 上还有 probeHost 的能力探测告警，与本节无关。
+  const truncationWarns = () => warns.filter((message) => String(message).includes('未列出'))
+  try {
+    const assembly = { tools: [], sections: [] }
+    const text = (await assemble(fixture, assembly)).sections
+      .find((section) => section.name === 'tool-search:catalog').text
+    assert.ok(text.includes('not listed'), '前提自检：这一版真的被截断了')
+    assert.equal(truncationWarns().length, 1, '截断必须记账')
+    assert.ok(String(truncationWarns()[0]).includes('maxCatalogChars'), '日志要带上当前预算，用户才知道调哪个')
+
+    // 同一份库存再组装：按 revision 去重，不许每条装配都记一次。
+    await assemble(fixture, assembly)
+    assert.equal(truncationWarns().length, 1, '同一 revision 只记一次')
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+test('目录没被截断时不留截断日志', async () => {
+  const warns = []
+  const fixture = createFixture({
+    schemas: BIG_SCHEMAS,
+    config: DEFER_CONFIG,
+    logger: { warn: (message) => warns.push(message), error: () => {} },
+  })
+  try {
+    await assemble(fixture, { tools: [], sections: [] })
+    assert.deepEqual(warns.filter((message) => String(message).includes('未列出')), [], '预算够用时不该有截断日志')
+  } finally {
+    fixture.cleanup()
+  }
+})
