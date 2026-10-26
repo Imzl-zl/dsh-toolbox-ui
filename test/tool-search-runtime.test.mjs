@@ -1095,13 +1095,32 @@ test('搜索工具：零命中回执是配方而非断言，且语言规则三�
   fixture.cleanup()
 })
 
-test('搜索工具：select 全未命中拿到的是零命中回执，不是成功回执', async () => {
+test('搜索工具：select 全未命中拿到的是**名字**回执——不是成功、也不是换关键词', async () => {
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
   const value = await fixture.registered.get('tool_search').execute({ query: 'select:jshook_tool_1,ghost' }, { agent: fixture.agent })
   // 协议仍然要逐条告诉模型"这个名字不存在"——所以数组非空。
   assert.deepEqual(value.matches.map((match) => match.found), [false, false])
-  // 但不能因此说成"schema 齐了，直接调"：判据必须是**真的找到了**。
-  assert.match(value.instruction, /No tool matched/)
+  // ① 不能说成"schema 齐了，直接调"：一个都没给。
+  assert.doesNotMatch(value.instruction, /These schemas are complete/)
+  // ② 也不能当成关键词落空去叫它换词——那是把"形态错"诊成"词错"，方向相反。
+  assert.doesNotMatch(value.instruction, /English keywords|restate the capability/)
+  // ③ 要给出两条可执行动作：名字逐字匹配；抄来的名字不存在就改按能力搜。
+  assert.match(value.instruction, /character for character/)
+  assert.match(value.instruction, /switch to a capability search/)
+  assert.match(value.instruction, /Do not repeat the same name/)
+  fixture.cleanup()
+})
+
+test('搜索工具：select 部分命中仍拿成功回执——有东西可调，就不能说"没有这个名字"', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const value = await fixture.registered.get('tool_search').execute({ query: 'select:tool_1,ghost' }, { agent: fixture.agent })
+  // 一个裸名命中、一个不存在：协议两条都回报，回执必须按"有命中"处理。
+  // 注意协议形状：**命中那条不带 `found` 字段**（只有缺失的才写 `found:false`），所以这里比名字
+  // 与缺失标记，而不是比 `true`。
+  assert.equal(value.matches.length, 2)
+  assert.equal(value.matches[0].name, 'mcp__jshook__tool_1')
+  assert.deepEqual(value.matches[1], { name: 'ghost', found: false })
+  assert.match(value.instruction, /These schemas are complete/)
   fixture.cleanup()
 })
 
