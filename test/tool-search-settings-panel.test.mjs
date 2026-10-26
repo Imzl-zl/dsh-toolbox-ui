@@ -264,8 +264,10 @@ test('恢复默认：把值填回宿主给的默认值（不猜数字，用宿�
   let tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
   buttonByText(tree, '恢复默认').props.onClick()
   tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
-  // 目录大小没有默认值 ⇒ 恢复默认 = 关掉上限（只留两个数字框），而不是填一个我们编的数。
-  assert.deepEqual(inputs(tree).map((node) => node.props.value), [10, 20])
+  // 目录大小没有默认值 ⇒ 恢复默认 = 关掉上限（输入框置灰留空），而不是填一个我们编的数。
+  const fields = inputs(tree)
+  assert.deepEqual(fields.map((node) => node.props.value), [10, '', 20])
+  assert.equal(fields[1].props.disabled, true, '关掉时置灰，不是卸载')
   assert.equal(collectAll(tree, (node) => node?.type === Toggle)[0].props.on, false, '恢复默认必须把目录上限关掉')
 })
 
@@ -279,7 +281,11 @@ test('目录大小：默认不限制 —— 开关是关的、没有数字框、
   const toggles = collectAll(tree, (node) => node?.type === Toggle)
   assert.equal(toggles.length, 1, '只有目录大小这一项是开关（其余是数字）')
   assert.equal(toggles[0].props.on, false, '默认关 = 不限制')
-  assert.equal(inputs(tree).length, 2, '关着的时候不出现目录上限的数字框')
+  // 关着时输入框**置灰保留**（主流语义：可见、不可改、不生效），不卸载——不然表单会跳一下，
+  // 用户也看不出这一项原本是什么。
+  const fields = inputs(tree)
+  assert.equal(fields.length, 3, '三项都在，只是目录上限那个置灰')
+  assert.equal(fields[1].props.disabled, true, '关着时必须置灰')
   assert.ok(allText(tree).includes('不限制'), '缺省值要写"不限制"，不能把 undefined 摆出来')
 })
 
@@ -337,7 +343,10 @@ test('目录大小：关掉开关 = 不发这个键（不限制），而不是�
   let tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
   collectAll(tree, (node) => node?.type === Toggle)[0].props.onChange(false)
   tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
-  assert.equal(inputs(tree).length, 2, '关掉即刻收起数字框')
+  // 关掉后输入框**置灰保留**（不卸载），值留着但不再发出去。
+  const fields = inputs(tree)
+  assert.equal(fields.length, 3, '输入框不消失，只是置灰')
+  assert.equal(fields[1].props.disabled, true, '关掉必须置灰')
 
   buttonByText(tree, '保存').props.onClick()
   await flush()
