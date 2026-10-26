@@ -12,7 +12,7 @@ const clientSource = await readFile(new URL('../lib/client.js', import.meta.url)
 const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
-  `${exportMarker}\nexports.__settingsPanel = { HintMarker, ToolSearchSettingsModal, TOOL_SEARCH_SETTING_FIELDS };`,
+  `${exportMarker}\nexports.__settingsPanel = { HintMarker, Toggle, ToolSearchSettingsModal, TOOL_SEARCH_SETTING_FIELDS };`,
 )
 assert.notEqual(instrumentedClient, clientSource, 'client test export marker must stay current')
 
@@ -104,7 +104,8 @@ const buttons = (tree) => collectAll(tree, (node) => node?.props?.onClick !== un
 const buttonByText = (tree, label) => buttons(tree).find((node) => node.props.children === label)
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-const DEFAULTS = { maxResults: 10, maxCatalogChars: 12500, maxDiscovered: 20 }
+// 与生产一致：目录大小**没有默认值**（缺省 = 不限制），默认表里只有两个数。
+const DEFAULTS = { maxResults: 10, maxDiscovered: 20 }
 
 /**
  * `call` 的**真实契约**（lib/client.js 里那个包装器）：它**从不抛错**，而是把宿主的应答
@@ -151,7 +152,8 @@ test('打开时读宿主参数：三项都按生效值填好，默认值也摆�
 
 test('保存：按数字发三个值、成功即收起并回报宿主的原话', async () => {
   const { ToolSearchSettingsModal, __render, __drainEffects } = loadInternals()
-  const { calls, call } = fakeCall()
+  // 目录上限是开关项：先给它一个值，三项才都在场（这也是"用户真的开了"的形态）。
+  const { calls, call } = fakeCall({ settings: { maxResults: 25, maxCatalogChars: 120, maxDiscovered: 30 } })
   const saved = []
   const closed = []
   __render(ToolSearchSettingsModal, { open: true, onClose: () => closed.push('close'), call, onSaved: (res) => saved.push(res) })
@@ -253,8 +255,8 @@ test('读取失败（call 返回 ok:false）：显示宿主原话，且不渲染
   assert.deepEqual(inputs(tree), [], '读失败不得渲染出没有默认值的输入框（会直接崩）')
 })
 
-test('恢复默认：把三个值填回宿主给的默认值（不猜数字，用宿主返回的那份）', async () => {
-  const { ToolSearchSettingsModal, __render, __drainEffects } = loadInternals()
+test('恢复默认：把值填回宿主给的默认值（不猜数字，用宿主返回的那份）', async () => {
+  const { ToolSearchSettingsModal, Toggle, __render, __drainEffects } = loadInternals()
   const { call } = fakeCall({ settings: { maxResults: 25, maxCatalogChars: 120, maxDiscovered: 30 } })
   __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
   __drainEffects()
@@ -262,5 +264,59 @@ test('恢复默认：把三个值填回宿主给的默认值（不猜数字，�
   let tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
   buttonByText(tree, '恢复默认').props.onClick()
   tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
-  assert.deepEqual(inputs(tree).map((node) => node.props.value), [10, 12500, 20])
+  // 目录大小没有默认值 ⇒ 恢复默认 = 关掉上限（只留两个数字框），而不是填一个我们编的数。
+  assert.deepEqual(inputs(tree).map((node) => node.props.value), [10, 20])
+  assert.equal(collectAll(tree, (node) => node?.type === Toggle)[0].props.on, false, '恢复默认必须把目录上限关掉')
+})
+
+test('目录大小：默认不限制 —— 开关是关的、没有数字框、写明白"不限制"', async () => {
+  const { ToolSearchSettingsModal, Toggle, __render, __drainEffects } = loadInternals()
+  const { call } = fakeCall() // 宿主返回的 settings 里根本没有 maxCatalogChars
+  __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  __drainEffects()
+  await flush()
+  const tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  const toggles = collectAll(tree, (node) => node?.type === Toggle)
+  assert.equal(toggles.length, 1, '只有目录大小这一项是开关（其余是数字）')
+  assert.equal(toggles[0].props.on, false, '默认关 = 不限制')
+  assert.equal(inputs(tree).length, 2, '关着的时候不出现目录上限的数字框')
+  assert.ok(allText(tree).includes('不限制'), '缺省值要写"不限制"，不能把 undefined 摆出来')
+})
+
+test('目录大小：打开开关才发这个键，且预填建议起点（不让用户对着空框猜）', async () => {
+  const { ToolSearchSettingsModal, Toggle, __render, __drainEffects } = loadInternals()
+  const { calls, call } = fakeCall()
+  __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  __drainEffects()
+  await flush()
+  let tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  collectAll(tree, (node) => node?.type === Toggle)[0].props.onChange(true)
+  tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+
+  const fields = inputs(tree)
+  assert.equal(fields.length, 3, '打开后才有第三个数字框')
+  assert.equal(String(fields[1].props.value), '12500', '预填建议值（实测口径：456 工具约 11,690 字符）')
+
+  buttonByText(tree, '保存').props.onClick()
+  await flush()
+  const update = calls.find((entry) => entry.method === 'updateToolSearchSettings')
+  assert.equal(JSON.parse(JSON.stringify(update.payload)).settings.maxCatalogChars, 12500, '打开后保存必须带上这个键')
+})
+
+test('目录大小：关掉开关 = 不发这个键（不限制），而不是发 0（一个都不列）', async () => {
+  const { ToolSearchSettingsModal, Toggle, __render, __drainEffects } = loadInternals()
+  const { calls, call } = fakeCall({ settings: { maxResults: 10, maxCatalogChars: 120, maxDiscovered: 20 } })
+  __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  __drainEffects()
+  await flush()
+  let tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  collectAll(tree, (node) => node?.type === Toggle)[0].props.onChange(false)
+  tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  assert.equal(inputs(tree).length, 2, '关掉即刻收起数字框')
+
+  buttonByText(tree, '保存').props.onClick()
+  await flush()
+  const update = calls.find((entry) => entry.method === 'updateToolSearchSettings')
+  assert.equal('maxCatalogChars' in JSON.parse(JSON.stringify(update.payload)).settings, false,
+    '关掉是"不写这个键"；0 的语义是"一个名字都不列"，与不限制相反')
 })

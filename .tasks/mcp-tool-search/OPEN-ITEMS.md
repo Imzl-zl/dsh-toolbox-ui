@@ -76,8 +76,9 @@
 >
 > 1. ~~**S10 真机 UI 没跑**~~ → 见上：已跑通"装得上 + 面板出得来"，逐条点穿与 PTC 会话启用仍未验。
 > 2. **`both` 模式下的新行为**：仍然零行为（B4）。0.2.1 起该模式已被删除，别为它写代码。
-> 3. ✅ **面板参数表单（C2）已做（1.8.0）**：三个有证据的参数（`maxResults` / `maxCatalogLines` /
->    `maxDiscovered`）落在**插件自己 patch 行的 `config.toolSearch`**，插件类第一次有 `Config`；
+> 3. ✅ **面板参数表单（C2）已做（1.8.0）**：三个有证据的参数（`maxResults` / `maxCatalogChars` /
+>    `maxDiscovered`；其中目录预算从 1.8.3 起**缺省不限制**、面板上是默认关闭的开关）落在
+>    **插件自己 patch 行的 `config.toolSearch`**，插件类第一次有 `Config`；
 >    面板顶部「延迟参数」提供表单，保存走「先校验 → 写盘 → 重装运行时」，真 loader 用例钉住
 >    「同一进程里模型可见的工具定义换成新上限」。设计与理由见 `docs/mcp-tool-search-design.md`
 >    §12.9，参数证据见 `TUNING-DECISIONS.md` Q2/Q4。
@@ -547,7 +548,9 @@ CONTROL native agent 调 tool_search -> isError = false
    代码用 `(counts.get(owner) ?? 0) > minTools` 才保留，而 `DEFAULTS.minServerTools` 的注释引的是官方
    "<10 tools less beneficial"（按该原话 10 个工具是"值得"的），参数名 `minServerTools`（最小工具数）
    读起来也是 `>=`。选一个：改判据，或改注释+参数名明确写成 exclusive。
-2. **`DEFAULTS.maxCatalogLines` 的 docstring 与实现不同**（`lib/tool-search-runtime.js:48`）：
+2. ~~**`DEFAULTS.maxCatalogLines` 的 docstring 与实现不同**~~ → **已失效（2026-10-26）**：`maxCatalogLines`
+   这个键已从代码里删除，预算改 `maxCatalogChars` 且**缺省不截断**；兜底文案也已重写（先点名
+   `select:`、再换英文关键词、并明确"能力可能仍然存在"）。原文保留如下，只作记录：
    注释写"超出部分提示模型改用关键词/`select:` 查询"，而 `catalogSectionText` 的兜底文案是
    "…or use `select:<exact name>` **once you know the name**"——但被截断的正是名字没列出来的那批，
    模型无从知道那个名字。措辞可改（影响很小：名字可从工具列表/别处得知）。

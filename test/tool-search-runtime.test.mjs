@@ -221,6 +221,21 @@ test('catalogSectionText: 只列工具名、按 code-unit 名序、字符预算�
   assert.deepEqual(shown, fullLines.slice(0, shown.length), '少列是从尾部整行减少，不是打散')
 })
 
+test('目录预算：不设 maxCatalogChars 就**不截断**（默认行为，超过旧默认 12,500 也全列）', () => {
+  // 夹具刻意造到超过旧默认预算（12,500），否则这条用例对"默认改了"这件事证明不了什么。
+  const catalog = new Map(Array.from({ length: 600 }, (_, index) => {
+    const name = `mcp__server${index % 7}__tool_with_a_long_name_${index}`
+    return [name, { name, description: 'd' }]
+  }))
+  const config = resolveRuntimeConfig({})
+  assert.equal(config.maxCatalogChars, undefined, '缺省必须是"不设"，不是某个数字')
+
+  const { text, truncated } = catalogSectionText(catalog, config)
+  assert.equal(truncated, 0, '没设上限就一个名字都不许砍')
+  assert.equal(text.split('\n').filter((line) => line.startsWith('- ')).length, 600, '600 个名字全部在目录里')
+  assert.ok(text.length > 12500, '这个夹具必须真的超过旧默认预算')
+})
+
 test('catalogSectionText: 字符预算下滑时行数只整行减少，绝不切出半截工具名（I6）', () => {
   const catalog = new Map(
     ['b', 'a', 'C', 'd', 'e'].map((k) => [`mcp__${k}__x`, { name: `mcp__${k}__x`, description: 'd' }]),
@@ -1057,6 +1072,44 @@ test('搜索工具：select 不存在时报 found:false 且不激活', async () 
   assert.equal(value.matches[0].found, false)
   assert.deepEqual(value.discoveredTools, [])
   assert.equal(value.discoveredCount, 0)
+  fixture.cleanup()
+})
+
+test('搜索工具：零命中回执是配方而非断言，且语言规则三处共用一份措辞', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const definition = fixture.registered.get('tool_search')
+  const value = await definition.execute({ query: 'zzz-no-such-thing' }, { agent: fixture.agent })
+  assert.equal(value.matches.length, 0)
+  // 失败不是终点：回执必须点名"抄名字用 select:"这条零翻译成本的路。
+  assert.match(value.instruction, /select:<name>/)
+  // 空结果 ≠ 能力不存在——这条防的是模型转头对用户谎称"没有这个能力"。
+  assert.match(value.instruction, /may still exist/)
+  // 规则只有**一份**真源：query 参数描述。两个断言各锁一半：
+  // ① 失败回执必须逐字引用同一个措辞（否则模型在同一件事上收到两种说法）；
+  // ② 常驻的工具描述不得再抄一遍——description 与 parameters 在同一次请求里同时可见，
+  //    复制一份就是每个请求白烧 token。
+  const rule = definition.parameters.properties.query.description.match(/Matching is literal[^.]*\./)?.[0]
+  assert.ok(rule !== undefined, 'query 参数里没有匹配规则')
+  assert.ok(value.instruction.includes(rule), '失败回执与 query 参数措辞不一致')
+  assert.equal(definition.description.includes(rule), false, '工具描述重复了 query 参数里的规则')
+  fixture.cleanup()
+})
+
+test('搜索工具：select 全未命中拿到的是零命中回执，不是成功回执', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const value = await fixture.registered.get('tool_search').execute({ query: 'select:jshook_tool_1,ghost' }, { agent: fixture.agent })
+  // 协议仍然要逐条告诉模型"这个名字不存在"——所以数组非空。
+  assert.deepEqual(value.matches.map((match) => match.found), [false, false])
+  // 但不能因此说成"schema 齐了，直接调"：判据必须是**真的找到了**。
+  assert.match(value.instruction, /No tool matched/)
+  fixture.cleanup()
+})
+
+test('搜索工具：命中回执要求直接调用、不再重复搜索', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const value = await fixture.registered.get('tool_search').execute({ query: 'select:mcp__jshook__tool_1' }, { agent: fixture.agent })
+  assert.equal(value.matches.length, 1)
+  assert.match(value.instruction, /Do not search again for the same capability/)
   fixture.cleanup()
 })
 
