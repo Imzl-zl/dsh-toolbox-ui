@@ -1111,16 +1111,25 @@ test('搜索工具：select 全未命中拿到的是**名字**回执——不是
   fixture.cleanup()
 })
 
-test('搜索工具：模型自己拼的名字（点/空格/单下划线）只要拼得回现有工具就认', async () => {
-  // 这是"我们已经知道答案"的情形：目录把服务器放组头、裸名放列表项，模型很自然会连起来。
-  // 判据只有一条——反拼出来的名字必须真的在目录里，所以这不是猜（R2）。
-  for (const query of ['select:jshook.tool_1', 'select:jshook tool_1', 'select:jshook_tool_1']) {
+test('搜索工具：点或空格连出来的名字能反拼回现有工具（这两个字符不可能出现在名字里）', async () => {
+  // 宿主把工具名归一化成 [A-Za-z0-9_-]（mcp-client/src/tools.ts），所以 `.` 与空格不可能是名字的一部分
+  // ⇒ 用它们拆分只有一种解释。这是"确定"，不是"在几种意思里挑一个"（R2）。
+  for (const query of ['select:jshook.tool_1', 'select:jshook tool_1']) {
     const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
     const value = await fixture.registered.get('tool_search').execute({ query }, { agent: fixture.agent })
     assert.equal(value.matches.length, 1, `${query} 应该命中一条`)
     assert.equal(value.matches[0].name, 'mcp__jshook__tool_1', `${query} 应该反拼成真实全名`)
     fixture.cleanup()
   }
+})
+
+test('搜索工具：单下划线**不**反拼——它是合法名字字符，认了就是猜', async () => {
+  // `repo_read_file` 可能是某台服务器上一张真叫这个名字的工具，也可能被拆成 repo + read_file。
+  // 两种解释都成立 ⇒ 认了就是策略不是事实。宁可说"这个名字不在目录里"，让它按回执改路。
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const value = await fixture.registered.get('tool_search').execute({ query: 'select:jshook_tool_1' }, { agent: fixture.agent })
+  assert.deepEqual(value.matches, [{ name: 'jshook_tool_1', found: false }])
+  fixture.cleanup()
 })
 
 test('搜索工具：拼出来的名字对不上现有工具时，绝不返回"最像的那个"', async () => {
