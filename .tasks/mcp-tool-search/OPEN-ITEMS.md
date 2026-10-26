@@ -597,6 +597,31 @@ CONTROL native agent 调 tool_search -> isError = false
    **若不合并**：可接受，但**必须把 `tool-search-runtime.js:97-98` 那句"与…同一条规则"改掉**
    （它现在暗示存在一个不存在的共享实现）。**别两边都不动。**
 
+## O9（Minor ×3，2026-10-26 审查独得｜均未修）
+
+三处都是"能用、但会被用户摸到"的小问题，不是行为错误；修不修看手感优先级。
+
+1. **面板开关状态是从文本值推导的**（`lib/client.js:3675`：`enabled = String(draft[key]).trim() !== ''`）。
+   后果：用户想改数字时若先把输入框清空（惯性动作），**输入框当场卸载、开关自己关掉**，得再点一次
+   开关（预填值又回到 12500）才能继续编辑。用例缺口：没有"开关开着但内容被清空"这条交互。
+   修法：draft 里存显式布尔（`limitEnabled`），开关只改布尔，提交时按布尔决定带不带这个键。
+
+2. **一条断言在默认值变成 `undefined` 之后含义漂移**（`test/real-host-loader.test.mjs:424`）。
+   `assert.deepEqual(saved.settings, { … maxCatalogChars: DEFAULTS.maxCatalogChars … })` 现在比的是
+   `undefined`。实测 node 的 legacy `deepEqual` **区分**"键存在且为 undefined"与"键不存在"，所以不算
+   假绿；但它断言的实际内容已从"这个数等于某值"变成"没有默认值"，键改名也照样绿。
+   修法：显式断言该键不存在（`assert.equal('maxCatalogChars' in saved.settings, false)`）。
+
+3. **预填数字是第二个真源**（`lib/client.js:3589`：`suggestion: 12500`）。
+   这个 12500 的依据（456 工具实测 11,690 字符）住在 `docs/mcp-tool-search-design.md` §12.11，改了实测
+   不会提醒改面板。修法：宿主随 `defaults` 一起返回一个 `suggested`，面板不自己写数。
+
+**已撤回的一条（记下来防止再提）**：审查时我把"目录没有上限"判成 Important，理由是 3,000 工具下目录段
+≈26k token/请求且没有日志。**这是拿错参照系**——该和"没有本功能"比，不是和旧的上限比：常驻 schema 是
+目录的 **17.2×**（实测口径 442.04 vs 25.64 字符/工具），128k 窗口在 ~1,158 个工具处就被常驻 schema 吃光，
+那时目录只占 ≈7k token。上限在这条曲线上没有保护作用，只有省钱的边际作用。数据与论证见设计文档
+§12.11「二次更正」。
+
 ---
 
 

@@ -35,8 +35,9 @@
 
 - 落点：**插件自己 patch 行的 `config`**（`cordis.patch.yml` 里那条 `- id: mcp-manager-ui` 现在是空的），
   不是新开一个设置文件。需要插件类提供 `Config` schema —— 目前**没有**（`DECISIONS.md` F9）。
-- 只开放**有证据**的三个：`maxResults`（实测 top5→top10 召回 67%→100%）、`maxCatalogLines`、
-  `maxDiscovered`（推导见 TUNING Q2）。
+- 只开放**有证据**的三个：`maxResults`（实测 top5→top10 召回 67%→100%）、`maxCatalogLines`
+  （⚠️ 后续版本已删除，改成字符口径的 `maxCatalogChars`，再之后缺省改为不截断——见
+  `docs/mcp-tool-search-design.md` §12.11）、`maxDiscovered`（推导见 TUNING Q2）。
 - **不要**开放 `requireDiscovery`（关掉 = 让模型凭记忆调未加载工具，准确性灾难，理由写在 TUNING Q6）。
 - `descriptionChars` **已删除**，不要复活；`REMOVED_KEYS` 会拦住任何写回。
 - 面板侧：表单 + 中英双语文案 + 断言"改了真的生效"的真 runtime 用例。
