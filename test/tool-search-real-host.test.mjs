@@ -149,8 +149,10 @@ test('real host: 遮罩同时覆盖全局族与项目族，目录带 interpolate
     const catalog = assembly.sections.find((section) => section.name === 'tool-search:catalog')
     assert.ok(catalog, '目录 section 必须追加')
     assert.equal(catalog.interpolate, false, '目录嵌第三方描述，绝不能插值')
-    assert.ok(catalog.text.includes('mcp__deferme__g0'))
-    assert.ok(catalog.text.includes('mcp__proj__p0'))
+    // 目录自 2026-10-26 起按服务器分组、只写裸名（全名由 tool_search 返回），所以断言裸名。
+    assert.ok(catalog.text.includes('- g0'), '全局族裸名必须在目录里')
+    assert.ok(catalog.text.includes('- p0'), '项目族裸名必须在目录里')
+    assert.equal(catalog.text.includes('mcp__deferme__g0'), false, '分组形态不得再写全名')
     // 被延迟服务器的指令段清空（A3）。
     assert.equal(assembly.sections.find((s) => s.name === 'mcp:deferme').text, '')
     assert.equal(assembly.sections.find((s) => s.name === 'mcp:proj').text, '')
@@ -170,7 +172,7 @@ test('real host: 工具描述里的 {{var}} 不会让每步组装抛错', TEST_T
   try {
     const assembly = await host.assemble()
     assert.doesNotThrow(() => renderPrompt(assembly), '含 {{var}} 的第三方描述绝不能打断提示词渲染')
-    assert.ok(renderPrompt(assembly).includes('mcp__deferme__g0'))
+    assert.ok(renderPrompt(assembly).includes('- g0'), '目录里是裸名（分组形态）')
   } finally {
     await host.dispose()
   }
@@ -245,7 +247,7 @@ test('real host: 库存不变则目录字节稳定，工具增减后跟随变化
       async execute() { return { ok: true } },
     })
     const third = (await host.assemble()).sections.find((s) => s.name === 'tool-search:catalog').text
-    assert.ok(third.includes('mcp__deferme__late'), '新工具必须进入目录')
+    assert.ok(third.includes('- late'), '新工具必须以裸名进入目录')
     assert.ok((await host.assemble()).tools.every((tool) => tool.name !== 'mcp__deferme__late'), '新工具在同一次组装里就被遮掉（无窗口）')
   } finally {
     await host.dispose()

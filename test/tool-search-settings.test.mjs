@@ -29,7 +29,7 @@ const PLUGIN = 'dsh-toolbox-ui'
 test('配置 schema：没有 config 时也要通过（否则每个老 profile 升级后都起不来）', () => {
   // loader 对 `- id: mcp-manager-ui / name: dsh-toolbox-ui` 这种没有 config 的行传 undefined。
   // 若 schema 不接受 undefined，升级即等于面板消失——这是这条用例存在的唯一理由。
-  const defaults = { maxResults: DEFAULTS.maxResults, maxCatalogLines: DEFAULTS.maxCatalogLines, maxDiscovered: DEFAULTS.maxDiscovered }
+  const defaults = { maxResults: DEFAULTS.maxResults, maxCatalogChars: DEFAULTS.maxCatalogChars, maxDiscovered: DEFAULTS.maxDiscovered }
   for (const raw of [undefined, {}, { toolSearch: undefined }]) {
     const result = validate(raw)
     assert.equal(result.issues, undefined, `${JSON.stringify(raw)} 必须通过校验：${JSON.stringify(result.issues)}`)
@@ -59,9 +59,9 @@ test('cordis 的真实校验路径接受"没有 config"（存量 profile 的升�
 })
 
 test('配置 schema：只认三个键，非法值与未知键当场报错', () => {
-  const ok = validate({ toolSearch: { maxResults: 20, maxCatalogLines: 120, maxDiscovered: 30 } })
+  const ok = validate({ toolSearch: { maxResults: 20, maxCatalogChars: 120, maxDiscovered: 30 } })
   assert.equal(ok.issues, undefined)
-  assert.deepEqual(ok.value, { toolSearch: { maxResults: 20, maxCatalogLines: 120, maxDiscovered: 30 } })
+  assert.deepEqual(ok.value, { toolSearch: { maxResults: 20, maxCatalogChars: 120, maxDiscovered: 30 } })
 
   // 数值必须是指数级正整数：0 / 负数 / 小数 / 字符串都不接受（resolveRuntimeConfig 同样拒）。
   for (const bad of [0, -1, 1.5, '10', null]) {
@@ -84,7 +84,7 @@ test('配置 schema：只认三个键，非法值与未知键当场报错', () =
 test('生效值：缺省跟随 DEFAULTS，maxDiscovered 的下限抬到 maxResults（同一条规则）', () => {
   assert.deepEqual(effectiveToolSearchSettings({}), {
     maxResults: DEFAULTS.maxResults,
-    maxCatalogLines: DEFAULTS.maxCatalogLines,
+    maxCatalogChars: DEFAULTS.maxCatalogChars,
     maxDiscovered: DEFAULTS.maxDiscovered,
   })
   // 规则不在本模块重抄：maxDiscovered 低于 maxResults 时按 runtime 的同一规则抬上去。
@@ -96,14 +96,14 @@ test('读侧：从插件 config 取出稀疏值，未知顶层键不进入生效
   assert.deepEqual(readToolSearchSettings({}), {})
   assert.deepEqual(readToolSearchSettings({ toolSearch: { maxResults: 20 } }), { maxResults: 20 })
   // 未提供的键不补默认值：稀疏是"用户显式改过什么"，默认由 effective 负责组合。
-  assert.deepEqual(readToolSearchSettings({ toolSearch: { maxCatalogLines: 50 } }), { maxCatalogLines: 50 })
+  assert.deepEqual(readToolSearchSettings({ toolSearch: { maxCatalogChars: 50 } }), { maxCatalogChars: 50 })
 })
 
 test('写侧归一：与默认相同的值不落盘（否则将来调整默认值会被老数字钉住）', () => {
   assert.deepEqual(normalizeToolSearchSettings({}), {})
   assert.deepEqual(
-    normalizeToolSearchSettings({ maxResults: DEFAULTS.maxResults, maxCatalogLines: 7 }),
-    { maxCatalogLines: 7 },
+    normalizeToolSearchSettings({ maxResults: DEFAULTS.maxResults, maxCatalogChars: 7 }),
+    { maxCatalogChars: 7 },
   )
   // maxDiscovered 与默认相同（20）而 maxResults 抬高时不重复写 20；抬到 30 之后写 30——
   // 因为它此刻确实不是默认值，读回来必须还是 30。
@@ -138,8 +138,8 @@ test('写 patch：config.toolSearch 写进我们自己那条条目，其它条�
 })
 
 test('写 patch：值回到默认时把键删掉，config 空了就连 config 一起删（不留空壳）', () => {
-  const withValues = setToolSearchSettingsInPatch(PATCH, { maxResults: 20, maxCatalogLines: 50 }, { name: PLUGIN })
-  const back = setToolSearchSettingsInPatch(withValues, { maxResults: DEFAULTS.maxResults, maxCatalogLines: DEFAULTS.maxCatalogLines }, { name: PLUGIN })
+  const withValues = setToolSearchSettingsInPatch(PATCH, { maxResults: 20, maxCatalogChars: 50 }, { name: PLUGIN })
+  const back = setToolSearchSettingsInPatch(withValues, { maxResults: DEFAULTS.maxResults, maxCatalogChars: DEFAULTS.maxCatalogChars }, { name: PLUGIN })
   assert.deepEqual(readToolSearchSettingsFromPatch(back, { name: PLUGIN }), {})
   assert.doesNotMatch(back, /toolSearch/, '三个都回到默认后不得留下空对象')
   // 我们那条条目原先没有 config 键——删空之后 config 也不该留下。

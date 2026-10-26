@@ -421,7 +421,7 @@ test('real loader host: 插件按 bundle 安装（patch 里没有自己的条目
     assert.match(registered().parameters.properties.max_results.description, /\(1-10\)/)
 
     const saved = await host.manager.updateToolSearchSettings({ settings: { maxResults: 6 } })
-    assert.deepEqual(saved.settings, { maxResults: 6, maxCatalogLines: DEFAULTS.maxCatalogLines, maxDiscovered: DEFAULTS.maxDiscovered })
+    assert.deepEqual(saved.settings, { maxResults: 6, maxCatalogChars: DEFAULTS.maxCatalogChars, maxDiscovered: DEFAULTS.maxDiscovered })
 
     const written = await readFile(host.patch, 'utf8')
     assert.match(written, /welcomeNoticeVersion/, '别人的条目不受影响')
@@ -461,7 +461,7 @@ test('real loader host: 面板改延迟参数 → 写进 plugin patch 并当场�
   try {
     const DEFAULT_SETTINGS = {
       maxResults: DEFAULTS.maxResults,
-      maxCatalogLines: DEFAULTS.maxCatalogLines,
+      maxCatalogChars: DEFAULTS.maxCatalogChars,
       maxDiscovered: DEFAULTS.maxDiscovered,
     }
     const registered = () => host.tools.schemas().find((schema) => schema.name === 'tool_search')
@@ -473,14 +473,14 @@ test('real loader host: 面板改延迟参数 → 写进 plugin patch 并当场�
     assert.match(registered().parameters.properties.max_results.description, new RegExp(`\\(1-${DEFAULTS.maxResults}\\)`))
 
     // 2) 写：三个都改，落盘是稀疏的（都≠默认，所以三个都写）。
-    const saved = await host.manager.updateToolSearchSettings({ settings: { maxResults: 25, maxCatalogLines: 120, maxDiscovered: 25 } })
-    assert.deepEqual(saved.settings, { maxResults: 25, maxCatalogLines: 120, maxDiscovered: 25 })
+    const saved = await host.manager.updateToolSearchSettings({ settings: { maxResults: 25, maxCatalogChars: 120, maxDiscovered: 25 } })
+    assert.deepEqual(saved.settings, { maxResults: 25, maxCatalogChars: 120, maxDiscovered: 25 })
     const written = await readFile(host.patch, 'utf8')
     assert.match(written, /# profile patch：注释必须原样保留/, '注释不得被写丢')
     assert.match(written, /serverName: fs/, '别的条目一个字都不该动')
     assert.deepEqual(readToolSearchSettingsFromPatch(written, { name: 'dsh-toolbox-ui' }), {
       maxResults: 25,
-      maxCatalogLines: 120,
+      maxCatalogChars: 120,
       maxDiscovered: 25,
     })
 

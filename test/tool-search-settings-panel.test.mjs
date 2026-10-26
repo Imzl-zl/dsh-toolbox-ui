@@ -104,7 +104,7 @@ const buttons = (tree) => collectAll(tree, (node) => node?.props?.onClick !== un
 const buttonByText = (tree, label) => buttons(tree).find((node) => node.props.children === label)
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-const DEFAULTS = { maxResults: 10, maxCatalogLines: 300, maxDiscovered: 20 }
+const DEFAULTS = { maxResults: 10, maxCatalogChars: 12500, maxDiscovered: 20 }
 
 /**
  * `call` 的**真实契约**（lib/client.js 里那个包装器）：它**从不抛错**，而是把宿主的应答
@@ -132,7 +132,7 @@ test('表单关闭时不渲染任何东西（面板里五个 modal 都常驻挂�
 
 test('打开时读宿主参数：三项都按生效值填好，默认值也摆出来', async () => {
   const { ToolSearchSettingsModal, TOOL_SEARCH_SETTING_FIELDS, __render, __drainEffects } = loadInternals()
-  const { calls, call } = fakeCall({ settings: { maxResults: 25, maxCatalogLines: 120, maxDiscovered: 30 } })
+  const { calls, call } = fakeCall({ settings: { maxResults: 25, maxCatalogChars: 120, maxDiscovered: 30 } })
   __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
   __drainEffects()
   await flush()
@@ -143,7 +143,7 @@ test('打开时读宿主参数：三项都按生效值填好，默认值也摆�
   assert.equal(fields.length, 3, '三个参数各一个输入框')
   assert.deepEqual(fields.map((node) => node.props.value), [25, 120, 30], '输入框初值是当前生效值')
   // 字段顺序跟清单一致（清单是面板顺序的唯一真源）。
-  assert.deepEqual(fields.map((node) => node.props.placeholder), ['10', '300', '20'], '占位符是默认值')
+  assert.deepEqual(fields.map((node) => node.props.placeholder), ['10', '12500', '20'], '占位符是默认值')
   for (const field of TOOL_SEARCH_SETTING_FIELDS) {
     assert.ok(allText(tree).includes(field.label), `缺少字段标签：${field.label}`)
   }
@@ -172,7 +172,7 @@ test('保存：按数字发三个值、成功即收起并回报宿主的原话',
   assert.ok(update, '保存必须调 updateToolSearchSettings')
   // 跨 realm：payload 是 bundle 那个 vm 上下文里造的对象，原型不同，deepStrictEqual 会以
   // "看起来一模一样却不等"失败。比 JSON 形状（数值本身才是这条断言要说的事）。
-  assert.deepEqual(JSON.parse(JSON.stringify(update.payload)), { settings: { maxResults: 8, maxCatalogLines: 50, maxDiscovered: 12 } },
+  assert.deepEqual(JSON.parse(JSON.stringify(update.payload)), { settings: { maxResults: 8, maxCatalogChars: 50, maxDiscovered: 12 } },
     '发出去的必须是数字，不是输入框里的字符串')
   assert.equal(saved.length, 1, '成功要回报给面板（刷新提示用它）')
   assert.match(saved[0].note, /立即生效/)
@@ -255,12 +255,12 @@ test('读取失败（call 返回 ok:false）：显示宿主原话，且不渲染
 
 test('恢复默认：把三个值填回宿主给的默认值（不猜数字，用宿主返回的那份）', async () => {
   const { ToolSearchSettingsModal, __render, __drainEffects } = loadInternals()
-  const { call } = fakeCall({ settings: { maxResults: 25, maxCatalogLines: 120, maxDiscovered: 30 } })
+  const { call } = fakeCall({ settings: { maxResults: 25, maxCatalogChars: 120, maxDiscovered: 30 } })
   __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
   __drainEffects()
   await flush()
   let tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
   buttonByText(tree, '恢复默认').props.onClick()
   tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
-  assert.deepEqual(inputs(tree).map((node) => node.props.value), [10, 300, 20])
+  assert.deepEqual(inputs(tree).map((node) => node.props.value), [10, 12500, 20])
 })

@@ -295,3 +295,39 @@ test('searchCatalog: maxResults 非法值兜底为 1', () => {
   assert.equal(searchCatalog(catalog, 'browser', 0).length, 1)
   assert.equal(searchCatalog(catalog, 'browser', -3).length, 1)
 })
+
+// 目录段改为「分组 + 裸名」之后，模型会照着裸名写 select:，所以 select 必须能吃裸名，
+// 否则等于把这条主路径废掉。消歧不靠猜：唯一命中直返全名，多命中全返（模型按描述挑）。
+
+test('searchCatalog select: 裸名唯一命中直返全名', () => {
+  const catalog = buildCatalog([
+    { name: 'mcp__alpha__thing', description: 'alpha thing', parameters: null },
+    { name: 'mcp__alpha__other', description: 'alpha other', parameters: null },
+  ])
+  const matches = searchCatalog(catalog, 'select:other')
+  assert.equal(matches.length, 1)
+  assert.equal(matches[0].found, true)
+  assert.equal(matches[0].name, 'mcp__alpha__other', '返回全名——调用要用它')
+  assert.equal(matches[0].score, Infinity)
+})
+
+test('searchCatalog select: 裸名多命中全返（跨服务器同名不猜）', () => {
+  const catalog = buildCatalog([
+    { name: 'mcp__alpha__thing', description: 'alpha thing', parameters: null },
+    { name: 'mcp__beta__thing', description: 'beta thing', parameters: null },
+    { name: 'mcp__alpha__other', description: 'alpha other', parameters: null },
+  ])
+  const matches = searchCatalog(catalog, 'select:thing')
+  assert.deepEqual(matches.map((entry) => entry.name), ['mcp__alpha__thing', 'mcp__beta__thing'])
+  assert.ok(matches.every((entry) => entry.found === true))
+})
+
+test('searchCatalog select: 裸名大小写不敏感，缺失仍然原样回报 found:false', () => {
+  const catalog = buildCatalog([
+    { name: 'mcp__alpha__Take_Screenshot', description: 'd', parameters: null },
+  ])
+  assert.equal(searchCatalog(catalog, 'select:take_screenshot')[0].name, 'mcp__alpha__Take_Screenshot')
+  assert.deepEqual(searchCatalog(catalog, 'select:nope'), [{ name: 'nope', found: false }])
+  // 全名精确查询保持原行为（O(1) 查表，不进入后缀扫描）。
+  assert.equal(searchCatalog(catalog, 'select:mcp__alpha__Take_Screenshot')[0].name, 'mcp__alpha__Take_Screenshot')
+})

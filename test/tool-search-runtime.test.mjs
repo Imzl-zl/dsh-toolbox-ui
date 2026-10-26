@@ -5,14 +5,18 @@ import * as dshTools from '@deepseek-ai/dsh-tools'
 import {
   DEFAULTS,
   activeMaskedServers,
+  allocateCatalogNames,
   buildToolSearchView,
   catalogSectionText,
   deferredTools,
   discoveredFromMessages,
   filterCatalog,
   filterManagedTools,
+  groupCatalogByOwner,
   guardDecision,
   installToolSearchRuntime,
+  instructionFingerprint,
+  instructionReader,
   maskGuidanceSection,
   maskInstructionSections,
   parseDiscoveredMeta,
@@ -198,23 +202,41 @@ test('activeMaskedServers: 全部发现后指令段恢复', () => {
   assert.deepEqual([...activeMaskedServers(view, all)], [], '服务器工具全部被发现后，它的指令段不再占上下文')
 })
 
-test('catalogSectionText: 只列工具名、按 code-unit 名序、体积上限带"另有 N 个"', () => {
-  const config = resolveRuntimeConfig({ maxCatalogLines: 3 })
+test('catalogSectionText: 只列工具名、按 code-unit 名序、字符预算带"另有 N 个"', () => {
   const catalog = new Map(
     ['b', 'a', 'C', 'd', 'e'].map((k) => [`mcp__${k}__x`, { name: `mcp__${k}__x`, description: 'a very long description here' }]),
   )
-  const { text, truncated } = catalogSectionText(catalog, config)
-  const lines = text.split('\n')
-  assert.equal(lines[0], '## Deferred tool catalog')
-  assert.equal(truncated, 2)
-  const toolLines = lines.filter((line) => line.startsWith('- '))
-  // 目录行**只有名字**：不带破折号、不带用途、更没有截断。用途由搜索（全文索引）负责，
-  // 这是 Claude Code 的做法（延迟工具在 prompt 里只有标识符），也是"不截断才没有截断风险"的唯一形态。
-  assert.deepEqual(toolLines, ['- mcp__C__x', '- mcp__a__x', '- mcp__b__x'], '超出上限的名字被截掉，行内只有名字')
-  assert.ok(text.includes('2 more deferred tools are not listed here'), '截断必须提示还有多少，模型才知道要改用关键词查询')
-  // code-unit 序：大写 C 在小写字母之前。排序键是完整名字，而同服务器的名字共享 `mcp__<server>__`
-  // 前缀——所以按名字排序天然按服务器聚簇，不需要另加分组头。
-  assert.ok(lines.indexOf('- mcp__C__x') < lines.indexOf('- mcp__a__x'))
+  const full = catalogSectionText(catalog, resolveRuntimeConfig({ maxCatalogChars: 100000 }))
+  const fullLines = full.text.split('\n').filter((line) => line.startsWith('- '))
+  // 目录行**只有名字**（不带用途），按完整名字的 code-unit 序（大写 C 在小写之前）。
+  assert.deepEqual(fullLines, ['- mcp__C__x', '- mcp__a__x', '- mcp__b__x', '- mcp__d__x', '- mcp__e__x'])
+  assert.equal(full.truncated, 0)
+
+  // 预算是**名字行**的额度，所以按名字行的成本收紧（按整段文本收会收不到位）。
+  const nameChars = fullLines.reduce((sum, line) => sum + line.length + 1, 0)
+  const tight = catalogSectionText(catalog, resolveRuntimeConfig({ maxCatalogChars: Math.floor(nameChars * 0.5) }))
+  assert.ok(tight.truncated > 0, '预算收紧后必须真的少列')
+  assert.ok(tight.text.includes('more deferred tools are not listed here'), '截断必须提示还有多少')
+  const shown = tight.text.split('\n').filter((line) => line.startsWith('- '))
+  assert.deepEqual(shown, fullLines.slice(0, shown.length), '少列是从尾部整行减少，不是打散')
+})
+
+test('catalogSectionText: 字符预算下滑时行数只整行减少，绝不切出半截工具名（I6）', () => {
+  const catalog = new Map(
+    ['b', 'a', 'C', 'd', 'e'].map((k) => [`mcp__${k}__x`, { name: `mcp__${k}__x`, description: 'd' }]),
+  )
+  const full = catalogSectionText(catalog, resolveRuntimeConfig({ maxCatalogChars: 100000 }))
+  for (let budget = full.text.length + 200; budget > 120; budget -= 7) {
+    const { text } = catalogSectionText(catalog, resolveRuntimeConfig({ maxCatalogChars: budget }))
+    let used = 0
+    for (const line of text.split('\n').filter((entry) => entry.startsWith('- '))) {
+      // 原子性：只可能是完整名字；任何半截都会在这里红。
+      assert.match(line, /^- mcp__[A-Za-z]__x$/, `预算 ${budget} 时出现了半截名字：${line}`)
+      used += line.length + 1
+    }
+    // 预算是名字行的额度（骨架另计），所以这里比的是名字行用量。
+    assert.ok(used <= budget, `预算 ${budget} 时名字行超支：实际 ${used}`)
+  }
 })
 
 test('catalogSectionText: 描述一个字都不进目录（截断风险从根上不存在）', () => {
@@ -224,6 +246,148 @@ test('catalogSectionText: 描述一个字都不进目录（截断风险从根上
   assert.equal(text.includes('quarterly revenue'), false, '用途/描述不得出现在目录里')
   assert.equal(text.includes('USE THIS ONLY WHEN'), false, '连前半句也不能出现——不存在"截断"，只有"不列"')
   assert.ok(text.includes('- mcp__srv__report'), '名字必须在')
+})
+
+// ── 目录：按服务器分组 + 裸名（2026-10-26）──
+// 红线的落地检查：归属与切分**不得依赖任何具体服务器名**，所以夹具用任意名字，断言只描述
+// 关系（prefix + bare === 全名、组序、预算分配），不描述具体名字。
+
+test('groupCatalogByOwner: 按 owner 分组、切裸名，且 prefix + bare 恒等于全名（I2）', () => {
+  const catalog = new Map([
+    ['mcp__alpha__zeta', { name: 'mcp__alpha__zeta' }],
+    ['mcp__alpha__beta', { name: 'mcp__alpha__beta' }],
+    ['mcp__beta__one', { name: 'mcp__beta__one' }],
+  ])
+  const ownerOf = new Map([
+    ['mcp__alpha__zeta', 'alpha'],
+    ['mcp__alpha__beta', 'alpha'],
+    ['mcp__beta__one', 'beta'],
+  ])
+  const { groups, unattributed } = groupCatalogByOwner(catalog, ownerOf)
+  assert.deepEqual(groups.map((group) => group.server), ['alpha', 'beta'], '组按服务器名 code-unit 序')
+  assert.deepEqual(groups[0].names.map((entry) => entry.bare), ['beta', 'zeta'], '组内按裸名 code-unit 序')
+  assert.deepEqual(unattributed, [])
+  for (const group of groups) {
+    for (const entry of group.names) {
+      assert.equal(`mcp__${group.server}__${entry.bare}`, entry.name, 'I2 可逆性：切歪必红')
+    }
+  }
+})
+
+test('groupCatalogByOwner: 无归属 / 前缀不符 / 空裸名一律不切、保留全名（I1 + I3）', () => {
+  const catalog = new Map([
+    ['mcp__a__b__x', { name: 'mcp__a__b__x' }], // 生产里歧义工具根本不会有 owner 条目
+    ['read', { name: 'read' }], // 无 mcp__ 前缀
+    ['mcp__srv__', { name: 'mcp__srv__' }], // 裸名为空
+    ['weird', { name: 'weird' }], // owner 存在但前缀不符（上游异常）
+  ])
+  const ownerOf = new Map([['mcp__srv__', 'srv'], ['weird', 'srv']])
+  const { groups, unattributed } = groupCatalogByOwner(catalog, ownerOf)
+  assert.deepEqual(groups, [], '一个都不能分组')
+  assert.deepEqual(
+    unattributed.map((tool) => tool.name),
+    ['mcp__a__b__x', 'mcp__srv__', 'read', 'weird'],
+    '全部原样保留，按全名 code-unit 序',
+  )
+})
+
+test('catalogSectionText: 分组形态 = 组头 + 裸名，名字行比全名形态短', () => {
+  const schemas = Array.from({ length: 6 }, (_, i) => ({ name: `mcp__srv__t${i}`, description: 'd', parameters: null }))
+  const view = buildToolSearchView(schemas, resolveRuntimeConfig({ deferServers: ['srv'], serverNames: ['srv'] }))
+  const config = resolveRuntimeConfig()
+  const grouped = catalogSectionText(view.catalog, config, { ownerOf: view.ownerOf })
+  const flat = catalogSectionText(view.catalog, config) // 退化形态：没有归属信息
+
+  assert.equal(grouped.truncated, 0)
+  assert.ok(grouped.text.includes('### srv · 6 tools'), grouped.text)
+  assert.equal(grouped.text.includes('mcp__srv__t0'), false, '分组形态不得再写全名')
+  for (let i = 0; i < 6; i++) assert.ok(grouped.text.includes(`- t${i}`), `裸名 t${i} 必须在`)
+
+  const nameChars = (text) => text.split('\n').filter((line) => line.startsWith('- ')).join('').length
+  assert.ok(nameChars(grouped.text) < nameChars(flat.text), '裸名必须比全名省字符')
+})
+
+test('allocateCatalogNames: 字符预算按整行注水，短的组先满足、大组不会被打回零行', () => {
+  // 每行成本 = `- t0` 4 字符 + 换行 = 5。预算 45 ⇒ 理论上 9 行。
+  const group = (key, count) => ({ key, lines: Array.from({ length: count }, (_, i) => `- t${i}`) })
+  const groups = [group('big', 10), group('mid', 6), group('small', 2)]
+  // 预算 45：轮一 share=15 → big 3 / mid 3 / small 2（small 已满足）；剩 5 不够两个饿着的组
+  // 再各拿一行（share 落到 2 < 一行成本 4）⇒ 停在 3/3/2，剩余额度宁可不用（I6）。
+  const tight = allocateCatalogNames(groups, 45)
+  assert.equal(tight.get('small'), 2, '小组必须被完整满足')
+  assert.equal(tight.get('big'), 3)
+  assert.equal(tight.get('mid'), 3)
+  const tightUsed = groups.reduce((sum, entry) => sum + (tight.get(entry.key) ?? 0) * 5, 0)
+  assert.equal(tightUsed, 40, '实际用量必须 ≤ 预算，且只差在一整行以内')
+
+  // 预算 50：剩下的 10 字符够 big 与 mid 各再拿一行 ⇒ 4/4/2，仍然整行。
+  const roomy = allocateCatalogNames(groups, 50)
+  assert.equal(roomy.get('big'), 4)
+  assert.equal(roomy.get('mid'), 4)
+  assert.equal(roomy.get('small'), 2)
+
+  // 预算连一行都放不下 ⇒ 一行都不给（宁可空，也不切名字）。
+  assert.equal(allocateCatalogNames(groups, 3).size, 0)
+})
+
+test('catalogSectionText: 预算不足时每组都露头，且未列出的总数必须报出来（C 档）', () => {
+  const make = (server, count) => Array.from({ length: count }, (_, i) => ({ name: `mcp__${server}__t${i}`, description: 'd', parameters: null }))
+  const schemas = [...make('big', 10), ...make('small', 2), ...make('mid', 6)]
+  const view = buildToolSearchView(schemas, resolveRuntimeConfig({
+    deferServers: ['big', 'small', 'mid'],
+    serverNames: ['big', 'small', 'mid'],
+  }))
+  const full = catalogSectionText(view.catalog, resolveRuntimeConfig({ maxCatalogChars: 100000 }), { ownerOf: view.ownerOf })
+  const fullNameChars = full.text.split('\n').filter((line) => line.startsWith('- ')).reduce((sum, line) => sum + line.length + 1, 0)
+  const budget = Math.floor(fullNameChars * 0.5)
+  const { text, truncated } = catalogSectionText(view.catalog, resolveRuntimeConfig({ maxCatalogChars: budget }), { ownerOf: view.ownerOf })
+
+  assert.equal(text.split('\n').filter((line) => line.startsWith('### ')).length, 3, '每台服务器都要露头（不许整台消失）')
+  assert.ok(truncated > 0, '预算砍半必须真的少列')
+  const nameUsed = text.split('\n').filter((line) => line.startsWith('- ')).reduce((sum, line) => sum + line.length + 1, 0)
+  assert.ok(nameUsed <= budget, `名字行不得超预算：${nameUsed} > ${budget}`)
+  assert.ok(text.includes('not listed'), '截断必须在组头可见，不许静默')
+})
+
+test('catalogSectionText: 组头摘要取 instructions 首条实质行，跳过宿主标题；为空则不写', () => {
+  const catalog = new Map([['mcp__srv__t', { name: 'mcp__srv__t' }]])
+  const ownerOf = new Map([['mcp__srv__t', 'srv']])
+  const sections = [{ name: 'mcp:srv', text: '### MCP server: srv\n\n浏览器自动化：截图、点击。\n\n更多说明' }]
+
+  const withSummary = catalogSectionText(catalog, resolveRuntimeConfig(), { ownerOf, instructionsOf: instructionReader(sections) })
+  assert.ok(withSummary.text.includes('### srv · 1 tools · 浏览器自动化：截图、点击。'), withSummary.text)
+  assert.equal(withSummary.text.includes('更多说明'), false, '只要第一条实质行')
+  assert.equal(withSummary.text.includes('### MCP server:'), false, '宿主标题行不得重复出现')
+
+  const without = catalogSectionText(catalog, resolveRuntimeConfig(), { ownerOf, instructionsOf: instructionReader([]) })
+  assert.ok(without.text.includes('### srv · 1 tools\n'), '没有摘要就不写空段')
+})
+
+test('catalogSectionText: 摘要按字符预算裁剪并以省略号收尾', () => {
+  const sections = [{ name: 'mcp:srv', text: `### MCP server: srv\n\n${'x'.repeat(200)}` }]
+  const catalog = new Map([['mcp__srv__t', { name: 'mcp__srv__t' }]])
+  const { text } = catalogSectionText(catalog, resolveRuntimeConfig(), {
+    ownerOf: new Map([['mcp__srv__t', 'srv']]),
+    instructionsOf: instructionReader(sections),
+  })
+  const header = text.split('\n').find((line) => line.startsWith('### srv'))
+  const summary = header.split(' · ').slice(2).join(' · ')
+  assert.equal(summary.length, 80, '字符预算：80')
+  assert.ok(summary.endsWith('…'))
+})
+
+test('instructionFingerprint: 只认 mcp: 段，且随文本长度变化（缓存键不得漏判）', () => {
+  assert.notEqual(
+    instructionFingerprint([{ name: 'mcp:srv', text: 'abc' }]),
+    instructionFingerprint([{ name: 'mcp:srv', text: 'abcdef' }]),
+  )
+  assert.equal(
+    instructionFingerprint([{ name: 'mcp:srv', text: 'abc' }]),
+    instructionFingerprint([{ name: 'mcp:srv', text: 'xyz' }]),
+    '同长度同指纹（B 档：摘要陈旧只损失措辞）',
+  )
+  assert.equal(instructionFingerprint([{ name: 'other', text: 'abc' }]), 0, '只累计 mcp: 段')
+  assert.equal(instructionFingerprint(undefined), 0)
 })
 
 test('maskInstructionSections: 只清空被延迟服务器的指令段，且不改原对象', () => {
@@ -266,7 +430,7 @@ test('maskGuidanceSection: 只清空引导段，段里没有它时原样返回',
 test('resolveRuntimeConfig: 缺省、maxDiscovered 下限抬到 maxResults、非法值抛错', () => {
   const config = resolveRuntimeConfig()
   assert.equal(config.toolName, DEFAULTS.toolName)
-  assert.equal(config.maxCatalogLines, DEFAULTS.maxCatalogLines)
+  assert.equal(config.maxCatalogChars, DEFAULTS.maxCatalogChars)
   // 这两个也对齐 DEFAULTS 而不是复述字面量：字面量一改就红，却证明不了"缺省取自 DEFAULTS"
   // 这件本用例唯一想守的事（同 L207-210 的模式）。
   assert.equal(config.maxResults, DEFAULTS.maxResults)
@@ -538,8 +702,9 @@ test('目录只列还没被发现的工具，且按 (revision, discoveredVersion
     const tool = fixture.registered.get('tool_search')
     await tool.execute({ query: 'select:mcp__jshook__tool_0' }, { agent: fixture.agent })
     const afterDiscover = (await assemble(fixture, assembly)).sections.find((section) => section.name === 'tool-search:catalog').text
-    assert.equal(afterDiscover.includes('mcp__jshook__tool_0'), false, '已发现的工具必须离开目录（D 过滤）')
-    assert.ok(afterDiscover.includes('mcp__jshook__tool_1'))
+    // 目录自 2026-10-26 起按服务器分组、只写裸名，所以断言用 `- <bare>`。
+    assert.equal(afterDiscover.includes('- tool_0'), false, '已发现的工具必须离开目录（D 过滤）')
+    assert.ok(afterDiscover.includes('- tool_1'))
 
     // LRU 刷新（touch）不改成员 ⇒ 目录文本不该失效（versionOf 不动），字节必须完全一致。
     fixture.guards[0]({ name: 'mcp__jshook__tool_0', agent: fixture.agent })
