@@ -46,7 +46,7 @@ const CORDIS_LOADER_PEER = '^1.0.3'
 
 test('package exposes one Web bundle entry', () => {
   assert.equal(packageJson.dsh?.bundle?.patch, './cordis.patch.yml')
-  assert.equal(packageJson.version, '1.8.3')
+  assert.equal(packageJson.version, '1.9.0')
   assert.equal(packageJson.dsh?.client?.platform, 'web')
   // dsh.client.inject 是客户端图里的「工厂先到」依赖边，只能写真实的 client 包名：
   //   @deepseek-ai/dsh-client-runtime  —— 上游 2026-08-22 已删除（be531688 "remove Runtime"）

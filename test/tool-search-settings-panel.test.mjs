@@ -303,6 +303,31 @@ test('目录大小：打开开关才发这个键，且预填建议起点（不�
   assert.equal(JSON.parse(JSON.stringify(update.payload)).settings.maxCatalogChars, 12500, '打开后保存必须带上这个键')
 })
 
+test('目录大小：清空数字框不会让控件消失，也不会在保存时悄悄撤掉上限', async () => {
+  // 用户改数字的惯性动作是"先清空再输入"。若开关状态从文字推导，清空那一刻输入框会卸载、
+  // 开关自己关掉；而清空后保存会把上限**无提示地**撤掉（独立复核用探针实测到这个后果）。
+  const { ToolSearchSettingsModal, Toggle, __render, __drainEffects } = loadInternals()
+  const { calls, call } = fakeCall({ settings: { maxResults: 10, maxCatalogChars: 120, maxDiscovered: 20 } })
+  __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  __drainEffects()
+  await flush()
+  let tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  assert.equal(collectAll(tree, (node) => node?.type === Toggle)[0].props.on, true, '宿主有值 ⇒ 开关是开的')
+
+  // 清空输入框：控件必须还在，开关必须还开着（这是"开关是独立状态"的全部意义）。
+  inputs(tree)[1].props.onChange({ target: { value: '' } })
+  tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  assert.equal(inputs(tree).length, 3, '清空后输入框不得消失')
+  assert.equal(collectAll(tree, (node) => node?.type === Toggle)[0].props.on, true, '清空不得把开关关掉')
+
+  // 空值 + 开关开着时保存：必须**当场报错**且不发 RPC，而不是静默按"没设"处理。
+  buttonByText(tree, '保存').props.onClick()
+  await flush()
+  assert.equal(calls.some((entry) => entry.method === 'updateToolSearchSettings'), false, '空值不得发出去')
+  tree = __render(ToolSearchSettingsModal, { open: true, onClose: () => {}, call, onSaved: () => {} })
+  assert.match(allText(tree), /目录上限需要一个正整数/, '要告诉用户怎么办（关掉开关或填数）')
+})
+
 test('目录大小：关掉开关 = 不发这个键（不限制），而不是发 0（一个都不列）', async () => {
   const { ToolSearchSettingsModal, Toggle, __render, __drainEffects } = loadInternals()
   const { calls, call } = fakeCall({ settings: { maxResults: 10, maxCatalogChars: 120, maxDiscovered: 20 } })

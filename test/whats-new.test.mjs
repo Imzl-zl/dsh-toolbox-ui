@@ -25,6 +25,21 @@ test('the newest whats-new entry matches the package version', () => {
   assert.equal(WHATS_NEW[WHATS_NEW.length - 1].version, packageJson.version)
 })
 
+test('newest whats-new entry and its release notes describe the same things', async () => {
+  // 发布闸门之二：`release.yml` 推 tag 时拿 `.github/release-notes/v<version>.md` 当 Release 正文，
+  // 面板「更新提示」拿 WHATS_NEW——两处说的必须是同一件事。此前只测"文件存在"，于是可以把一条
+  // 新说明追挂到**已发布**的版本下而不被发现（本轮真犯过，见 OPEN-ITEMS 的 O9 处置）。
+  // 对账按**加粗小标题**：它是每条说明的语义锚点，改写措辞不影响，换一件事就会红。
+  const newest = WHATS_NEW[WHATS_NEW.length - 1]
+  const notes = await readFile(new URL(`../.github/release-notes/v${newest.version}.md`, import.meta.url), 'utf8')
+  for (const item of newest.items) {
+    const text = typeof item.text === 'string' ? item.text : item.text.zh
+    const headline = text.match(/\*\*(.+?)\*\*/)?.[1]
+    assert.ok(headline !== undefined, `条目缺加粗小标题，无法与 release notes 对账：${text.slice(0, 40)}`)
+    assert.ok(notes.includes(headline), `release notes 缺少面板提示里的这条：「${headline}」`)
+  }
+})
+
 test('whats-new entries are append-only, ordered and well formed', () => {
   const versions = WHATS_NEW.map((entry) => entry.version)
   assert.equal(new Set(versions).size, versions.length, '版本不能重复')

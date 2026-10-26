@@ -597,24 +597,30 @@ CONTROL native agent 调 tool_search -> isError = false
    **若不合并**：可接受，但**必须把 `tool-search-runtime.js:97-98` 那句"与…同一条规则"改掉**
    （它现在暗示存在一个不存在的共享实现）。**别两边都不动。**
 
-## O9（Minor ×3，2026-10-26 审查独得｜均未修）
+## O9（2026-10-26 审查独得｜2 修 1 留）
 
-三处都是"能用、但会被用户摸到"的小问题，不是行为错误；修不修看手感优先级。
+三处都是"能用、但会被用户摸到"的小问题，不是行为错误。
 
-1. **面板开关状态是从文本值推导的**（`lib/client.js:3675`：`enabled = String(draft[key]).trim() !== ''`）。
-   后果：用户想改数字时若先把输入框清空（惯性动作），**输入框当场卸载、开关自己关掉**，得再点一次
-   开关（预填值又回到 12500）才能继续编辑。用例缺口：没有"开关开着但内容被清空"这条交互。
-   修法：draft 里存显式布尔（`limitEnabled`），开关只改布尔，提交时按布尔决定带不带这个键。
+> **状态（2026-10-26 收尾）**：① ✅ 已修；② ✅ 已修；③ **未修**，留档。
+> 另：发版边界那条 Critical 已按"bump **1.9.0** + 新建 `.github/release-notes/v1.9.0.md` + whats-new 新条目"
+> 处理，并补了**发布闸门用例**——`test/whats-new.test.mjs` 现在按加粗小标题对账"面板更新提示"与
+> "Release 正文"，两者说的事不一致就红（这正是当初放它过去的缺口）。
 
-2. **一条断言在默认值变成 `undefined` 之后含义漂移**（`test/real-host-loader.test.mjs:424`）。
-   `assert.deepEqual(saved.settings, { … maxCatalogChars: DEFAULTS.maxCatalogChars … })` 现在比的是
-   `undefined`。实测 node 的 legacy `deepEqual` **区分**"键存在且为 undefined"与"键不存在"，所以不算
-   假绿；但它断言的实际内容已从"这个数等于某值"变成"没有默认值"，键改名也照样绿。
-   修法：显式断言该键不存在（`assert.equal('maxCatalogChars' in saved.settings, false)`）。
+1. ✅ **已修｜面板开关状态改成显式布尔**（原 `lib/client.js:3675` 的 `enabled = String(draft[key]).trim() !== ''`）。
+   原因：用户改数字的惯性动作是"先清空再输入"，从文字推导会让输入框在清空那一刻卸载、开关自己关掉；
+   更糟的是清空后保存会**无提示地**撤掉他此前设的上限（独立复核用探针实测到这个后果）。
+   修法：新增独立的 `limitOn` 状态（加载、保存成功、恢复默认三处同步），开关只改它；
+   开关开着但数字为空/非法时**当场报错并发不出去**（"目录上限需要一个正整数；想取消就关掉开关"），
+   不再静默当成"没设"。用例：清空后输入框仍在、开关仍开、保存不发 RPC 且显示该错误。
 
-3. **预填数字是第二个真源**（`lib/client.js:3589`：`suggestion: 12500`）。
-   这个 12500 的依据（456 工具实测 11,690 字符）住在 `docs/mcp-tool-search-design.md` §12.11，改了实测
-   不会提醒改面板。修法：宿主随 `defaults` 一起返回一个 `suggested`，面板不自己写数。
+2. ✅ **已修｜断言自指**（`test/real-host-loader.test.mjs:425`、`test/tool-search-settings.test.mjs:86`）。
+   期望值从 `DEFAULTS.maxCatalogChars` 改成**字面 `undefined`**：默认值哪天改回数字，这两条会红，
+   而不是跟着一起漂（实测 legacy `deepEqual` 区分"键在且 undefined"与"键缺"，所以此前不是假绿，
+   只是没有敏感性）。
+
+3. **未修｜预填数字是第二个真源**（`lib/client.js` 的 `suggestion: 12500`）。
+   这个 12500 的依据（456 工具实测 11,690 字符）住在 `docs/mcp-tool-search-design.md` §12.11，
+   改了实测不会提醒改面板。修法：宿主随 `defaults` 一起返回一个 `suggested`，面板不自己写数。
 
 **已撤回的一条（记下来防止再提）**：审查时我把"目录没有上限"判成 Important，理由是 3,000 工具下目录段
 ≈26k token/请求且没有日志。**这是拿错参照系**——该和"没有本功能"比，不是和旧的上限比：常驻 schema 是
