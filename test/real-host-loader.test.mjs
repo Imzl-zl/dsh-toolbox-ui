@@ -421,7 +421,8 @@ test('real loader host: 插件按 bundle 安装（patch 里没有自己的条目
     assert.match(registered().parameters.properties.max_results.description, /\(1-10\)/)
 
     const saved = await host.manager.updateToolSearchSettings({ settings: { maxResults: 6 } })
-    assert.deepEqual(saved.settings, { maxResults: 6, maxCatalogChars: DEFAULTS.maxCatalogChars, maxDiscovered: DEFAULTS.maxDiscovered })
+    // 目录预算写**字面** undefined：跟 DEFAULTS 比等于自己跟自己比，默认值哪天被改回数字也测不出来。
+    assert.deepEqual(saved.settings, { maxResults: 6, maxCatalogChars: undefined, maxDiscovered: DEFAULTS.maxDiscovered })
 
     const written = await readFile(host.patch, 'utf8')
     assert.match(written, /welcomeNoticeVersion/, '别人的条目不受影响')

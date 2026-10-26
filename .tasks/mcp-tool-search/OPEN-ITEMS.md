@@ -622,6 +622,38 @@ CONTROL native agent 调 tool_search -> isError = false
 那时目录只占 ≈7k token。上限在这条曲线上没有保护作用，只有省钱的边际作用。数据与论证见设计文档
 §12.11「二次更正」。
 
+### O9 处置（2026-10-26 独立复核后）
+
+独立复核（另一 agent、同一区间 `606e8c4..552c86c`，854/854 复核通过）另外抓到一条 **Critical** 和两条
+Important。处置如下。
+
+**已修（同一批）**
+- **Critical｜`lib/whats-new.js`（已删）**：我把新说明**追挂在已发布的 1.8.3** 上。取证：`v1.8.3` = `f09f73b`
+  （2026-10-23）已并入 HEAD，tag 上 `package.json` 已是 1.8.3，`.github/release-notes/v1.8.3.md` 已存在。
+  会话提示词里写的"未 bump、未打 tag"是错的，我没核就照它做。处置：**删掉那条说明**。要恢复必须先定版本：
+  bump（1.8.4 / 1.9.0）→ 新条目 + 新增 `.github/release-notes/v<新版本>.md`（`test/package-contract` 要求该文件
+  存在）。**顺带补一个缺口**：现有用例只测"release notes 文件存在"，测不出 whats-new 与它内容对齐——正是
+  这个缺口放它过去。
+- **Minor｜缺省值的单一真源**：`DEFAULTS` 里重新显式写 `maxCatalogChars: undefined`（并注释为什么写而不删键）。
+- **Minor｜`MATCH_RULE` 过强**：原文 "matching is literal" 对 `select:` / `+server` 不成立，对 `stem: true`
+  也不成立（单复数归一）。改成 "For keyword queries, matching is by word tokens, not by meaning…"。
+- **Minor｜回执丢了语言免责句**：零命中回执补回 "or with the words that server's own descriptions use"——
+  对中文描述的服务器，只教它换英文是指错路，而这是模型最后读到的文本。
+- **Minor｜测试自指**：`test/real-host-loader.test.mjs:425` 与 `test/tool-search-settings.test.mjs:86` 的目录
+  预算期望改成**字面 `undefined`**，默认值一旦改回数字即红（其余三处是结构性对账，保留 `DEFAULTS` 引用）。
+
+**未修（等决定）**
+- **Important｜零命中回执不分查询形态**（`lib/tool-search-runtime.js:889`）：`select:` 未命中也收到"换英文
+  关键词"的建议，**诊断方向相反**（实测：`select:browser.capture_network` 未命中 → 被叫去换词 → 换裸关键词
+  才恢复）。修法：按 `parseQuery(query).kind === 'select'` 分诊，给"这个名字不存在 / `select:` 只收逐字复制
+  的名字"的专门回执；`parseQuery` 已导出、文件已在 import 列表里，**常驻成本 0**。
+  这与本会话早先提的"收敛方案"是同一件事，作者当时未拍板。
+- **Important｜面板开关状态派生**（上面第 1 条）：复核用探针实测出更重的后果——把数字框清空后**保存**，
+  会在无提示的情况下撤掉用户此前设的上限（原 120 丢失）。修法同上（显式 boolean）。
+- **Minor｜导出的 `catalogSectionText` / `flatCatalogText` 语义变了**：配置里没有这个键，从"预算 0 → 一个都
+  不列"变成"全部列出"。仓库内调用点都传 resolve 后的配置，无实际影响；但这是 API 边界变化，已写进设计
+  文档 §12.11（不靠提交说明承载）。
+
 ---
 
 

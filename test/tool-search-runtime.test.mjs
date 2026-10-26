@@ -1088,7 +1088,7 @@ test('搜索工具：零命中回执是配方而非断言，且语言规则三�
   // ① 失败回执必须逐字引用同一个措辞（否则模型在同一件事上收到两种说法）；
   // ② 常驻的工具描述不得再抄一遍——description 与 parameters 在同一次请求里同时可见，
   //    复制一份就是每个请求白烧 token。
-  const rule = definition.parameters.properties.query.description.match(/Matching is literal[^.]*\./)?.[0]
+  const rule = definition.parameters.properties.query.description.match(/For keyword queries[^.]*\./)?.[0]
   assert.ok(rule !== undefined, 'query 参数里没有匹配规则')
   assert.ok(value.instruction.includes(rule), '失败回执与 query 参数措辞不一致')
   assert.equal(definition.description.includes(rule), false, '工具描述重复了 query 参数里的规则')

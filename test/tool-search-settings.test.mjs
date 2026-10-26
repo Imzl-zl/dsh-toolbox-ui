@@ -84,7 +84,8 @@ test('配置 schema：只认三个键，非法值与未知键当场报错', () =
 test('生效值：缺省跟随 DEFAULTS，maxDiscovered 的下限抬到 maxResults（同一条规则）', () => {
   assert.deepEqual(effectiveToolSearchSettings({}), {
     maxResults: DEFAULTS.maxResults,
-    maxCatalogChars: DEFAULTS.maxCatalogChars,
+    // 字面 undefined（不跟 DEFAULTS 比）：默认一旦被改回某个数字，这条要红，而不是跟着一起变。
+    maxCatalogChars: undefined,
     maxDiscovered: DEFAULTS.maxDiscovered,
   })
   // 规则不在本模块重抄：maxDiscovered 低于 maxResults 时按 runtime 的同一规则抬上去。
