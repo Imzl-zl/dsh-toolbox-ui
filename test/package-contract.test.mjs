@@ -29,7 +29,9 @@ const dshHostPackages = [
 // 窗口从原来的 `>=0.1.5-rc.1 <0.2.0` 上修——那条在 0.2.1 一发布就会被宿主判不兼容。
 const COMPAT_WINDOW = '>=0.2.0-rc.1 <0.3.0'
 // 开发基线跟随已验证的最新 RC；发布边界由 peer 窗口表达。
-const DEV_BASELINE = '^0.2.0-rc.2'
+// 精确钉（不带 ^）：pin 的语义就是"这一个版本"。`^0.2.1-rc.5` 会接受同 tuple 的后续
+// 预发布（实测 `^0.2.1-rc.5` 匹配 `0.2.1-rc.6`），只有 lockfile 兜着，重生成 lock 就会漂。
+const DEV_BASELINE = '0.2.1-rc.5'
 // 锁文件里解析出的具体版本。**从 DEV_BASELINE 推导**，不要另写一处：这里原本硬编码
 // /^0\.1\.5-rc\.2/，于是 bump 基线时就有了第二个真源。
 const DEV_BASELINE_VERSION = DEV_BASELINE.replace(/^[^0-9]*/, '')
@@ -38,16 +40,16 @@ const DEV_BASELINE_VERSION = DEV_BASELINE.replace(/^[^0-9]*/, '')
 // 两端都跑过全量，所以 peer 覆盖整段而不是钉死一端；上界只到 minor（<4.1.0）：
 // 私有面一动就要靠这道声明让宿主判不兼容，而不是静默错位。
 const CORDIS_PEER = '>=4.0.2 <4.1.0'
-// 开发基线仍是 0.2.0 宿主自带的那一代（~4.0.2）：peer 窗口说的是"能装哪些"，
+// dev 基线跟随已验证宿主（0.2.1-rc.5）自带的那一代（~4.0.5）：peer 窗口说的是"能装哪些"，
 // devDependencies 说的是"本地这套用例跑在哪个真实组合上"。两者不是一回事。
-const CORDIS_DEV_BASELINE = '~4.0.2'
+const CORDIS_DEV_BASELINE = '~4.0.5'
 // reveal 用 loader 的 interpolate 求值 `!!js` 节点；范围跟随 dsh 自身对它的要求。
 const CORDIS_LOADER_PEER = '^1.0.3'
 // 本地/CI 跑**哪一代** loader 是另一件事，与 peer 窗口分开：0.2.0 宿主自带 ~1.0.3，
 // 0.2.1 自带 ~1.0.6，而两代在「启动错误是否 rethrow」「dispose 会不会写回 include 树」
 // 上行为不同（守卫见 test/loader-compat.test.mjs）。dev 基线跟随已验证宿主的那一代；
 // peer 仍覆盖整段，不因本地跑哪一代而收窄。
-const CORDIS_LOADER_DEV_BASELINE = '^1.0.3'
+const CORDIS_LOADER_DEV_BASELINE = '~1.0.6'
 
 test('package exposes one Web bundle entry', () => {
   assert.equal(packageJson.dsh?.bundle?.patch, './cordis.patch.yml')
