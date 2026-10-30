@@ -43,6 +43,11 @@ const CORDIS_PEER = '>=4.0.2 <4.1.0'
 const CORDIS_DEV_BASELINE = '~4.0.2'
 // reveal 用 loader 的 interpolate 求值 `!!js` 节点；范围跟随 dsh 自身对它的要求。
 const CORDIS_LOADER_PEER = '^1.0.3'
+// 本地/CI 跑**哪一代** loader 是另一件事，与 peer 窗口分开：0.2.0 宿主自带 ~1.0.3，
+// 0.2.1 自带 ~1.0.6，而两代在「启动错误是否 rethrow」「dispose 会不会写回 include 树」
+// 上行为不同（守卫见 test/loader-compat.test.mjs）。dev 基线跟随已验证宿主的那一代；
+// peer 仍覆盖整段，不因本地跑哪一代而收窄。
+const CORDIS_LOADER_DEV_BASELINE = '^1.0.3'
 
 test('package exposes one Web bundle entry', () => {
   assert.equal(packageJson.dsh?.bundle?.patch, './cordis.patch.yml')
@@ -115,7 +120,7 @@ test('every host contract this plugin actually depends on is declared as a peer'
   // cordis-plugin-loader 不在 dsh-* 命名空间，peer 范围跟随 dsh 自身的要求：
   // reveal 用它把 `!!js` 节点求值成有效运行值。
   assert.equal(packageJson.peerDependencies?.['@deepseek-ai/cordis-plugin-loader'], CORDIS_LOADER_PEER)
-  assert.equal(packageJson.devDependencies?.['@deepseek-ai/cordis-plugin-loader'], CORDIS_LOADER_PEER)
+  assert.equal(packageJson.devDependencies?.['@deepseek-ai/cordis-plugin-loader'], CORDIS_LOADER_DEV_BASELINE)
 })
 
 test('lockfile resolves DSH host packages only as a development baseline on the latest RC', () => {
