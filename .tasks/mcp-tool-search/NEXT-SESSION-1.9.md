@@ -101,21 +101,38 @@ chrome-devtools 32 / jshook 360），三组对照：纯 BM25 / +L1 共现 / +手
 - **前置**：以"带 Q3 结论的 BM25"为基线测边际收益，否则等于自欺。
 - **卡点**：宿主**没有** embedding 服务（`packages/` 全仓只有两处无关的 "embedding" 字样）。
 
-### Q1 下一版宿主迁移（有时限，但**作者要求现在不动**：rc.4 还没发）
+### Q1 迁移到 0.2.2 线宿主（时限在 0.2.2，不在 0.2.1；**作者要求现在不动**）
 
-- 事实：rc.3 之后 `system-prompt/assemble` 不再携带 `tools`（改为 `PromptPresentation`），
-  声明权归 `systemPrompt.tools()` provider；新增 `register(def, { when })` 每步准入。
-  所以现在的装配期遮罩在下一版**会静默失效**（目录/引导/守卫还在，但工具不再被藏）。
+- **⚠️ 2026-10-30 按源码核对更正**：本节原先写"触发条件：rc.4 发布"，**是错的**——这条改动
+  只存在于 **0.2.2 线**。0.2.1 维护线在改动落地 8 天后（rc.5，10-29）仍为 0 命中，rc.4（10-26）
+  也已发完且不含，说明这条线不取 master 的特性提交。照旧写法等 rc.4，等的是一个不会到来的信号。
+- 事实：0.2.2 线把 `system-prompt/assemble` 的输入从 `PromptAssembly` 收窄成
+  `PromptPresentation`（只剩 `sections` / `contexts` / `variables`，**没有 `tools`**），
+  工具声明权归 `systemPrompt.tools()` provider；同时 `tools.register(definition)` 新增
+  第二个参数，`ToolRegistrationOptions.when` 做**每步准入**。
+  所以现在的装配期遮罩在 0.2.2 上**会静默失效**（目录/引导/守卫还在，但工具不再被藏）。
+- 版本事实（复核依据）：
+  - 改动来自 master 的 `9d0c97b9d2 feat(tools): admit conditional tools per step`（2026-10-21），
+    现含于 `0.2.2-alpha.2`（2026-10-28）。
+  - 0.2.1 线**一个都没有**：rc.3（10-23）/ rc.4（10-26）/ rc.5（10-29）里
+    `git grep -l PromptPresentation <tag> -- packages` 均为 **0 命中**；`assemble` 仍返回
+    `PromptAssembly`，其中 `tools: ToolSchema[]` 在位（`packages/core/system-prompt/src/index.ts:127`、
+    `:668`）；`tools.register(definition: ToolDefinition)` 仍只有一个参数。
+- 复核命令（换 tag 或 `master` 重跑）：
+  `git grep -l PromptPresentation <tag> -- packages`（0.2.1 线应为空）／
+  `git grep -n 'export interface PromptPresentation' master -- packages/core/system-prompt/src/index.ts`／
+  `git grep -n 'export interface ToolRegistrationOptions' master -- packages/core/tools/src/contracts.ts`。
 - 方案：项目族（本插件自己注册）用 `when`；全局族（宿主 mcp-client 注册）用 `restrict({deny})`。
 - **唯一取舍**：两者都让工具在 `executable()` 里消失 ⇒ 失去 guard 的"带指引拒绝"（退化成
   `UNKNOWN_TOOL`）。要保指引就只能继续做装配期遮罩。
-- 卡点：装机是 rc.3，`when` 在 rc.3 不存在，改完**没处验证**。触发条件：rc.4 发布。
+- 卡点：装机是 rc.3，`when` 在 0.2.1 全线（rc.3 / rc.4 / rc.5）都不存在，改完**没处验证**。
+  触发条件改为：**拿到 0.2.2 宿主包时**（不是任何 0.2.1 rc 的发版）。
 
 ---
 
 ## 3. 卡点汇总
 
-1. **Q1 无法验证**（装机 rc.3 无 `when`）。
+1. **Q1 无法验证**（装机 rc.3 无 `when`；0.2.1 全线 rc.3 / rc.4 / rc.5 都没有，见 Q1 的版本事实）。
 2. **没有真实 eval 集**：Q3/Q4 的收益目前全是估算。
 3. **宿主无 embedding 接口**：Q4 只能 BYO 端点，做不了开箱即用。
 

@@ -7,7 +7,7 @@ This document distinguishes between a regular install and a local development in
 
 ## Requirements
 
-- DeepSeek Harness `0.2.0-rc.1` or later (`0.2.0-rc.2`, `0.2.1-rc.2` and `0.2.1-rc.3` all run the full suite; the cordis 4.0.5 / loader 1.0.6 pair that ships with 0.2.1 is covered too)
+- DeepSeek Harness `0.2.0-rc.1` or later (`0.2.0-rc.2`, `0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.5` all run the full suite; the cordis 4.0.5 / loader 1.0.6 pair that ships with 0.2.1 is covered too)
 - An initialized `web` profile
 - Node.js and pnpm callable normally by DSH's plugin commands
 

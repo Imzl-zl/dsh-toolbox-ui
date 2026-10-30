@@ -139,7 +139,7 @@ When a newer version exists the panel shows a dismissible banner; pressing Upgra
 
 | Item | Verified |
 |---|---|
-| DeepSeek Harness | `0.2.0-rc.1` and above (`0.2.0-rc.2`, `0.2.1-rc.2` and `0.2.1-rc.3` all run the full suite; the cordis 4.0.5 / loader 1.0.6 pair that ships with 0.2.1 is covered too) |
+| DeepSeek Harness | `0.2.0-rc.1` and above (`0.2.0-rc.2`, `0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.5` all run the full suite; the cordis 4.0.5 / loader 1.0.6 pair that ships with 0.2.1 is covered too) |
 | Node.js | the runtime DSH ships with / supports |
 | Platform | Windows; Linux and macOS use the same DSH Web contract |
 
