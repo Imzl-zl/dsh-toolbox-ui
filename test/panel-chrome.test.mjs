@@ -23,8 +23,10 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import vm from 'node:vm'
+import { createHookRenderer } from './helpers/hook-renderer.mjs'
 
-const clientSource = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+// Source-shape contracts compare canonical newlines on Windows and Unix.
+const clientSource = (await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
 const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
@@ -41,10 +43,10 @@ function extractPanelCss(source) {
 const css = extractPanelCss(clientSource)
 
 // ── 假 React（与 detail-panes / skills-client 同一手法）────────────────────
-function loadClientInternals() {
+function loadClientInternals(hookRenderer = null) {
   const stores = new Map()
   let current = null
-  const react = {
+  const react = hookRenderer ?? {
     Fragment: Symbol('Fragment'),
     createElement(type, props, ...children) {
       const rest = props ?? {}
@@ -102,12 +104,12 @@ function loadClientInternals() {
     window: { __ModuleLoader__: { load(definition) { client = definition.factory(() => react) } } },
   })
   /** 跑掉挂起的首屏 useEffect，并让 async 的 setState 落地（否则断言在初始 state 上空转）。 */
-  const settle = async () => {
+  const settle = hookRenderer?.__settle ?? (async () => {
     for (const effect of react.__effects.splice(0)) {
       await effect()
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
-  }
+  })
   // 面板里的定时器只用来做轮询与 toast 超时；测试里给一个不落地的替身就够了。
   const timer = { timeout: () => () => {}, interval: () => () => {}, dispose() {} }
   return { ...client.__chrome, __render: react.__render, __settle: settle, timer }
@@ -181,7 +183,21 @@ test('作用域条在第二行里必须吃掉中间那一列的剩余宽度', ()
     '作用域条必须显式撑满第二行的中间列，否则会塌成一个省略号按钮')
 })
 
-// ═══ ③ 详情操作栏是槽位 ═════════════════════════════════════════════════════
+// ═══ ③ 能力层顺序与职责 ═══════════════════════════════════════════════════
+test('能力层按 MCP、技能、工具顺序渲染，工具页独立承载加载策略', () => {
+  const start = clientSource.indexOf('const ABILITY_TABS = [')
+  const end = clientSource.indexOf('];', start)
+  assert.ok(start > 0 && end > start, '找不到能力层定义')
+  const body = clientSource.slice(start, end)
+  const ids = [...body.matchAll(/id: '([^']+)'/g)].map((match) => match[1])
+  assert.deepEqual(ids, ['mcp', 'skills', 'tool-loading'])
+  assert.match(body, /id: 'tool-loading',[\s\S]*label: '工具'/)
+  assert.match(clientSource, /ability === 'tool-loading'/, '工具标签必须切换到独立工具页')
+  assert.match(clientSource, /onToggleDefer: toggleDeferOne/, 'MCP 页必须继续持有服务器延迟开关')
+  assert.match(clientSource, /deferAllAction/, 'MCP 页必须继续提供全部延迟动作')
+})
+
+// ═══ ④ 详情操作栏是槽位 ═════════════════════════════════════════════════════
 test('MCP 详情操作栏是 [主行为]+[次要行为]+[⋯ 更多] 三个槽位', () => {
   const internals = loadClientInternals()
   const server = { serverName: 'everything', managed: true, enabled: true, status: 'connected', transport: 'stdio', scope: 'global', toolCount: 3, env: {}, headers: {} }
@@ -299,6 +315,157 @@ test('失败横幅把首条原因画出来（挂载失败与工具无法隔离�
   const empty = ofType(emptyTree, bare.Notice).find((node) => node.props.key === 'mount-failed')
   assert.ok(empty, '挂载失败必须有横幅')
   assert.match(String(empty.props.children), /首个原因：（宿主没有给出原因）/)
+})
+
+test('切换到项目时立即作废旧作用域列表，不在请求途中显示全局数据', async (t) => {
+  const wsPath = '/tmp/ws-a'
+  for (const sourceScope of ['global', wsPath]) {
+    const targetScope = sourceScope === 'global' ? wsPath : 'global'
+    await t.test(sourceScope === 'global' ? '全局 → 空项目' : '项目 → 空全局', async (t) => {
+      const renderer = createHookRenderer()
+      const internals = loadClientInternals(renderer)
+      const globalRows = [{ serverName: 'global-exa', toolCount: 3, scope: 'global', managed: true }]
+      const workspaceRows = [{ serverName: 'project-db', toolCount: 2, scope: 'workspace', managed: true }]
+      const requests = []
+      const calls = []
+      const unexpectedCalls = []
+      const polls = new Set()
+      const pollHistory = []
+      const timer = {
+        interval(run) {
+          const poll = { run, disposed: false }
+          polls.add(poll)
+          pollHistory.push(poll)
+          return () => { assert.ok(polls.delete(poll), '轮询 cleanup 只能执行一次'); poll.disposed = true }
+        },
+        timeout() { assert.fail('该回归不应发起 toast 或延时刷新') },
+      }
+      const expectView = (scope, rows, revision) => {
+        let resolve
+        const promise = new Promise((done) => { resolve = done })
+        const request = {
+          method: scope === 'global' ? 'list' : 'getWorkspaceView',
+          wsPath: scope === 'global' ? undefined : scope,
+          started: false,
+          settled: false,
+          promise,
+          reply() {
+            assert.ok(request.started, '响应必须对应已发出的真实请求')
+            assert.equal(request.settled, false, '每个请求必须且只能完成一次')
+            request.settled = true
+            resolve({ ok: true, servers: rows, global: scope === 'global' ? [] : globalRows, exclude: [], revision, revealRevision: '' })
+          },
+        }
+        requests.push(request)
+        return request
+      }
+      const callMcp = (method, args) => {
+        calls.push({ method, args })
+        if (method === 'list' || method === 'getWorkspaceView') {
+          const request = requests.find((item) => !item.started)
+          if (request && request.method === method && request.wsPath === args?.wsPath) {
+            request.started = true
+            return request.promise
+          }
+        } else if (method === 'listWorkspaces') {
+          return Promise.resolve({ ok: true, workspaces: [{ path: wsPath, name: 'ws-a', serverCount: 0 }] })
+        } else if (method === 'updateHint') {
+          return Promise.resolve({ ok: true, updateAvailable: false })
+        } else if (method === 'tools') {
+          return Promise.resolve({ ok: true, tools: [{ name: args.name + '-tool' }] })
+        }
+        // 生产组件可能捕获 RPC 错误；另外记录并断言，让额外/错作用域调用仍然使测试失败。
+        unexpectedCalls.push({ method, args })
+        return Promise.reject(new Error(`unexpected MCP call: ${method} ${JSON.stringify(args)}`))
+      }
+      const skillsCalls = []
+      const props = {
+        call: callMcp,
+        callSkills: async (method) => { skillsCalls.push(method); return { ok: true, skills: [] } },
+        timer, pluginManager: null, floating: true, onClose() {},
+      }
+      const render = () => internals.__render(internals.McpTab, props)
+      const scopeTabs = (tree) => {
+        const tabs = collectAll(tree, (node) => Array.isArray(node?.props?.tabs) && node.props.tabs.some((tab) => tab.key === wsPath))[0]
+        assert.ok(tabs, '必须从实际渲染的作用域药丸切换')
+        return tabs
+      }
+      const assertView = (scope, rows) => {
+        assert.deepEqual(unexpectedCalls, [], '不得吞掉额外列表调用或发往旧作用域的请求')
+        const tree = render()
+        assert.equal(scopeTabs(tree).props.active, scope)
+        const body = scope === 'global' ? tree : byClass(tree, 'dsh-mcp-ws-body')[0]
+        assert.ok(body, '当前作用域的列表容器必须存在')
+        const lists = ofType(body, internals.ServerList)
+        assert.equal(lists.length, 1, '当前列表必须唯一，不能在空树上通过断言')
+        assert.deepEqual(Array.from(lists[0].props.servers, (row) => row.serverName), rows.map((row) => row.serverName))
+        assert.equal(lists[0].props.total, rows.length, '原始列表与过滤后的列表都属于当前作用域')
+        const details = ofType(tree, internals.ServerDetailPane)
+        assert.equal(details.length, 1)
+        assert.equal(details[0].props.server?.serverName ?? null, rows[0]?.serverName ?? null)
+        if (rows.length === 0) assert.equal(details[0].props.tools.length, 0, '旧作用域的工具详情必须清空')
+        return tree
+      }
+      const initial = expectView('global', globalRows, 'global-initial')
+      render()
+      t.after(() => {
+        renderer.__unmount(internals.McpTab)
+        assert.equal(polls.size, 0, '卸载时必须清理当前轮询 effect')
+      })
+      await internals.__settle()
+      assert.ok(initial.started, '必须先真实发出全局列表请求')
+      initial.reply()
+      await internals.__settle()
+      let loaded = assertView('global', globalRows)
+      if (sourceScope === wsPath) {
+        const project = expectView(wsPath, workspaceRows, 'workspace-initial')
+        scopeTabs(loaded).props.onSelect(wsPath)
+        await internals.__settle()
+        assert.ok(project.started)
+        project.reply()
+        await internals.__settle()
+        loaded = assertView(wsPath, workspaceRows)
+      }
+      assert.equal(polls.size, 1, '普通重渲染不得重建 load effect')
+      assert.equal(pollHistory.length, sourceScope === 'global' ? 1 : 2, 'effect 只在作用域依赖改变时重建')
+      const sourcePoll = [...polls][0]
+      const staleRows = [{ serverName: 'stale-' + (sourceScope === 'global' ? 'global' : 'project'), scope: sourceScope === 'global' ? 'global' : 'workspace' }]
+      const late = expectView(sourceScope, staleRows, 'stale-late')
+      sourcePoll.run()
+      const beforeEffects = expectView(sourceScope, staleRows, 'stale-before-effect')
+      sourcePoll.run()
+      assert.ok(late.started && beforeEffects.started, '两个旧作用域请求都必须真实发出')
+      const target = expectView(targetScope, [], 'target-empty')
+      scopeTabs(loaded).props.onSelect(targetScope)
+      assertView(targetScope, [])
+      assert.equal(target.started, false, '目标加载只由新的 scope effect 发起')
+
+      // 新 effect 尚未执行时，较新的旧响应已回来；必须由 switchScope 立即作废。
+      beforeEffects.reply()
+      await internals.__settle({ effects: false })
+      assertView(targetScope, [])
+      assert.equal(target.started, false, '不提前执行新 effect，才能检验切换时的立即失效')
+      await internals.__settle()
+      assert.ok(target.started, '新 effect 必须真实请求目标作用域')
+      assert.ok(sourcePoll.disposed, 'scope 改变时必须先清理旧轮询')
+      assert.equal(polls.size, 1, '不能累积旧作用域的轮询 callback')
+      assertView(targetScope, [])
+      target.reply()
+      await internals.__settle()
+      assertView(targetScope, [])
+
+      // 目标空列表已经加载，另一份旧响应随后抵达也不能回写列表/详情。
+      late.reply()
+      await internals.__settle()
+      assertView(targetScope, [])
+      assert.ok(requests.every((request) => request.started && request.settled), '所有列表请求都必须发出并完成，不能遗留永久 pending')
+      assert.deepEqual(calls.filter(({ method }) => method === 'list' || method === 'getWorkspaceView').map(({ method, args }) => ({ method, wsPath: args?.wsPath })),
+        requests.map(({ method, wsPath }) => ({ method, wsPath })), '真实调用顺序必须与双向加载场景完全一致')
+      assert.equal(calls.filter(({ method }) => method === 'listWorkspaces').length, requests.length)
+      assert.equal(calls.filter(({ method }) => method === 'updateHint').length, 1, '无依赖变化的首屏 effect 不得重跑')
+      assert.deepEqual(skillsCalls, ['list'], 'skills 探测 effect 不应随 MCP scope 重跑')
+    })
+  }
 })
 
 test('能力层计数：技能数由面板回传（skills + disabled 之和），MCP 面不显示数字', async () => {
@@ -555,7 +722,8 @@ test('安装目标只列可写位置，且默认不是只读的内置目录', ()
   // 接线：弹窗与确认安装都只吃这份可写清单。
   assert.match(clientSource, /const installTargets = scopeOptions\.filter\(\(option\) => option\.writable !== false\)/)
   assert.match(clientSource, /scopeOptions: installTargets/)
-  assert.match(clientSource, /setScope\(installTargets\[0\]\?\.id \|\| ''\)/)
+  assert.match(clientSource, /const installTarget = installTargets\.find\(\(option\) => option\.id === scope\) \|\| installTargets\[0\]/)
+  assert.match(clientSource, /setScope\(installTarget\?\.id \|\| ''\)/, '保留已选可写目标，缺省才取首项')
 })
 
 test('安装目标优先用宿主报的全部位置，老宿主退回发现集', () => {
@@ -640,8 +808,9 @@ test('外部源（skillhub.cn）：安装走同一套落点，但闸门换成披
   assert.match(clientSource, /source: option\.source,/)
   assert.match(clientSource, /projectPath: option\.projectPath,/)
   assert.match(clientSource, /acknowledged: true,/, '确认必须上 wire，不能只留在客户端')
-  assert.match(clientSource, /installTargets\.find\(\(item\) => item\.id === scope\)/,
+  assert.match(clientSource, /installTargets\.find\(\(option\) => option\.id === scope\)/,
     '落点必须按安装目标身份解析，不能按 source 取首个')
+  assert.match(clientSource, /const option = installTarget \|\| \{\}/, '摘要、默认选择与实际写入消费同一目标')
   // 市场只剩 skillhub.cn 一条来源，所以安装只走 skillHubInstall，不存在第二条「假装能装」的路。
   // 原来这里钉的是「内置精选不得出现 type:'market'」——那条路已经整条删掉了（没有可固定的
   // commit，抓默认分支不可复现），现在钉的是**不再有任何别的安装入口**。

@@ -16,8 +16,11 @@ import {
   ToolSearchConfigSchema,
   effectiveToolSearchSettings,
   normalizeToolSearchSettings,
+  readToolLoadingPolicy,
+  readToolLoadingPolicyFromPatch,
   readToolSearchSettings,
   readToolSearchSettingsFromPatch,
+  setToolLoadingPolicyInPatch,
   setToolSearchSettingsInPatch,
 } from '../lib/tool-search-settings.js'
 
@@ -77,6 +80,16 @@ test('配置 schema：只认三个键，非法值与未知键当场报错', () =
   }
   // 拼错的外层键同样报错（否则用户以为配上了）。
   assert.ok(validate({ toolsearch: { maxResults: 20 } }).issues?.length > 0)
+})
+
+test('配置 schema：接受统一加载策略，且与 toolSearch 各自严格', () => {
+  assert.equal(validate({ toolLoading: { mode: 'recommended' } }).issues, undefined)
+  assert.equal(validate({ toolLoading: { mode: 'all-resident', groups: { a: 'resident' } } }).issues, undefined)
+  // legacy 不可写：回到既有行为用删键表达。
+  assert.ok(validate({ toolLoading: { mode: 'legacy' } }).issues)
+  assert.ok(validate({ toolLoading: { mode: 'recommended', tool: {} } }).issues, '未知键必须报错')
+  // 读侧宽容：坏值按"没配"处理，面板不会因此打不开。
+  assert.deepEqual(readToolLoadingPolicy({ toolLoading: { mode: 'bogus' } }), { mode: 'legacy', groups: {}, tools: {} })
 })
 
 // ── ② 缺省值与派生规则 ────────────────────────────────────────────────
@@ -149,6 +162,26 @@ test('写 patch：值回到默认时把键删掉，config 空了就连 config �
   assert.match(back, /serverName: fs/)
 })
 
+test('写 patch：统一加载策略写进 config.toolLoading，且与 toolSearch 互不干扰', () => {
+  const withSearch = setToolSearchSettingsInPatch(PATCH, { maxResults: 20 }, { name: PLUGIN })
+  const policy = { mode: 'recommended', groups: { jshook: 'resident' }, tools: { 'mcp__jshook__a': 'deferred' } }
+  const written = setToolLoadingPolicyInPatch(withSearch, policy, { name: PLUGIN })
+  assert.deepEqual(readToolLoadingPolicyFromPatch(written, { name: PLUGIN }), policy)
+  assert.doesNotMatch(written, /manageBuiltin/, '已删除的死字段不得再被写入')
+  assert.deepEqual(readToolSearchSettingsFromPatch(written, { name: PLUGIN }), { maxResults: 20 }, '改策略不得动 toolSearch')
+  assert.match(written, /serverName: fs/, '别的条目原样')
+
+  // 回到既有行为 = 删键，不写 `mode: legacy`。
+  const back = setToolLoadingPolicyInPatch(written, null, { name: PLUGIN })
+  assert.deepEqual(readToolLoadingPolicyFromPatch(back, { name: PLUGIN }), { mode: 'legacy', groups: {}, tools: {} })
+  assert.doesNotMatch(back, /toolLoading/)
+  assert.match(back, /toolSearch:/, 'toolSearch 仍在')
+
+  // 非法值绝不落盘。
+  assert.throws(() => setToolLoadingPolicyInPatch(withSearch, { mode: 'nope' }, { name: PLUGIN }), /mode/)
+  assert.throws(() => setToolLoadingPolicyInPatch(withSearch, { mode: 'recommended', tools: { a: 'sometimes' } }, { name: PLUGIN }), /tools\.a/)
+})
+
 test('写 patch：条目里本来就有别的 config 键时只动 toolSearch', () => {
   const withOther = PATCH.replace(`    name: ${PLUGIN}`, `    name: ${PLUGIN}\n    config:\n      someOther: 1`)
   const written = setToolSearchSettingsInPatch(withOther, { maxResults: 20 }, { name: PLUGIN })
@@ -214,3 +247,4 @@ test('写 patch：非法值不落盘（先校验再动 YAML）', () => {
 test('配置键名是稳定的：toolSearch（面板与文档都引用它）', () => {
   assert.equal(TOOL_SEARCH_CONFIG_KEY, 'toolSearch')
 })
+

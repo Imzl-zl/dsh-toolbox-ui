@@ -1,199 +1,53 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import { Context, Service } from '@deepseek-ai/cordis'
-import Loader, { EntryTree } from '@deepseek-ai/cordis-plugin-loader'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { DEFAULTS } from '../lib/tool-search-runtime.js'
 import { readToolSearchSettingsFromPatch } from '../lib/tool-search-settings.js'
 import { readManagedMcpServers } from '../lib/mcp-config.js'
+import {
+  createLoaderHost,
+  FIXTURE_SERVER,
+  FIXTURE_SERVER_ENV_PROBE,
+  MCP_NAME,
+  TEST_TIMEOUT_MS,
+  waitFor,
+} from './helpers/loader-host.mjs'
 
-// 这一组用例打的是 **O1 的生产形状**：真 cordis Context + 真 Loader（带 include 子树）
-// + 真 ToolRuntime + 真 mcp-client 连**真 stdio 子进程**。
+// 这一组用例打的是 **O1 的生产形状**：真 cordis Context + 真 Loader + **官方 mountRootInclude**
+// 挂的根 Include + 真 ToolRuntime + 真 mcp-client 连**真 stdio 子进程**。
 //
-// 为什么不能用手写夹具：add / removeServer / installBuiltins 的契约全在 loader 内部
-// （`loader.create` 的根部 vs 子树、`loader.remove` 的 fiber 销毁、mcp-client 的
-// serverName 注册表与子进程生命周期）。桩上给 loader 补一个 create/remove 只能证明
-// "插件调用了它"——连没连上、子进程退没退，桩上一律看不见。前两轮用真金白银换来的教训
-// 就在 docs/mcp-tool-search-design.md §12.1：夹具全绿、真宿主炸。
-const TEST_TIMEOUT_MS = 60_000
-const WAIT_MS = 20_000
-const MCP_NAME = '@deepseek-ai/dsh-mcp-client'
+// 为什么不能用手写夹具：条目的生命周期契约（谁建、谁删、删除时宿主的卸载钩子会写什么）
+// 全在 loader 与 include 内部，桩上给 loader 补一个 create/remove 只能证明"插件调用了它"。
+// 前两轮用真金白银换来的教训就在 docs/mcp-tool-search-design.md §12.1：夹具全绿、真宿主炸。
 
-// 最小 MCP stdio 服务（抄 test/real-host-integration.test.mjs 的 FIXTURE_SERVER）：
-// 握手 + tools/list + tools/call，退出时落哨兵文件，用来断言子进程真的退了。
-const FIXTURE_SERVER = `
-import { writeFileSync } from 'node:fs'
-const sentinel = process.argv[2]
-process.stdin.setEncoding('utf8')
-let buf = ''
-const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n')
-process.stdin.on('end', () => process.exit(0))
-process.on('exit', () => { try { writeFileSync(sentinel, 'bye') } catch {} })
-process.stdin.on('data', (chunk) => {
-  buf += chunk
-  let index
-  while ((index = buf.indexOf('\\n')) >= 0) {
-    const line = buf.slice(0, index)
-    buf = buf.slice(index + 1)
-    if (!line.trim()) continue
-    const message = JSON.parse(line)
-    if (message.method === 'initialize') {
-      send({ jsonrpc: '2.0', id: message.id, result: {
-        protocolVersion: message.params.protocolVersion,
-        capabilities: { tools: {} },
-        serverInfo: { name: 'fixture', version: '1.0.0' },
-      } })
-    } else if (message.method === 'tools/list') {
-      send({ jsonrpc: '2.0', id: message.id, result: { tools: [{
-        name: 'echo',
-        description: 'Echo the given text back.',
-        inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
-      }] } })
-    } else if (message.method === 'tools/call') {
-      send({ jsonrpc: '2.0', id: message.id, result: {
-        content: [{ type: 'text', text: 'echo:' + String(message.params.arguments?.text ?? '') }],
-      } })
-    } else if (message.id !== undefined) {
-      send({ jsonrpc: '2.0', id: message.id, result: {} })
-    }
-  }
-})
-`
-
-// 记录启动时环境变量的夹具：用来断言 `!!js` 表达式被求值成真值，而不是把字面量透给子进程。
-const FIXTURE_SERVER_ENV_PROBE = `
-import { writeFileSync } from 'node:fs'
-const sentinel = process.argv[2]
-const dump = process.argv[3]
-writeFileSync(dump, 'MARKER=' + String(process.env.MARKER))
-process.stdin.setEncoding('utf8')
-let buf = ''
-const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n')
-process.stdin.on('end', () => process.exit(0))
-process.stdin.on('data', (chunk) => {
-  buf += chunk
-  let index
-  while ((index = buf.indexOf('\\n')) >= 0) {
-    const line = buf.slice(0, index)
-    buf = buf.slice(index + 1)
-    if (!line.trim()) continue
-    const message = JSON.parse(line)
-    if (message.method === 'initialize') {
-      send({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1.0.0' } } })
-    } else if (message.method === 'tools/list') {
-      send({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'echo', description: 'Echo.', inputSchema: { type: 'object', properties: {} } }] } })
-    } else if (message.id !== undefined) {
-      send({ jsonrpc: '2.0', id: message.id, result: {} })
-    }
-  }
-})
-`
-
-/**
- * 最小 include 子树：`EntryTree` 子类，`[Service.init]` 里把固定条目列表物化进去。
- *
- * 这就是生产形状的那一半——profile patch 里的 mcp 条目不是 loader 根部的直接子项，
- * 而是 include 子树物化出来的（`profileMcpEntries()` 读的正是 `include.subtree.entries()`）。
- * `write()` 是 no-op：我们**不**实现持久化，因为根部创建不该写回任何配置文件（见下）。
- *
- * 零新依赖：`EntryTree` 由已安装的 `@deepseek-ai/cordis-plugin-loader` 导出。
- */
-class IncludeTree extends EntryTree {
-  constructor(ctx, config) {
-    super(ctx)
-    this.config = config
-  }
-  write() {}
-  async *[Service.init]() {
-    yield () => this.root.stop()
-    await this.root.update(this.config.entries ?? [])
-  }
-}
-
-async function waitFor(predicate, timeoutMs = WAIT_MS) {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const value = await predicate()
-    if (value) return value
-    if (Date.now() > deadline) return undefined
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
-}
-
-/**
- * 起一个真宿主：真 Loader（`builtins.include` 指向最小 IncludeTree）+ 真 ToolRuntime。
- * @param patchBody - 写进 cordis.patch.yml 的初始内容（插件只认这个文件）。
- * @param subtreeEntries - include 子树要物化的条目（生产里就是 patch 里的 mcp 条目）。
- */
-async function createLoaderHost(patchBody, subtreeEntries = []) {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-o1-loader-'))
-  const patch = join(root, 'cordis.patch.yml')
-  const baseConfig = join(root, 'cordis.yml')
-  await writeFile(patch, patchBody)
-  await writeFile(baseConfig, '[]\n')
-  const ctx = new Context()
-  await ctx.plugin(Loader)
-  ctx.loader.builtins.include = IncludeTree
-  ctx.provide('systemPrompt', { tools: () => {}, section: () => {}, getSectionOrder: () => 0 })
-  await ctx.plugin(ToolRuntime)
-  const tools = ctx.get('tools')
-  if (!tools) throw new Error('ToolRuntime 未激活')
-  await ctx.loader.create({
-    id: 'include',
-    name: 'cordis:include',
-    config: { path: pathToFileURL(patch).href, entries: subtreeEntries },
-  })
-  const { McpManagerGateway } = await import('../lib/index.js')
-  await ctx.plugin(McpManagerGateway, {})
-  return {
-    ctx,
-    tools,
-    manager: ctx.get('mcpManager'),
-    patch,
-    root,
-    entries: () => [...ctx.loader.entries()],
-    toolNames: () => tools.schemas().map((schema) => schema.name),
-    async cleanup() {
-      await ctx.fiber.dispose()
-      await rm(root, { recursive: true, force: true })
-    },
-  }
-}
-
-const stdioEntry = (id, serverName, args) => ({
-  id,
-  name: MCP_NAME,
-  config: { transport: 'stdio', serverName, command: process.execPath, args },
-})
-
-test('real loader host: add() creates a live root entry, so the new server connects without a host restart', { timeout: TEST_TIMEOUT_MS }, async () => {
+test('real loader host: add() applies the new row through the profile composition, so the server connects without a host restart', { timeout: TEST_TIMEOUT_MS }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-o1-add-'))
   const server = join(root, 'fixture-server.mjs')
   const sentinel = join(root, 'beta-exited')
   await writeFile(server, FIXTURE_SERVER)
-  // 开局：patch 里只有 fixture 一台，include 子树物化它（= 生产形状）。
+  // 开局：patch 里只有 fixture 一台，根 Include 按 profile 组合把它挂起来（= 生产形状）。
   const host = await createLoaderHost(
     `- insert:\n    - id: mcp-fixture\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: fixture\n        command: ${process.execPath}\n        args: [ '${server}', '${join(root, 'fixture-exited')}' ]\n`,
-    [stdioEntry('mcp-fixture', 'fixture', [server, join(root, 'fixture-exited')])],
   )
   try {
     const connected = await waitFor(() => host.toolNames().includes('mcp__fixture__echo'))
-    assert.ok(connected, '前置条件：include 子树里的条目必须真的连上')
+    assert.ok(connected, '前置条件：patch 行里的条目必须真的连上')
 
     const result = await host.manager.add({ name: 'beta', transport: 'stdio', command: process.execPath, args: [server, sentinel] })
+    // 结构化结果：盘上与运行中**同一事实**，两半都要如实报。
+    assert.equal(result.persisted, 'applied', 'add 必须报"盘上已写"')
+    assert.equal(result.live, 'applied', 'add 必须报"运行中已生效"（not skipped/failed）')
     assert.match(result.note, /开始连接/)
     assert.doesNotMatch(result.note, /重启后生效/, '连上了就不该再让用户重启')
 
-    // 1. loader 里真有条目，而且是**根部**创建的（不走 include 子树）。
+    // 1. 组合应用之后条目在 loader 里，且 id 与 patch 行一致（resolveManagedEntry 靠它认人）。
     const created = host.entries().filter((entry) => entry.options.config?.serverName === 'beta')
-    assert.equal(created.length, 1, 'add 必须在 loader 里创建条目')
+    assert.equal(created.length, 1, 'add 必须让条目真的进 loader')
     assert.equal(created[0].options.id, 'mcp-beta', '条目 id 必须与 patch 行一致（resolveManagedEntry 靠它认人）')
-    assert.equal(created[0].parent, host.ctx.loader.root, '必须在根部创建：include 子树的 create 会写回 base 配置文件')
 
     // 2. 工具真的进了活视图（不需要重启进程）。
     assert.ok(
@@ -203,29 +57,45 @@ test('real loader host: add() creates a live root entry, so the new server conne
 
     // 3. 面板必须把它认成"自己管的、连上了"——否则用户既不能改也不能卸。
     const row = (await host.manager.list()).servers.find((server) => server.serverName === 'beta')
-    assert.equal(row.managed, true, '根部条目不得被划成 external（managedIds 逃生门要兜住）')
+    assert.equal(row.managed, true, 'patch 行里的条目不得被划成 external')
     assert.equal(row.phase, 'connected')
     assert.equal(row.toolCount, 1)
 
-    // 4. 配置文件只有一个 beta 行：根部 create 不得把 patch 条目烙进 base 配置再 insert 一遍。
+    // 4. 只有一份配置行，而且 **base 配置一个字节都不该动**：reconcile 走的是 include 的
+    //    patch 层，不是把已应用树写回 cordis.yml（那会造成下次启动 base 一份 + insert 一份）。
     assert.equal((await readFile(host.patch, 'utf8').then((text) => text.match(/serverName: beta/g) || [])).length, 1)
+    assert.equal(await readFile(host.baseConfig, 'utf8'), '[]\n', '应用 patch 不得把行烙进 base 配置')
   } finally {
     await host.cleanup()
     await rm(root, { recursive: true, force: true })
   }
 })
 
-test('real loader host: a root create never writes back to the profile patch', { timeout: TEST_TIMEOUT_MS }, async () => {
+test('real loader host: patch 行由 profile 组合挂载，base 配置全程不被写回', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 这条守的是 rc.5（loader 1.0.6）的一个真实陷阱：插件卸载时 `entry.parent.tree.write()`
+  // 对 include 子树条目就是 `Include.write()`，写的是**已应用树**（base + patch 行）。于是
+  // "删一台服务器"可能把兄弟服务器的 patch 行烙进 base 配置，下次启动重复插入。
+  // 断言方向：任何一次行变更之后，base 都还是原样。
   const root = await mkdtemp(join(tmpdir(), 'dsh-o1-rootwrite-'))
   const server = join(root, 'fixture-server.mjs')
   await writeFile(server, FIXTURE_SERVER)
-  const host = await createLoaderHost('[]\n', [])
+  const host = await createLoaderHost(
+    `- insert:\n    - id: mcp-fixture\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: fixture\n        command: ${process.execPath}\n        args: [ '${server}', '${join(root, 'fixture-exited')}' ]\n`,
+  )
   try {
-    const before = await readFile(host.patch, 'utf8')
-    await host.ctx.loader.create(stdioEntry('mcp-extra', 'extra', [server, join(root, 'extra-exited')]))
+    assert.ok(await waitFor(() => host.toolNames().includes('mcp__fixture__echo')), '前置条件：条目必须真的连上')
+    assert.equal(await readFile(host.baseConfig, 'utf8'), '[]\n')
+
+    await host.manager.setDisabled('fixture', true)
+    assert.equal(await readFile(host.baseConfig, 'utf8'), '[]\n', '禁用不得写回 base 配置')
+    await host.manager.setDisabled('fixture', false)
+    assert.equal(await readFile(host.baseConfig, 'utf8'), '[]\n', '启用不得写回 base 配置')
+    await host.manager.add({ name: 'extra', transport: 'stdio', command: process.execPath, args: [server, join(root, 'extra-exited')] })
     await new Promise((resolve) => setTimeout(resolve, 300))
-    assert.equal(await readFile(host.patch, 'utf8'), before, '根部 create 必须一个字节都不改 patch（Loader.write() 是 no-op）')
-    assert.equal(await readFile(join(host.root, 'cordis.yml'), 'utf8'), '[]\n', '根部 create 也不得碰 base 配置')
+    assert.equal(await readFile(host.baseConfig, 'utf8'), '[]\n', '新增不得写回 base 配置')
+    await host.manager.removeServer('extra')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    assert.equal(await readFile(host.baseConfig, 'utf8'), '[]\n', '移除不得把其余 patch 行烙进 base 配置')
   } finally {
     await host.cleanup()
     await rm(root, { recursive: true, force: true })
@@ -239,7 +109,6 @@ test('real loader host: removeServer() stops the live entry and its stdio subpro
   await writeFile(server, FIXTURE_SERVER)
   const host = await createLoaderHost(
     `- insert:\n    - id: mcp-fixture\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: fixture\n        command: ${process.execPath}\n        args: [ '${server}', '${sentinel}' ]\n`,
-    [stdioEntry('mcp-fixture', 'fixture', [server, sentinel])],
   )
   try {
     assert.ok(await waitFor(() => host.toolNames().includes('mcp__fixture__echo')), '前置条件：条目必须真的连上')
@@ -264,7 +133,7 @@ test('real loader host: add() rolls the patch back when the loader entry fails t
   // （dsh-mcp-client/lib/index.js：`if (outcome.error !== void 0 && config.failOnStartupError) throw`）。
   // 用一个真存在的二进制（node）而不是不存在的路径：后者在 Windows 上会让 cmd.exe
   // 往测试输出里喷一行 "is not recognized"，而这里要的只是"连接建立不起来"。
-  const host = await createLoaderHost('[]\n', [])
+  const host = await createLoaderHost('[]\n')
   try {
     const before = await readFile(host.patch, 'utf8')
     await assert.rejects(
@@ -294,20 +163,28 @@ test('real loader host: env expressions are evaluated for the live entry, not pa
   const server = join(root, 'fixture-server.mjs')
   const dump = join(root, 'env-dump.txt')
   await writeFile(server, FIXTURE_SERVER_ENV_PROBE)
-  const host = await createLoaderHost('[]\n', [])
+  // 环境变量表达式是**生产契约**（`${VAR}` 必须求值，不能原样透传给子进程）。期望值必须来自
+  // 进程环境本身，而不是复述实现或依赖某台机器恰好有 HOME：
+  // 旧写法用 `${HOME}` + `process.env.HOME.replace(...)`，在 Windows 上 HOME 未定义，
+  // 断言先炸在测试自己身上——那是环境依赖，不是被测行为。这里用测试专有的随机变量：
+  // 值由本进程环境给（边界输入），子进程 dump 出来（真实结果），随机串让"原样透传"无从蒙对。
+  const marker = randomUUID()
+  process.env.DSH_TEST_ENV_MARKER = marker
+  const host = await createLoaderHost('[]\n')
   try {
-    // `${HOME}` 经 normalizeMcpImport 变成内部 `!!js (process.env.HOME ?? "")`。
+    // 归一化把 `${VAR}` 变成内部 `!!js (process.env.VAR ?? "")`。
     await host.manager.add({
       name: 'withenv',
       transport: 'stdio',
       command: process.execPath,
       args: [server, join(root, 'unused'), dump],
-      env: { MARKER: '${HOME}' },
+      env: { MARKER: '${DSH_TEST_ENV_MARKER}' },
     })
     assert.ok(await waitFor(() => existsSync(dump)), '新服务器必须真的连上')
-    assert.match(await readFile(dump, 'utf8'), new RegExp(`MARKER=${process.env.HOME.replace(/\\/g, '\\\\')}`),
+    assert.match(await readFile(dump, 'utf8'), new RegExp(`MARKER=${marker}`),
       'env 表达式必须被求值：loader 只对 { __jsExpr } 求值，raw 字符串原样透传给子进程')
   } finally {
+    delete process.env.DSH_TEST_ENV_MARKER
     await host.cleanup()
     await rm(root, { recursive: true, force: true })
   }
@@ -315,17 +192,20 @@ test('real loader host: env expressions are evaluated for the live entry, not pa
 
 test('real loader host: installBuiltins() appends live loader entries for the selected builtins', { timeout: TEST_TIMEOUT_MS }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-o1-builtins-'))
-  const host = await createLoaderHost('[]\n', [])
+  const host = await createLoaderHost('[]\n')
   try {
     const result = await host.manager.installBuiltins({ ids: ['exa'] })
     assert.deepEqual(result.added, ['exa'])
+    assert.equal(result.live, 'applied', '内置条目必须由组合真的挂起来（不是只写盘）')
     assert.match(result.note, /开始连接/)
 
     // 追加的条目必须真的进 loader（旧行为只写盘，点完"安装"连不上也没工具）。
     const created = host.entries().filter((entry) => entry.options.config?.serverName === 'exa')
     assert.equal(created.length, 1, 'installBuiltins 必须在 loader 里创建条目')
     assert.equal(created[0].options.id, 'mcp-exa', '条目 id 必须与 patch 行一致')
-    assert.equal(created[0].parent, host.ctx.loader.root, '同样走根部创建')
+    // 行的归属由 profile 组合决定（include 子树），插件不再自己在 loader 根部造条目。
+    const includeTree = host.ctx.loader.resolve('include').subtree
+    assert.ok([...includeTree.entries()].includes(created[0]), '条目必须由 include 组合持有（不是插件手搭的根条目）')
     assert.equal(created[0].options.config.url, 'https://mcp.exa.ai/mcp')
 
     // 连接本身不在这里断言（要打真实网络）：连什么、怎么连由 add 那条用例的真夹具覆盖，
@@ -366,10 +246,7 @@ test('real loader host: 单台延迟开关只改那一台，并同步内存活�
     '      defer: true',
     '',
   ].join('\n')
-  const host = await createLoaderHost(patchBody, [
-    stdioEntry('mcp-alpha', 'alpha', [server, join(root, 'alpha-exited')]),
-    { ...stdioEntry('mcp-beta', 'beta', [server, join(root, 'beta-exited')]), config: { ...stdioEntry('mcp-beta', 'beta', [server, join(root, 'beta-exited')]).config, defer: true } },
-  ])
+  const host = await createLoaderHost(patchBody)
   try {
     await waitFor(() => host.toolNames().includes('mcp__beta__echo'))
     const deferOf = async (name) => (await host.manager.list()).servers.find((row) => row.serverName === name)?.defer
@@ -415,7 +292,7 @@ test('real loader host: 插件按 bundle 安装（patch 里没有自己的条目
     '    welcomeNoticeVersion: 2026-09-28.1',
     '',
   ].join('\n')
-  const host = await createLoaderHost(patchBody, [])
+  const host = await createLoaderHost(patchBody)
   try {
     const registered = () => host.tools.schemas().find((schema) => schema.name === 'tool_search')
     assert.match(registered().parameters.properties.max_results.description, /\(1-10\)/)
@@ -444,7 +321,60 @@ test('real loader host: 插件按 bundle 安装（patch 里没有自己的条目
 // 完全取决于真实 loader 的形状——patch 文件不会被热加载，所以"只写盘"等于改了没反应。
 // 夹具里给一个假 loader 只能证明"插件调用了写盘函数"，那正是设计文档 §12.1 记过的坑。
 // 这一条覆盖的是**手写 insert 条目**的形态（条目就在用户 patch 里）。
+// 变更型 RPC 的共同结果契约：写盘事实与运行中事实分开报。面板据此显示"已保存但未生效"，
+// 所以这组字段不是装饰——缺一个就分不清"写了没生效"与"根本没写"。
+// 这里逐个真调（真 loader + 真 mcp-client），断言在**真实返回形状**上，而不是 describe 一份文档。
+test('每个变更型 RPC 都返回 persisted / live / diagnostics', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-o1-results-'))
+  const server = join(root, 'fixture-server.mjs')
+  const sentinel = join(root, 'a-exited')
+  await writeFile(server, FIXTURE_SERVER)
+  const host = await createLoaderHost(
+    `- insert:\n    - id: mcp-a\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: a\n        command: ${process.execPath}\n        args: [ '${server}', '${sentinel}' ]\n`,
+  )
+  const assertResult = (label, result) => {
+    assert.ok(['applied', 'unchanged', 'rolled-back', 'failed'].includes(result.persisted), `${label}.persisted=${result.persisted}`)
+    assert.ok(['applied', 'unchanged', 'skipped', 'failed'].includes(result.live), `${label}.live=${result.live}`)
+    assert.ok(Array.isArray(result.diagnostics), `${label}.diagnostics 必须是数组`)
+    for (const entry of result.diagnostics) {
+      assert.equal(typeof entry.code, 'string', `${label} 的诊断必须带 code`)
+      assert.equal(typeof entry.message, 'string', `${label} 的诊断必须带 message`)
+    }
+    // note 是可选的人类文案（读类字段不需要）；三字段才是契约。
+  }
+  try {
+    assert.ok(await waitFor(() => host.toolNames().includes('mcp__a__echo')), '前置条件：行必须真的连上')
+    assertResult('add', await host.manager.add({ name: 'b', transport: 'stdio', command: process.execPath, args: [server, join(root, 'b-exited')] }))
+    assertResult('disable', await host.manager.disable('b'))
+    assertResult('enable', await host.manager.enable('b'))
+    assertResult('update', await host.manager.update({ name: 'b', transport: 'stdio', command: process.execPath, args: [server, join(root, 'b-exited')], directTools: true }))
+    assertResult('setDefer', await host.manager.setDefer({ name: 'b', defer: true }))
+    assertResult('setDeferAll', await host.manager.setDeferAll({ defer: false }))
+    assertResult('reconnect', await host.manager.reconnect('b'))
+    assertResult('importJson', await host.manager.importJson({ mode: 'merge', json: { mcpServers: {} } }))
+    assertResult('updateToolSearchSettings', await host.manager.updateToolSearchSettings({ settings: { maxResults: 12 } }))
+    // 同一份值再存一次：盘上不该再写（persisted=unchanged），运行值已经等于目标（live=unchanged）。
+    // 这条比"字段齐全"更硬：它钉住的是这两个字段的**语义**，而不只是形状。
+    const repeatSettings = await host.manager.updateToolSearchSettings({ settings: { maxResults: 12 } })
+    assert.equal(repeatSettings.persisted, 'unchanged', '内容没变的保存不得再写一次盘')
+    assert.equal(repeatSettings.live, 'unchanged', '运行值已等于目标时必须报 unchanged，而不是 applied')
+    assertResult('updateToolLoadingSettings', await host.manager.updateToolLoadingSettings({ policy: { tools: { read: 'deferred' } } }))
+    const repeatPolicy = await host.manager.updateToolLoadingSettings({ policy: { tools: { read: 'deferred' } } })
+    assert.equal(repeatPolicy.live, 'unchanged', '策略没变的保存同样不得报"已生效"')
+    assertResult('removeServer', await host.manager.removeServer('b'))
+  } finally {
+    await host.cleanup()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('real loader host: 面板改延迟参数 → 写进 plugin patch 并当场重装运行时（不重启）', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 行必须连**真**夹具服务器：只写 `command: node` 时子进程会把 MCP 的 stdin 当脚本读，
+  // 于是它既不握手也不退出——rc.1 的 mcp-client 在 dispose 时会等子进程收尾，测试就在
+  // cleanup 上卡到超时（rc.5 那边恰好提前失败，所以没暴露）。夹具必须是能握手的进程。
+  const root = await mkdtemp(join(tmpdir(), 'dsh-o1-settings-'))
+  const server = join(root, 'fixture-server.mjs')
+  await writeFile(server, FIXTURE_SERVER)
   const patchBody = [
     '# profile patch：注释必须原样保留',
     '- insert:',
@@ -455,10 +385,11 @@ test('real loader host: 面板改延迟参数 → 写进 plugin patch 并当场�
     '    config:',
     '      transport: stdio',
     '      serverName: fs',
-    '      command: node',
+    `      command: ${process.execPath}`,
+    `      args: [ '${server}', '${join(root, 'fs-exited')}' ]`,
     '',
   ].join('\n')
-  const host = await createLoaderHost(patchBody, [])
+  const host = await createLoaderHost(patchBody)
   try {
     const DEFAULT_SETTINGS = {
       maxResults: DEFAULTS.maxResults,
@@ -503,6 +434,93 @@ test('real loader host: 面板改延迟参数 → 写进 plugin patch 并当场�
     const before = await readFile(host.patch, 'utf8')
     await assert.rejects(host.manager.updateToolSearchSettings({ settings: { maxResults: 0 } }), /maxResults/)
     assert.equal(await readFile(host.patch, 'utf8'), before, '非法值不得写进配置')
+  } finally {
+    await host.cleanup()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('real loader host: 工具加载面板读到的是真实工具与理由（不是空列表）', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 面板读的是"当前进程可见的工具 + 每个工具的决策"。这里曾经有一个真实缺陷：
+  // 读取时没有 agent，决策回退成空工具表，于是面板永远显示"当前没有可管理的工具"。
+  const patchBody = '- insert:\n  - id: mcp-manager-ui\n    name: dsh-toolbox-ui\n'
+  const host = await createLoaderHost(patchBody)
+  try {
+    host.tools.register({
+      name: 'read',
+      description: 'read a file',
+      parameters: { type: 'object', properties: {} },
+      output: { schema: { type: 'object', additionalProperties: true }, render: (_a, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      async execute() { return { ok: true }; },
+    })
+
+    const view = await host.manager.toolLoadingSettings()
+    assert.equal(view.policy.mode, 'legacy', '面板不再写整体模式：legacy = MCP 仍由每台服务器自己的开关决定')
+    assert.ok(view.tools.length >= 2, `必须列出真实工具（实际 ${view.tools.length}）`)
+    const read = view.tools.find((row) => row.name === 'read')
+    assert.ok(read, '注册过的工具要出现在列表里')
+    assert.equal(read.kind, 'builtin', '非 MCP 工具归到 builtin 组')
+    assert.equal(read.policy, 'resident', '默认常驻')
+    assert.equal(read.reason, 'default-resident')
+    assert.equal(view.tools.find((row) => row.name === 'tool_search').reason, 'protected', '搜索入口永远受保护')
+
+    // 逐个把它点成"可搜索"：这才是这个功能唯一的开关。
+    await host.manager.updateToolLoadingSettings({ policy: { tools: { read: 'deferred' } } })
+    const after = await host.manager.toolLoadingSettings()
+    assert.equal(after.tools.find((row) => row.name === 'read').policy, 'deferred')
+    assert.equal(after.tools.find((row) => row.name === 'read').reason, 'global-tool')
+    assert.equal(after.tools.find((row) => row.name === 'read').inheritedPolicy, read.policy, '删除本层覆盖后的结果必须与原始默认决策一致')
+
+    // 再点回常驻：显式 resident 覆盖。
+    await host.manager.updateToolLoadingSettings({ policy: { tools: { read: 'resident' } } })
+    const back = await host.manager.toolLoadingSettings()
+    assert.equal(back.tools.find((row) => row.name === 'read').policy, 'resident')
+  } finally {
+    await host.cleanup()
+  }
+})
+
+test('real loader host: 拼错的参数键拒绝而不是被静默当成"恢复默认"', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 加载期的 config schema 一直是 strict 的（拼错键当场报错），而保存走的 RPC 载荷
+  // 只按已知键摘值——于是 `maxResutls` 这种拼写会**静默**变成 {}，把用户此前的设置
+  // 一并当作"回默认"写掉。同一条配置的两条入口必须用同一套严格口径。
+  const patchBody = '- insert:\n  - id: mcp-manager-ui\n    name: dsh-toolbox-ui\n'
+  const host = await createLoaderHost(patchBody)
+  try {
+    await host.manager.updateToolSearchSettings({ settings: { maxResults: 30 } })
+    const before = await readFile(host.patch, 'utf8')
+
+    await assert.rejects(host.manager.updateToolSearchSettings({ settings: { maxResutls: 25 } }), /maxResutls/)
+    await assert.rejects(host.manager.updateToolSearchSettings({ settings: { threshold: 15 } }), /threshold/)
+    await assert.rejects(host.manager.updateToolSearchSettings({}), /settings/)
+    await assert.rejects(host.manager.updateToolSearchSettings({ settings: [] }), /settings/)
+
+    assert.equal(await readFile(host.patch, 'utf8'), before, '被拒的保存一个字都不该写')
+    assert.equal((await host.manager.toolSearchSettings()).settings.maxResults, 30, '运行值也必须保持不变')
+  } finally {
+    await host.cleanup()
+  }
+})
+
+test('real loader host: 并发保存后，运行值与盘上配置一致（不得只生效一半）', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 复现过的缺陷：`live` 快照在等写锁之前取，锁后仍拿它判断 changed。两个标签页几乎同时
+  // 保存时，后来的那次可能用过期快照判出"没变化"，于是盘上写成了 B，运行时却停在 A。
+  const patchBody = '- insert:\n  - id: mcp-manager-ui\n    name: dsh-toolbox-ui\n'
+  const host = await createLoaderHost(patchBody)
+  try {
+    const registered = () => host.tools.schemas().find((schema) => schema.name === 'tool_search')
+    await Promise.all([
+      host.manager.updateToolSearchSettings({ settings: { maxResults: 25 } }),
+      host.manager.updateToolSearchSettings({ settings: { maxResults: 7 } }),
+    ])
+
+    const persisted = readToolSearchSettingsFromPatch(await readFile(host.patch, 'utf8'), { name: 'dsh-toolbox-ui' })
+    // 不钉"哪一次最后写"（那是调度顺序，不是我们要的性质）：钉的是三方一致。
+    assert.ok(persisted.maxResults === 25 || persisted.maxResults === 7, `盘上必须是两次保存之一，实际：${persisted.maxResults}`)
+    const live = (await host.manager.toolSearchSettings()).settings.maxResults
+    assert.equal(live, persisted.maxResults, '运行值必须等于盘上的值')
+    assert.match(registered().parameters.properties.max_results.description, new RegExp(`\\(1-${persisted.maxResults}\\)`),
+      '模型可见的上限也必须等于盘上的值')
   } finally {
     await host.cleanup()
   }

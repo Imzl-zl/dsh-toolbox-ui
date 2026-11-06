@@ -264,17 +264,11 @@ test('copy preview text spells out what will be added, overwritten and skipped',
   assert.match(internals.copyPlanText({ targetCount: 0, added: [], updated: [], skipped: [] }), /没有要写入的条目/)
 })
 
-test('section title uses an explicit fill element so header buttons stay outside it', () => {
+test('source navigation and project actions occupy separate rows without decorative title dividers', () => {
   const { internals } = loadClientInternals(() => true)
-
-  // 伪元素 ::after 永远排在最后一个子元素之后，横线会跑到按钮右边；改成显式元素后
-  // 「标题 —— 按钮」的顺序才由 DOM 决定。只有「本项目的 MCP」标题需要它：全局标题用的是
-  // .dsh-mcp-section-toggle（另一个类，本来就没有横线，靠 summary 的 margin-left:auto 推开），
-  // 给它加一条线是多出来的视觉变化。
-  assert.doesNotMatch(internals.MCP_CSS, /\.dsh-mcp-section-title::after/)
-  assert.match(internals.MCP_CSS, /\.dsh-mcp-section-fill\{flex:1;height:1px;background:var\(--mcp-line\)\}/)
-  const uses = clientSource.match(/className: 'dsh-mcp-section-fill'/g) || []
-  assert.equal(uses.length, 1, '只有本项目的 MCP 标题插这条横线')
+  assert.match(internals.MCP_CSS, /\.dsh-mcp-source-tabs\{[^}]*flex:none/)
+  assert.match(internals.MCP_CSS, /\.dsh-mcp-section-actions\{[^}]*justify-content:flex-end/)
+  assert.doesNotMatch(clientSource, /dsh-mcp-section-fill|dsh-mcp-section-title::after/)
 })
 
 test('polling pauses while the tab is hidden and refreshes on return', () => {

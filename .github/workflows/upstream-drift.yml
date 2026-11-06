@@ -1,18 +1,9 @@
 name: upstream-drift
 
-# 为什么需要它：peer 范围只回答"能不能装"，回答不了"装上还对不对"。上游在 master 上
-# 把 typert codec 从 schema: 改成 create() 那一次，就满足我们声明的范围——插件的兼容性
-# 声明天生拦不住这类破坏性变更，面对宿主升级我们必然是"慢一步"的那个。
-# 所以按周主动去问 npm：有没有和开发基线不同的宿主渠道？有就把宿主整套换到那个版本、
-# 跑契约用例（含真机集成：真 cordis / dsh-tools / dsh-scope / dsh-mcp-client + 真 stdio
-# MCP 子进程）。
-#
-# 只做检测与报告：仅由 schedule / 手动触发，不参与任何 PR 的合并门槛。红了就是"该做的事
-# 来了"——先分清失败的是契约用例还是版本 pin 断言，判读方法见 docs/design.md「版本范围
-# 怎么定」。
+# Runtime contracts are separate from the development pin assertions in ci.yml.
+# Every npm version gets a fresh job; source HEAD is a separate commit-identified candidate.
 on:
   schedule:
-    # 每周一 03:00 UTC。官方发布节奏快，但一周一次已足够"不慢太多"。
     - cron: '0 3 * * 1'
   workflow_dispatch:
 
@@ -20,104 +11,223 @@ permissions:
   contents: read
 
 jobs:
-  drift:
+  targets:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
-
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 11
-
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-
-      - name: Install development dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: 对每个宿主渠道跑契约用例
+      - id: targets
+        name: Freeze and deduplicate npm targets
         run: |
-          set -u
-
-          # 开发基线 = package.json 里 dsh-agent 的 pin，也就是我们声明"已验证"的那一版
-          # （去掉 ^ / ~ 前缀）。package-contract 用例会把这条 pin 钉住。
-          baseline="$(node -p "require('./package.json').devDependencies['@deepseek-ai/dsh-agent'].replace(/^[^0-9]*/, '')")"
-          echo "开发基线: $baseline"
-
-          # 契约用例 = 除 package-contract 之外的全部用例。package-contract 断言的是
-          # "pin 等于某个已验证版本 / lockfile 只把宿主当开发基线"——漂移模式下这些断言
-          # 按定义就该失败，回答不了"契约还成立吗"，所以不参与判定。
-          files="$(ls test/*.test.mjs | grep -v 'package-contract')"
-
-          # latest 也测：那是 npx 默认取到、用户实际在跑的版本，通常比开发基线旧。
-          failed=0
-          for tag in latest next alpha; do
-            version="$(npm view "@deepseek-ai/dsh@$tag" version 2>/dev/null || true)"
-            if [ -z "$version" ]; then
-              echo "::notice::@deepseek-ai/dsh@$tag 不存在，跳过"
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from 'node:fs'
+          const registry = 'https://registry.npmjs.org/'
+          const response = await fetch(`${registry}-/package/@deepseek-ai%2Fdsh/dist-tags`, { signal: AbortSignal.timeout(60000) })
+          if (!response.ok) throw new Error(`dist-tags: HTTP ${response.status}`)
+          const tags = await response.json()
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
+          const baseline = manifest.devDependencies['@deepseek-ai/dsh-agent']
+          const targets = new Map()
+          for (const [label, version] of [['baseline', baseline], ['npm-rc', '0.2.2-rc.1'], ...['latest', 'next', 'alpha'].map(tag => [tag, tags[tag]])]) {
+            if (version === undefined) {
+              console.log(`::notice::npm channel ${label} is absent`)
               continue
-            fi
-            if [ "$version" = "$baseline" ]; then
-              echo "::notice::$tag == 开发基线（$version），跳过"
-              continue
-            fi
+            }
+            if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`Expected an exact version for ${label}: ${version}`)
+            const target = targets.get(version) ?? { version, labels: [], modern: /^0\.2\.[01](?:-|$)/.test(version) ? '0' : '1' }
+            target.labels.push(label)
+            targets.set(version, target)
+          }
+          const matrix = { include: [...targets.values()].map(target => ({ ...target, label: target.labels.join('+') })) }
+          console.log(JSON.stringify(matrix, null, 2))
+          appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\n`)
+          NODE
 
-            echo "::group::$tag → $version"
-            # 宿主整套换到该版本；传递依赖（dsh-llm / dsh-scope / dsh-system-prompt …）
-            # 由 pnpm 一起带到同一版本。
-            #
-            # 注意这里换的是 devDependencies（本地开发副本），不是插件的 peer 声明：
-            # 三个渠道的版本都落在 COMPAT_WINDOW（>=0.2.0-rc.1 <0.3.0）内——宿主自己的
-            # evaluatePluginCompatibility 用 includePrerelease 比较，预发布按数值参与，
-            # 所以 0.2.x-rc.* 都算满足。pnpm 的 peer 警告不是判定依据。
-            #
-            # 列表必须覆盖 package.json 里**每一个** peer 宿主包：漏掉的那个会留在开发基线
-            # 版本上，这一轮"换版本"其实只换了一半（dsh-skill / dsh-skill-filesystem /
-            # dsh-api-gateway 曾经就是这样漏着的）。
-            #
-            # minimumReleaseAgeExclude 需要手工维护：pnpm 不会自行补充（只有
-            # `pnpm audit --fix` 会），这里新增高版本号时记得同步 pnpm-workspace.yaml。
-            host_packages=(
-              "@deepseek-ai/dsh-agent@$version"
-              "@deepseek-ai/dsh-agent-loop@$version"
-              "@deepseek-ai/dsh-api-gateway@$version"
-              "@deepseek-ai/dsh-atomic-write@$version"
-              "@deepseek-ai/dsh-mcp-client@$version"
-              "@deepseek-ai/dsh-scope@$version"
-              "@deepseek-ai/dsh-skill@$version"
-              "@deepseek-ai/dsh-skill-filesystem@$version"
-              "@deepseek-ai/dsh-tools@$version"
-              "@deepseek-ai/dsh-typert-loader@$version"
-              "@deepseek-ai/dsh-typert-protocol@$version"
-            )
-            if pnpm add -D "${host_packages[@]}"; then
-              # 不解析输出、不吞失败：失败时整段用例输出留在日志里供判读。
-              node --test $files || failed=1
-            else
-              # 装不上就不能拿旧版本的结果冒充通过。
-              echo "::error::安装 @deepseek-ai/dsh@$version 失败"
-              failed=1
-            fi
-
-            # 同一批 dsh-* 再配**它自己那一代 cordis**：0.2.0 宿主是 cordis ~4.0.2 +
-            # cordis-plugin-loader ~1.0.3，0.2.1 是 ~4.0.5 + ~1.0.6，而这两代 loader 在两个
-            # 行为上不同（启动错误是否 rethrow、dispose 时会不会把 include 树写回 base），
-            # 守卫在 test/loader-compat.test.mjs。cordis 版本从该 dsh 自己的依赖里取，不在
-            # 这里另抄一份——上游 bump 时这条会自动跟上。
-            cordis="$(npm view "@deepseek-ai/dsh@$version" "dependencies.@deepseek-ai/cordis" 2>/dev/null || true)"
-            loader="$(npm view "@deepseek-ai/dsh@$version" "dependencies.@deepseek-ai/cordis-plugin-loader" 2>/dev/null || true)"
-            if [ -n "$cordis" ] && [ -n "$loader" ]; then
-              echo "::group::$tag → $version + cordis $cordis + loader $loader"
-              if pnpm add -D "@deepseek-ai/cordis@$cordis" "@deepseek-ai/cordis-plugin-loader@$loader"; then
-                node --test $files || failed=1
-              else
-                echo "::error::安装 cordis $cordis / cordis-plugin-loader $loader 失败"
-                failed=1
-              fi
-              echo "::endgroup::"
-            fi
-            echo "::endgroup::"
+  npm:
+    needs: targets
+    name: npm ${{ matrix.version }} (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    env:
+      HOST_VERSION: ${{ matrix.version }}
+      DSH_EXPECT_STEP_TOOLSET: ${{ matrix.modern }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Isolate host data roots
+        run: |
+          echo "DSH_HOME=$RUNNER_TEMP/dsh-home" >> "$GITHUB_ENV"
+          echo "DSH_AGENTS_HOME=$RUNNER_TEMP/dsh-agents" >> "$GITHUB_ENV"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Resolve the complete matching host set
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          const version = process.env.HOST_VERSION
+          const metadata = async (name, optional = false) => {
+            const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}/${version}`, { signal: AbortSignal.timeout(60000) })
+            if (optional && response.status === 404) return undefined
+            if (!response.ok) throw new Error(`${name}@${version}: HTTP ${response.status}`)
+            return response.json()
+          }
+          const host = await metadata('@deepseek-ai/dsh')
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
+          const names = new Set([
+            ...Object.keys(manifest.devDependencies).filter(name => name.startsWith('@deepseek-ai/dsh-')),
+            ...Object.keys(manifest.peerDependencies).filter(name => name.startsWith('@deepseek-ai/dsh-')),
+            '@deepseek-ai/dsh-system-prompt',
+          ])
+          // These packages do not exist on the legacy baseline. Modern fixtures must import
+          // both executors successfully; a missing modern artifact must fail, not skip.
+          for (const name of ['@deepseek-ai/dsh-tool-executor-native', '@deepseek-ai/dsh-tool-executor-ptc']) {
+            if (await metadata(name, true)) names.add(name)
+          }
+          const specs = [...names].map(name => `${name}@${version}`)
+          for (const name of ['@deepseek-ai/cordis', '@deepseek-ai/cordis-plugin-loader', '@deepseek-ai/cordis-plugin-include']) {
+            const range = host.dependencies?.[name]
+            if (typeof range !== 'string' || range.length === 0) throw new Error(`Missing host dependency: ${name}`)
+            specs.push(`${name}@${range}`)
+          }
+          writeFileSync('host-package-specs.json', JSON.stringify({ version, integrity: host.dist.integrity, names: [...names], specs }, null, 2))
+          console.log(readFileSync('host-package-specs.json', 'utf8'))
+          NODE
+      - name: Install DSH and Cordis / Loader / Include together
+        run: |
+          mapfile -t packages < <(node -p "JSON.parse(require('fs').readFileSync('host-package-specs.json', 'utf8')).specs.join('\n')")
+          # Only this disposable job changes dependency pins. Runtime drift testing must
+          # reach the target implementation even when the plugin's declared peer window rejects it.
+          pnpm add -D --save-exact --config.minimumReleaseAge=0 --config.strictPeerDependencies=false "${packages[@]}"
+      - name: Record and verify resolved host identities
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { readFileSync } from 'node:fs'
+          import { createRequire } from 'node:module'
+          const require = createRequire(import.meta.url)
+          const expected = JSON.parse(readFileSync('host-package-specs.json', 'utf8'))
+          for (const name of [...expected.names, '@deepseek-ai/cordis', '@deepseek-ai/cordis-plugin-loader', '@deepseek-ai/cordis-plugin-include']) {
+            const path = require.resolve(`${name}/package.json`)
+            const manifest = JSON.parse(readFileSync(path, 'utf8'))
+            console.log(name, manifest.version, path)
+            if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(manifest.version, expected.version, name)
+          }
+          const toolsRequire = createRequire(require.resolve('@deepseek-ai/dsh-tools'))
+          assert.equal(toolsRequire.resolve('@deepseek-ai/cordis'), require.resolve('@deepseek-ai/cordis'), 'tools must use the same Cordis instance')
+          NODE
+      - name: Run runtime contracts with a 60-second test timeout
+        run: |
+          mkdir -p "$DSH_HOME" "$DSH_AGENTS_HOME"
+          files=()
+          for file in test/*.test.mjs; do
+            [[ "$file" == test/package-contract.test.mjs ]] || files+=("$file")
           done
+          node --test --test-timeout=60000 "${files[@]}"
 
-          exit $failed
+  source-head:
+    name: source HEAD candidate (not an npm release)
+    runs-on: ubuntu-latest
+    env:
+      DSH_EXPECT_STEP_TOOLSET: '1'
+    steps:
+      - name: Isolate source candidate data roots
+        run: |
+          echo "DSH_HOME=$RUNNER_TEMP/source-dsh-home" >> "$GITHUB_ENV"
+          echo "DSH_AGENTS_HOME=$RUNNER_TEMP/source-dsh-agents" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v7
+        with:
+          path: plugin
+      - uses: actions/checkout@v7
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: master
+          path: upstream
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Identify and build the source candidate
+        working-directory: upstream
+        run: |
+          echo "source candidate commit: $(git rev-parse HEAD)"
+          pnpm install --frozen-lockfile
+          pnpm run build:artifacts --profile official
+      - name: Stage plugin tests within the built source dependency tree
+        run: |
+          fixture="$GITHUB_WORKSPACE/upstream/.plugin-contracts/toolbox"
+          mkdir -p "$fixture" "$DSH_HOME" "$DSH_AGENTS_HOME"
+          tar --exclude=.git --exclude=node_modules -C plugin -cf - . | tar -C "$fixture" -xf -
+          cp "$fixture/package.json" "$RUNNER_TEMP/plugin-package.json"
+          # Install only the plugin's own runtime dependencies. All host imports must
+          # resolve to the built source workspace, including unreleased HEAD changes.
+          node --input-type=module - "$fixture/package.json" <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          const path = process.argv[2]
+          const manifest = JSON.parse(readFileSync(path, 'utf8'))
+          writeFileSync(path, JSON.stringify({ name: manifest.name, version: manifest.version, private: true, type: 'module', dependencies: manifest.dependencies }))
+          NODE
+          npm install --prefix "$fixture" --workspaces=false --ignore-scripts --package-lock=false --legacy-peer-deps
+          cp "$RUNNER_TEMP/plugin-package.json" "$fixture/package.json"
+          node --input-type=module - "$fixture" <<'NODE'
+          import { globSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs'
+          import { dirname, resolve } from 'node:path'
+          const fixture = process.argv[2]
+          const source = resolve('upstream')
+          const root = JSON.parse(readFileSync(resolve(source, 'package.json'), 'utf8'))
+          const plugin = JSON.parse(readFileSync(resolve(fixture, 'package.json'), 'utf8'))
+          const required = new Set([
+            ...Object.keys(plugin.devDependencies).filter(name => name.startsWith('@deepseek-ai/')),
+            ...Object.keys(plugin.peerDependencies).filter(name => name.startsWith('@deepseek-ai/')),
+            '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tool-executor-native', '@deepseek-ai/dsh-tool-executor-ptc',
+          ])
+          for (const pattern of root.workspaces) {
+            for (const path of globSync(`${pattern}/package.json`, { cwd: source })) {
+              const absolute = resolve(source, path)
+              const manifest = JSON.parse(readFileSync(absolute, 'utf8'))
+              if (!required.delete(manifest.name)) continue
+              const link = resolve(fixture, 'node_modules', manifest.name)
+              mkdirSync(dirname(link), { recursive: true })
+              symlinkSync(dirname(absolute), link, 'dir')
+            }
+          }
+          if (required.size) throw new Error(`Missing source packages: ${[...required].join(', ')}`)
+          NODE
+      - name: Verify source identities and run candidate contracts
+        working-directory: upstream/.plugin-contracts/toolbox
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { readFileSync, realpathSync } from 'node:fs'
+          import { createRequire } from 'node:module'
+          import { resolve, sep } from 'node:path'
+          const require = createRequire(import.meta.url)
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
+          const source = realpathSync(resolve('../..')) + sep
+          const names = new Set([
+            ...Object.keys(manifest.devDependencies).filter(name => name.startsWith('@deepseek-ai/')),
+            '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tool-executor-native', '@deepseek-ai/dsh-tool-executor-ptc',
+          ])
+          for (const name of names) {
+            const path = realpathSync(require.resolve(`${name}/package.json`))
+            assert.ok(path.startsWith(source) && !path.includes(`${sep}node_modules${sep}.pnpm${sep}`), `${name} must come from source HEAD: ${path}`)
+            console.log(name, JSON.parse(readFileSync(path, 'utf8')).version, path)
+          }
+          const toolsRequire = createRequire(require.resolve('@deepseek-ai/dsh-tools'))
+          assert.equal(toolsRequire.resolve('@deepseek-ai/cordis'), require.resolve('@deepseek-ai/cordis'), 'source tools must use the same Cordis instance')
+          NODE
+          files=()
+          for file in test/*.test.mjs; do
+            [[ "$file" == test/package-contract.test.mjs ]] || files+=("$file")
+          done
+          node --test --test-timeout=60000 "${files[@]}"

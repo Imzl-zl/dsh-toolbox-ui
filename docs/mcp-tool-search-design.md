@@ -367,9 +367,7 @@ DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四�
 | 25 | **`update()` 改 env 时，重连后的进程拿到的是 `!!js` 字面量而不是环境变量的值**（审查清单外，本轮实测发现） | 真 loader 探针：patch 里的 `MARKER: !!js process.env.HOME ?? ""` 经 include 子树物化后子进程拿到 HOME 的真值；同一条配置经 `manager.update()` 改 env 后重连，子进程拿到的是字符串 `!!js (process.env.HOME ?? "")` | loader 的 `interpolate` 只求值 `{ __jsExpr }` 对象、**raw 字符串原样透传**。`entryConfigOf()` 因此先把内部 `!!js <expr>` 转成 `{ __jsExpr: <expr> }`（递归进对象与数组），`add`/`installBuiltins`/`update` 三条路共用。`entry.options.config` 于是与生产条目同形（盘上 `!!js`、内存 `__jsExpr`），`reveal()` 的 `resolveLiveConfigValue` 本就是为这个形状存在的 |
 | 26 | **`ctx.loader.remove(id)` 对 include 子树条目是静默 no-op**（审查清单外，本轮实测发现） | `EntryTree.remove()` 先用完整 id `include:<id>` resolve 出条目，再把**同一个完整 id** 传给 `EntryGroup.remove()`，而后者按 `this.tree.store[id]` 查的是**局部 id** → 查不到 → `if (!entry) return`。真 loader 实测：remove 不抛错，条目与工具原样留着、子进程不退 | `removeServer()` 改用 `entry.parent.remove(entry.options.id)`（loader 自己"停掉并移除一个条目"的原语，局部 id）。**第六轮已终验**（`test/real-host-include.test.mjs`，真 `cordis-plugin-include@1.0.10` + 真重启）：那条路还有第二个后果——`EntryTree.remove()` 结尾的 `tree.write()` = `Include.write()` 把整个 `root.data`（含 patch 插入的 mcp 条目）写回 base 配置。正向用例全绿（add 后 cordis.yml 一字节不动、重启后无重复、remove 后无残留），反向对照证明走 `ctx.loader.remove()` 会"既没删掉、又把配置写脏" |
 
-**O1 的终验（第六轮补上，曾经是唯一未决项）**：装 `@deepseek-ai/cordis-plugin-include@1.0.10` 为 **devDependency**（运行时不 import，与 `dsh-typert-loader` 同一待遇），夹具换成真 Include，跑"创建 → dispose 整个 ctx → 用同一对 cordis.yml / cordis.patch.yml 重新起宿主"的真重启。结果：`add()` 根部创建后 cordis.yml 一个字节都没动，重启后两条各恰好一条；`removeServer()` 后二次重启只剩一条、无残留。peer 版本宽于实际装版本（include 要 cordis ~4.0.5 / loader ~1.0.6，基线是 4.0.2 / 1.0.3）不是新问题——所有 `dsh-*@0.2.0-rc.2` 都要 ~4.0.4，仓库一直在那个状态下全绿。
-
-**O1 仍未终验的一项**：`entry.parent.remove()` 不走 `tree.write()`，所以"移除 patch 条目会不会把剩余条目烙进 base 配置"这个风险在本轮被**绕开**而不是被验证；要终验需要真 `cordis-plugin-include` 夹具 + 重启一轮。已记入 `.tasks/mcp-tool-search/OPEN-ITEMS.md`。
+**O1 的终验**：`test/real-host-include.test.mjs` 使用真 `@deepseek-ai/cordis-plugin-include` 与匹配宿主组合，执行“创建 → dispose 整个 ctx → 用同一对 cordis.yml / cordis.patch.yml 重启”。结果：`add()` 根部创建后 base 配置字节不变，重启后无重复；`removeServer()` 后二次重启无残留。旧记录中的版本号属于历史基线，不代表当前发布支持窗口。
 
 **本轮新增的两条测试纪律**（都是"撤掉改动看红"实证过的）：① 手写 loader 桩必须补 `create`/`remove`/`entry.parent.remove`——否则三条 RPC 在桩上以 "is not a function" 炸掉，而那不是产品缺陷、是夹具不忠实（与 `entry.update` 同一理由）；② 凡是输出进宿主管线或调宿主入口的路径必须有一条真宿主用例——`test/real-host-loader.test.mjs`（第五轮）与 `test/real-host-include.test.mjs`（第六轮，真 Include + 真重启）就是为此新建的，F1/F2/O1 的三个盲区全是它们或第四边断言抓到的。
 
@@ -752,3 +750,43 @@ not only on disk`（夹具 = 临时技能根 × 真 `SkillRegistry` × 真 `dsh-
 **成本判断（据此加过一句提示词）**：常驻提示词多几个字符，只要能少一次模型犯错就是划算的——一次失败
 往返（发查询 → 落空 → 重读回执 → 换个写法重试）本身就比多写的十几二十个字符贵。所以 `select:` 的参数
 描述里明确写出"可逐字复制的是哪两种形态"（裸名 / 结果里的全名），不再让模型自己从组头 + 列表项去推。
+
+## 12.12 1.10.0：写盘与应用合成一条链路（reconcile 是唯一的 live 主体）
+
+§12.3 #24 记录的"writePatch 之后自己 `ctx.loader.create` 根部创建 / `entry.update()` 重连"
+**已经不是当前实现**。1.10.0 起，MCP 行的生命周期（新增 / 编辑 / 启停 / 移除 / 导入 / 内置安装）
+只经由官方 profile 组合：读完整有序组合 → 写 profile patch → `composeEntries` 判定这一行是否
+真的算数 → `reconcileProfilePatches` 应用整份组合 → 校验运行中的条目；失败则写回上一份并重新应用。
+
+为什么换掉（两条都在真机上出过事）：
+
+1. **两套事实**：插件自己拼的 loader 条目与 patch 里的行不是同一个来源。面板读一处、运行时走另一处，
+   于是会出现"盘上写的是 A、运行中是 B"——本轮面板里"看起来正常、策略却是反的"就是这条链路上漂出来的。
+2. **rc.5 的卸载钩子**：`cordis-plugin-loader@1.0.6` 卸载插件时会
+   `fiber.entry.parent.tree.write()`，而 include 子树的写是把**已应用树**（base + patch 行）写回
+   `cordis.yml`。`removeServer` 一度会把兄弟服务器的行烙进 base 配置。
+
+延迟（`defer`）是**纯视图遮罩**，不走 reconcile：它不改变连接参数，也就不该让 serena 那种冷启动
+1–1.5 分钟的服务器重连。遮罩在内存里改 `entry.options.config.defer`，由下一次组装直接读到。
+
+所有变更型 RPC 现在返回同一组字段（`persisted` / `live` / `diagnostics`），"写盘成功但运行中没生效"
+如实报 `live: 'skipped'` + 原因，而不是一句「已更新」。契约单源与客户端产物见
+[`docs/design.md`](design.md) 的「写盘与运行中：一条链路」与「契约与产物：同一份定义」两节。
+
+## 12.13 没有可搜的工具时不再发搜索入口（issue #9，1.10.0）
+
+**现象**（用户报的）：把所有 MCP 停用、或把工具全设成常驻之后，模型仍然看得见 `tool_search`，
+于是它先搜一次——而此刻目录是空的，这一轮白花。
+
+**原因**：搜索入口是"稳定项"（不能被自己延迟掉，也不能被用户策略藏掉），旧实现把它当成
+"永远发给模型"。这是两件事被写成了一件：**不可被用户隐藏** ≠ **永远应该出现**。
+
+**现在的判据**（`lib/tool-search-presentation.js` 的 `presentAssembly`）：延迟集
+`D = M − 已发现` 为空时，搜索入口与目录段、引导段一起从模型可见的工具里摘掉；它本身仍注册在
+宿主里（`ctx.tools.schemas()` 依旧能看到），所以一旦有工具被延迟，下一次组建立刻又有它。
+PTC 的手册同理：把搜索入口放进"要摘掉"的集合交给渲染器重画（`trimSdkText` 的 `drop`）。
+
+**覆盖**：`test/tool-search-presentation.test.mjs`（3 个方向的纯层用例）、
+`test/tool-search-real-host.test.mjs`（真 rc.5 宿主：提示词里既无引导段也无目录段、
+声明里没有搜索入口、但宿主里仍注册着）、`test/tool-search-rc22-host.test.mjs`
+（真 rc.1 宿主，同一判据）。

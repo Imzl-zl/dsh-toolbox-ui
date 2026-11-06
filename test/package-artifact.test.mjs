@@ -10,9 +10,13 @@ import test from 'node:test'
 
 const execFileAsync = promisify(execFile)
 const projectRoot = new URL('..', import.meta.url)
+// 版本号只有一处真源（package.json）：这里断言的是"打包产物带着**仓库当前**的版本"，
+// 而不是"等于某个写死的字符串"。写死过一次，bump 版本时就变成第三个真源。
+const projectManifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 const dshHostPackages = [
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-agent-loop',
+  '@deepseek-ai/dsh-app-boot',
   '@deepseek-ai/dsh-atomic-write',
   '@deepseek-ai/dsh-mcp-client',
   '@deepseek-ai/dsh-scope',
@@ -22,7 +26,7 @@ const dshHostPackages = [
 ]
 // 与 package-contract 的兼容窗口一致：只支持 0.2.x（ToolSearch 依赖 per-agent 呈现模式、
 // `tools:sdk` 手册段与会话投影三样 0.2 才有的接口）。
-const COMPAT_WINDOW = '>=0.2.0-rc.1 <0.3.0'
+const COMPAT_WINDOW = '>=0.2.1-rc.5 <0.3.0'
 
 function tarString(buffer, offset, length) {
   const end = buffer.indexOf(0, offset)
@@ -82,7 +86,8 @@ test('packed artifact resolves required DSH peers from the host fallback', async
     }
 
     const packedManifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'))
-    assert.equal(packedManifest.version, '1.9.0')
+    assert.equal(packedManifest.version, projectManifest.version)
+    assert.equal(packedManifest.engines?.dsh, COMPAT_WINDOW)
     for (const name of dshHostPackages) {
       assert.equal(packedManifest.dependencies?.[name], undefined)
       assert.equal(packedManifest.optionalDependencies?.[name], undefined)
@@ -111,6 +116,10 @@ test('packed artifact resolves required DSH peers from the host fallback', async
     // 它们，说明 files 字段被人放宽了，顺带会把开发期才需要的依赖关系带进用户环境。
     assert.equal(paths.some((path) => path.startsWith('package/scripts/')), false, 'scripts/ 不得随包发布')
     assert.equal(paths.some((path) => path.startsWith('package/test/')), false, 'test/ 不得随包发布')
+    // 客户端分片是**构建输入**（源），随包发布的只有拼好的单文件产物：
+    // 两份都进 tarball 等于让使用者同时看到"哪份是真的"这个问题。
+    assert.equal(paths.some((path) => path.startsWith('package/lib/client/')), false, 'lib/client/ 分片不得随包发布')
+    assert.ok(paths.includes('package/lib/client.js'), '单文件客户端产物必须在包里')
 
     const profileModules = join(root, 'profiles', 'web', 'node_modules')
     const hostModules = join(root, 'profiles', 'node_modules')

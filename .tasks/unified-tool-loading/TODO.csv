@@ -1,0 +1,9 @@
+id,goal,boundary,related_files,sync_targets,depends_on,status,validation,completed_at,notes
+1,记录设计和原生契约,只写本任务和最小协作记录,.tasks/unified-tool-loading/SPEC.md;docs/design.md,doc:SPEC;config:DSH支持窗口,,DONE,docs 双语 parity 20/20,2026-11-01,用户已确认产品/UI/架构方向
+2,修复搜索返回和说明遮罩,只改runtime/state及对应测试,lib/tool-search-runtime.js;lib/tool-search-state.js,test:tool-search-real-host;symbol:evict,1,DONE,state/runtime/real-host 定向全绿；真dispatcher混合批,2026-11-01,promise 保护集；instructions 永不遮罩
+3,修复配置更新一致性,settings和网关保存路径及RPC契约,lib/index.js;lib/tool-search-settings.js;lib/typert.js;lib/client.js,symbol:updateToolSearchSettings;schema:ToolSearchSettingsPayload,1,DONE,real-host-loader 并发保存/严格校验用例通过,2026-11-01,严格载荷校验+锁内比较与重装
+4,实现统一策略与来源作用域适配,纯策略及宿主适配和项目策略不改连接生命周期,lib/tool-loading-policy.js;lib/tool-search-config.js;lib/workspace-runtime.js;lib/workspace-config.js,symbol:resolveToolLoadingPolicy;symbol:deferTableFor,1,DONE,policy 11/11；作用域隔离与 legacy 兼容,2026-11-01,来源无公开API→非MCP默认常驻
+5,接入策略管理RPC及持久化,网关读取/保存/恢复及客户端schema契约,lib/index.js;lib/tool-search-settings.js;lib/typert.js,schema:loading-policy;config:profile;config:workspace,3;4,DONE,patch/config 往返与三边契约；真实 loader 42 方法,2026-11-01,legacy=删键；all-resident 保留覆盖
+6,接入runtime统一决策,搜索目录guard native/PTC同源,lib/tool-search-runtime.js;lib/tool-search-config.js,symbol:policyFor;symbol:partitionSchemas,2;4,DONE,真实宿主 native/PTC、恢复、热修改用例全绿,2026-11-01,policyFor 每次组装活值；不重连
+7,实现工具加载界面,现有面板新增统一入口及中英文不改其他模块业务,lib/client.js,ui:tool-loading;schema:policy-management,5;6,DONE,工具滚动/参数校验/放弃回归；i18n parity；Dialog契约,2026-11-05,全局非MCP两态；搜索参数在统计上方；仅列表滚动
+8,更新文档并完成集成审查,文档/回归/完整验证不发布,README.md;README.en.md;docs/design.md;docs/design.en.md,.agents/notes/implemented/2026-11-01-unified-tool-loading-policy.md,2;3;4;5;6;7,DONE,完整895/895；19791 Chrome桌面/390px通过；详见UI-VALIDATION.md,2026-11-05,未提交/推送/发布；真实用户写入未执行

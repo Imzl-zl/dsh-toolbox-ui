@@ -313,100 +313,69 @@ test('update(spec) 只翻 defer 时同步内存：同进程立即生效，不重
   }
 })
 
-test('update(spec) 动了连接字段时走 entry.update()，note 说"正在重连"', async () => {
-  // 这条守的是**分流**：改 command/args/env 等必须 restart fiber 才会重连，
-  // 只同步内存是不够的（那会让新 command 永远不生效）。桩 entry 没有 update 方法，
-  // 所以这里只断言"选择了重启路径"——真 loader 上的重连效果由手动探针
-  // scripts/probe-live-defer.mjs 覆盖（桩上复现不了 fiber restart）。
+test('update(spec) 动了连接字段时写明"本部署没有热应用入口"，并如实落盘', async () => {
+  // 这条守的是**结构化结果的分流**：改 command/args/env 等属于行生命周期变化，必须走
+  // profile 组合（reconcile）才会重连。这个桩宿主没有 profileContext，也就是说它代表
+  // "没有 profile 启动器的部署"——那种部署只能把行写盘，并**如实**说"重启后生效"，
+  // 绝不能报"正在重连"。真 loader 上的重连效果由 test/real-host-loader.test.mjs 的
+  // "update 改变连接字段 → 新子进程起来、旧的退出"那条覆盖。
   const mounted = await mountPlugin(
     [{ serverName: 'deferme', transport: 'stdio', command: 'node', defer: true }],
     { patchBody: ONE_DEFERME_PATCH },
   )
   try {
-    // 给桩 entry 装一个可观测的 update：记录被调用时的 config。
-    const entry = [...mounted.ctx.loader.entries()].find((e) => e.options.id === 'mcp-deferme')
-    let seen = null
-    entry.update = async (options) => { seen = options?.config ?? null }
     const r = await mounted.ctx.get('mcpManager').update({ name: 'deferme', transport: 'stdio', command: 'other-cmd', args: ['--x'] })
-    assert.match(r.note, /正在重连/, '改了连接字段必须走重启路径')
-    assert.ok(seen, '必须调用 entry.update()')
-    assert.equal(seen.command, 'other-cmd', '重启用的 config 要带新 command')
-    assert.deepEqual(seen.args, ['--x'])
-    assert.equal(seen.serverName, 'deferme', 'config 必须带 serverName（mcp-client 的必需字段）')
+    assert.equal(r.persisted, 'applied', '盘上必须已经写成新配置')
+    assert.equal(r.live, 'skipped', '没有 profile 启动器时不得宣称生效')
+    assert.match(r.liveReason, /profileContext/, '必须说清为什么没生效，而不是一句"已更新"')
+    assert.match(r.note, /重启宿主后生效/)
+    assert.doesNotMatch(r.note, /正在重连/)
     assert.match(await readFile(mounted.patchPath, 'utf8'), /other-cmd/, 'patch 也要落到盘上')
   } finally {
     await mounted.dispose()
   }
 })
 
-test('add(spec) 在运行中的进程里创建 loader 条目，并写进 profile patch', async () => {
-  // 旧行为只写盘：loader 的 entry 由它自己从 include 子树物化，本插件的写路径不经过
-  // loader，于是运行中的进程不会多出 entry、也不会连新服务器（note 只能如实说"重启后生效"）。
-  // 现在 writePatch 之后立刻 ctx.loader.create 根部创建。这里守的是**两条都要发生**：
-  // patch 里有行、loader 里也有条目（缺任一条都是"看起来成功了其实没生效"）。
+test('add(spec) 写入 profile patch，并在没有 profile 启动器时如实报"重启后生效"', async () => {
+  // 生产里 live 那半由官方 profile 组合（reconcileProfilePatches）完成，见
+  // test/real-host-loader.test.mjs「add() applies the new row through the profile
+  // composition」。这里守住**写盘 + 诚实报告**：没有 profileContext 的部署不许假装
+  // 连上了，也不许把行留在半套状态。
   const mounted = await mountPlugin([], { patchBody: ONE_DEFERME_PATCH })
   try {
     const r = await mounted.ctx.get('mcpManager').add({ name: 'fresh', transport: 'stdio', command: 'node' })
-    assert.match(r.note, /开始连接/)
-    assert.doesNotMatch(r.note, /重启后生效/, 'note 不得再宣称需要重启')
+    assert.equal(r.persisted, 'applied')
+    assert.equal(r.live, 'skipped')
+    assert.match(r.note, /重启宿主后生效/)
+    assert.doesNotMatch(r.note, /开始连接/)
     assert.match(await readFile(mounted.patchPath, 'utf8'), /serverName: fresh/)
-    const created = [...mounted.ctx.loader.entries()].filter((entry) => entry.options.config?.serverName === 'fresh')
-    assert.equal(created.length, 1, 'add 必须在 loader 里创建条目')
-    // 根部创建：不走 include 子树（那条路会把 patch 条目写回 base 配置文件）。
-    assert.equal(created[0].options.name, '@deepseek-ai/dsh-mcp-client')
-    assert.equal(created[0].options.config.command, 'node')
   } finally {
     await mounted.dispose()
   }
 })
 
-test('add(spec) 在 loader.create 失败时回滚 patch，不留半套状态', async () => {
-  const mounted = await mountPlugin([], { patchBody: ONE_DEFERME_PATCH })
-  try {
-    const before = await readFile(mounted.patchPath, 'utf8')
-    const original = mounted.ctx.loader.create
-    mounted.ctx.loader.create = async () => { throw new Error('loader exploded') }
-    await assert.rejects(
-      () => mounted.ctx.get('mcpManager').add({ name: 'fresh', transport: 'stdio', command: 'node' }),
-      /loader exploded/,
-    )
-    mounted.ctx.loader.create = original
-    assert.equal(await readFile(mounted.patchPath, 'utf8'), before, 'create 失败必须把 patch 写回原样')
-    assert.equal(
-      [...mounted.ctx.loader.entries()].some((entry) => entry.options.config?.serverName === 'fresh'),
-      false,
-      'create 失败后 loader 里不得留下条目',
-    )
-  } finally {
-    await mounted.dispose()
-  }
-})
-
-test('removeServer 停掉运行中的条目并删掉 patch 行', async () => {
+test('removeServer 删掉 patch 行，并在没有 profile 启动器时如实报"重启后连接才停"', async () => {
   const mounted = await mountPlugin([{ serverName: 'deferme', transport: 'stdio', command: 'node' }], { patchBody: ONE_DEFERME_PATCH })
   try {
     const r = await mounted.ctx.get('mcpManager').removeServer('deferme')
-    assert.match(r.note, /停止运行中的连接/)
-    assert.equal(
-      [...mounted.ctx.loader.entries()].some((entry) => entry.options.id === 'mcp-deferme'),
-      false,
-      'removeServer 必须真的移除 loader 条目',
-    )
+    assert.equal(r.persisted, 'applied')
+    assert.equal(r.live, 'skipped')
+    assert.match(r.note, /重启宿主后这条连接才会停/)
+    assert.doesNotMatch(r.note, /已移除并停止运行中的连接/)
     assert.doesNotMatch(await readFile(mounted.patchPath, 'utf8'), /serverName: deferme/)
   } finally {
     await mounted.dispose()
   }
 })
 
-test('installBuiltins 追加的条目也进 loader，不只写盘', async () => {
+test('installBuiltins 追加的条目写进 patch，并在没有 profile 启动器时如实报"重启后生效"', async () => {
   const mounted = await mountPlugin([], { patchBody: '[]\n' })
   try {
     const r = await mounted.ctx.get('mcpManager').installBuiltins({ ids: ['firecrawl'] })
     assert.deepEqual(r.added, ['firecrawl'])
-    assert.match(r.note, /开始连接/)
-    const created = [...mounted.ctx.loader.entries()].filter((entry) => entry.options.config?.serverName === 'firecrawl')
-    assert.equal(created.length, 1, 'installBuiltins 必须在 loader 里创建条目')
-    assert.equal(created[0].options.id, 'mcp-firecrawl', '条目 id 必须与 patch 行一致（resolveManagedEntry 靠它认人）')
+    assert.equal(r.persisted, 'applied')
+    assert.equal(r.live, 'skipped')
+    assert.match(r.note, /重启宿主后生效/)
     assert.match(await readFile(mounted.patchPath, 'utf8'), /serverName: firecrawl/)
   } finally {
     await mounted.dispose()
@@ -424,6 +393,20 @@ test('装配：defer 配置从 loader 条目流入守卫行为', async () => {
     assert.ok(denial.includes('tool_search'))
     // 未列入 defer 的服务器工具不受影响。
     assert.equal(guard({ name: 'mcp__other__tool_1', agent }), undefined)
+  } finally {
+    await mounted.dispose()
+  }
+})
+
+test('装配：ToolSearch 初始化失败不撤回 MCP manager', async () => {
+  const mounted = await mountPlugin(
+    [{ serverName: 'deferme', transport: 'stdio', command: 'x', defer: true }],
+    { occupied: ['tool_search', 'deferred_tool_search', 'mcp_tool_search'] },
+  )
+  try {
+    assert.ok(mounted.ctx.get('mcpManager'), 'ToolSearch 失败不能撤回 MCP manager')
+    assert.equal(mounted.registered.some((name) => name.includes('tool_search')), false)
+    assert.ok(mounted.ctx.logger, '失败必须保留可观察日志通道')
   } finally {
     await mounted.dispose()
   }
@@ -500,7 +483,7 @@ test('徽标：延迟行只标记状态，不带 token 估算', async () => {
   // "开着才 `? h(Badge, {cls:'t-defer'})`" 改成"渲染 DeferChip，状态由 s.defer 决定"。
   // 两条都钉：接线（状态从哪来）与样式（开着时哪个 class）。
   const client = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(client, /h\(DeferChip, \{ on: s\.defer === true, interactive: s\.managed === true && !busy/, '延迟行必须渲染状态芯片，且只有本插件管理的条目可点')
+  assert.match(client, /h\(DeferChip, \{ on: \(s\.deferEffective \?\? s\.defer\) === true, interactive: s\.managed === true && !busy/, '延迟行必须渲染状态芯片（统一策略优先，旧 defer 兜底），且只有本插件管理的条目可点')
   // 芯片必须用「可点的药丸」原语（.dsh-mcp-chip），不是状态徽标（.dsh-mcp-badge）——
   // 用户在这块 UI 里已经学会"药丸 = 可点"（市场分类），沿用徽标会被当成只读状态。
   assert.match(client, /className: 'dsh-mcp-chip sm' \+ \(on \? ' sel' : ''\)/, '芯片必须复用 .dsh-mcp-chip 及其 .sel 选中态')
@@ -563,3 +546,4 @@ test('setDeferAll 不传 wsPath 时走全局分支（空串不得被解析成 cw
     await mounted.dispose()
   }
 })
+

@@ -23,3 +23,6 @@ node_modules/
 
 # DSH 宿主在仓库根写出的运行时副产物（本插件不读它，与本仓库无关）。
 recipes.json
+# E2E 会话事件原样导出（每条 turn/step/tool 一行，动辄几千行）：结论写在
+# .tasks/architecture-review/LIVE-PRODUCT-E2E.md，原始事件随时可重跑生成，不提交。
+.tasks/**/*-events.json

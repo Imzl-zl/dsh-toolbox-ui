@@ -14,7 +14,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
-import { listSkillViews } from '../lib/skills-registry.js'
+import { listSkillViews, skillTargetsView } from '../lib/skills-registry.js'
 
 /** 只看路径的目录部分（断言「两个字段确实分叉」用）。 */
 const dirnameOf = (path) => dirname(path)
@@ -291,6 +291,67 @@ test('keeps same-named skills in different roots as separate rows (real shadowin
 
   assert.equal(rows.filter((row) => row.name === 'zhanggui').length, 2, '不同根里的同名技能必须各占一行')
   assert.deepEqual(rows.map((row) => row.scope).sort(), ['global', 'project'])
+})
+
+test('real registry winners stay distinct from install targets and disabled losing copies', { timeout: 60_000 }, async (t) => {
+  const { Context } = await import('@deepseek-ai/cordis')
+  const { SkillRegistry } = await import('@deepseek-ai/dsh-skill')
+  const fsProvider = await import('@deepseek-ai/dsh-skill-filesystem')
+  const base = await mkdtemp(join(tmpdir(), 'dsh-skill-candidates-'))
+  t.after(() => rm(base, { recursive: true, force: true }))
+  const project = join(base, 'project')
+  await mkdir(join(project, '.git'), { recursive: true })
+  const config = {
+    customSkillDirs: [join(base, 'custom-a'), join(base, 'custom-b')],
+    dshHome: join(base, 'dsh'), agentsHome: join(base, 'agents'),
+    bundledSkillDir: join(base, 'bundled'), watch: false,
+  }
+  const roots = [
+    join(project, '.dsh', 'skills'), join(project, '.agents', 'skills'),
+    ...config.customSkillDirs, join(config.dshHome, 'skills'),
+    join(config.agentsHome, 'skills'), config.bundledSkillDir,
+  ]
+  const document = (index, disabled) => `---\nname: shared\ndescription: physical candidate ${index}\n${disabled ? 'disable-model-invocation: true\nuser-invocable: false\n' : ''}---\n\nbody ${index}\n`
+  for (const [index, root] of roots.entries()) {
+    await mkdir(join(root, `disk-${index}`), { recursive: true })
+    await writeFile(join(root, `disk-${index}`, 'SKILL.md'), document(index, index === roots.length - 1))
+  }
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  await ctx.plugin(SkillRegistry)
+  const providerPlugin = { apply: fsProvider.apply, inject: fsProvider.inject, name: fsProvider.name, Config: fsProvider.Config }
+  let providerFiber = ctx.plugin(providerPlugin, config)
+  await providerFiber
+  const host = {
+    get: (name) => ctx.get(name),
+    loader: { *entries() { yield { options: { name: '@deepseek-ai/dsh-skill-filesystem', config } } } },
+  }
+  const expectedCatalog = async () => {
+    const global = await ctx.skills.list()
+    const projectSkills = (await ctx.skills.list({ cwd: project })).filter((summary) => summary.source.startsWith('project-'))
+    return [...global, ...projectSkills]
+  }
+  const expected = await expectedCatalog()
+  assert.equal(expected.length, 2, '宿主只报告全局和项目各自的胜出项；其余五份物理候选被按名裁掉')
+  const projectRows = await listSkillViews(host, { workspaces: [project] })
+  assert.deepEqual(projectRows.map((row) => row.path), expected.map((summary) => summary.path))
+  const { targets } = await skillTargetsView(host, { workspaces: [project] })
+  assert.deepEqual(targets.map((target) => target.root).sort(), roots.slice().sort(), '七个可安装根不能伪装成七条已发现技能')
+  const [winner] = await listSkillViews(host)
+  assert.equal(winner.root, config.customSkillDirs[0], '同 rank 的第二个 custom 根仍受 provider 发现顺序裁决')
+
+  // 把胜出项也关掉：registry 的目录与调用面无关，不能据此推断落选副本现在可见或生效。
+  const winnerFile = winner.path
+  await writeFile(winnerFile, document(roots.indexOf(winner.root), true))
+  await providerFiber.dispose()
+  providerFiber = ctx.plugin(providerPlugin, config)
+  await providerFiber
+  const disabledExpected = await expectedCatalog()
+  assert.deepEqual(disabledExpected.map((summary) => summary.path), expected.map((summary) => summary.path))
+  const disabledRows = await listSkillViews(host, { workspaces: [project] })
+  assert.deepEqual(disabledRows.map((row) => row.path), disabledExpected.map((summary) => summary.path))
+  const disabledWinner = disabledRows.find((row) => row.path === winnerFile)
+  assert.equal(disabledWinner.enabled, false)
 })
 
 test('locates a flat skill whose reported path is outside the root (only a root scan can name it)', async () => {

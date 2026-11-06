@@ -1,0 +1,197 @@
+{
+  "kind": "product-e2e",
+  "host": "0.2.2-rc.1",
+  "cases": [
+    {
+      "preset": "standard",
+      "calls": [
+        "tool_search",
+        "mcp__fixture__review_lookup"
+      ],
+      "expected": "VALUE-22e56398-55b0-4c26-a093-7b1d4ad40730",
+      "answer": "{\"value\":\"VALUE-22e56398-55b0-4c26-a093-7b1d4ad40730\"}",
+      "hiddenBefore": true,
+      "visibleAfter": true,
+      "otherAgentIsolated": true,
+      "searchedBeforeCall": true
+    },
+    {
+      "preset": "ptc",
+      "calls": [
+        "run_code"
+      ],
+      "dispatches": [
+        {
+          "name": "tool_search",
+          "isError": false
+        },
+        {
+          "name": "mcp__fixture__review_lookup",
+          "isError": false
+        }
+      ],
+      "dispatchValue": "VALUE-22e56398-55b0-4c26-a093-7b1d4ad40730",
+      "answer": "下面是该程序的执行结果（原样）：\n\n```\n{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"value\\\":\\\"VALUE-22e56398-55b0-4c26-a093-7b1d4ad40730\\\"}\"}]}\n```\n\n说明：程序执行返回的 JSON 对象中包含一个 `content` 数组，其首项文本解码后为 `{\"value\":\"VALUE-22e56398-55b0-4c26-a093-7b1d4ad40730\"}`。另有一条非程序输出的宿主提示：“File sandbox enforcement is partial on this host.”。",
+      "answerEchoesValue": true,
+      "oneRunCode": true,
+      "visibleAfterInSdk": true
+    }
+  ],
+  "requests": [
+    {
+      "model": "spark-x2.6",
+      "tools": [
+        "ask_user_question",
+        "create_goal",
+        "edit",
+        "get_goal",
+        "glob",
+        "grep",
+        "interrupt_agent",
+        "job_kill",
+        "job_list",
+        "job_output",
+        "list_agents",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "list_subagent_models",
+        "plugin_manager",
+        "present",
+        "pwsh",
+        "read",
+        "read_image",
+        "read_mcp_resource",
+        "schedule_create",
+        "schedule_edit",
+        "schedule_list",
+        "schedule_view",
+        "send_message",
+        "skill",
+        "subagent",
+        "subagent_fork",
+        "todo_write",
+        "tool_search",
+        "update_goal",
+        "web_fetch",
+        "workflow",
+        "working_directory",
+        "write"
+      ],
+      "hiddenSchema": false
+    },
+    {
+      "model": "spark-x2.6",
+      "tools": [
+        "ask_user_question",
+        "create_goal",
+        "edit",
+        "get_goal",
+        "glob",
+        "grep",
+        "interrupt_agent",
+        "job_kill",
+        "job_list",
+        "job_output",
+        "list_agents",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "list_subagent_models",
+        "mcp__fixture__review_lookup",
+        "plugin_manager",
+        "present",
+        "pwsh",
+        "read",
+        "read_image",
+        "read_mcp_resource",
+        "schedule_create",
+        "schedule_edit",
+        "schedule_list",
+        "schedule_view",
+        "send_message",
+        "skill",
+        "subagent",
+        "subagent_fork",
+        "todo_write",
+        "tool_search",
+        "update_goal",
+        "web_fetch",
+        "workflow",
+        "working_directory",
+        "write"
+      ],
+      "hiddenSchema": true
+    },
+    {
+      "model": "spark-x2.6",
+      "tools": [
+        "ask_user_question",
+        "create_goal",
+        "edit",
+        "get_goal",
+        "glob",
+        "grep",
+        "interrupt_agent",
+        "job_kill",
+        "job_list",
+        "job_output",
+        "list_agents",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "list_subagent_models",
+        "mcp__fixture__review_lookup",
+        "plugin_manager",
+        "present",
+        "pwsh",
+        "read",
+        "read_image",
+        "read_mcp_resource",
+        "schedule_create",
+        "schedule_edit",
+        "schedule_list",
+        "schedule_view",
+        "send_message",
+        "skill",
+        "subagent",
+        "subagent_fork",
+        "todo_write",
+        "tool_search",
+        "update_goal",
+        "web_fetch",
+        "workflow",
+        "working_directory",
+        "write"
+      ],
+      "hiddenSchema": true
+    },
+    {
+      "model": "spark-x2.6",
+      "tools": [
+        "run_code"
+      ],
+      "hiddenSchema": false
+    },
+    {
+      "model": "spark-x2.6",
+      "tools": [
+        "run_code"
+      ],
+      "hiddenSchema": false
+    }
+  ],
+  "errors": [],
+  "startedAt": "2026-11-06T10:04:45.417Z",
+  "panel": {
+    "total": 38,
+    "row": {
+      "name": "mcp__fixture__review_lookup",
+      "owner": "fixture",
+      "kind": "mcp",
+      "policy": "deferred",
+      "reason": "global-group",
+      "protected": false
+    },
+    "configKey": "toolLoading"
+  },
+  "status": "passed",
+  "finishedAt": "2026-11-06T10:05:24.771Z"
+}

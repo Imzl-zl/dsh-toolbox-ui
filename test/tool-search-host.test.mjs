@@ -20,14 +20,20 @@ function fakeCtx({ services = {}, tools = {} } = {}) {
 }
 
 const fullTools = () => ({ get: () => undefined, schemas: () => [], modeFor: () => 'native', sdkSchemas: () => [] })
+const newTools = () => ({ ...fullTools(), definitions: () => [], resolve: async () => ({ view: () => new Map() }) })
 const fullServices = () => ({
   sessionProjections: { register: () => () => {}, stateOf: () => undefined },
   agents: { list: () => [] },
 })
 
-test('probeHost: 全都有 → 四项全 true', () => {
+test('probeHost: 旧宿主完整 → 旧 capabilities 为 true、新 definitions 缺席', () => {
   const caps = probeHost(fakeCtx({ services: fullServices(), tools: fullTools() }))
-  assert.deepEqual(caps, { modeFor: true, sdkSchemas: true, projections: true, agents: true })
+  assert.deepEqual(caps, { modeFor: true, sdkSchemas: true, definitions: false, projections: true, agents: true })
+})
+
+test('probeHost: 新宿主 definitions + resolve → 识别 step-owned 工具契约', () => {
+  const caps = probeHost(fakeCtx({ services: fullServices(), tools: newTools() }))
+  assert.equal(caps.definitions, true)
 })
 
 test('probeHost: 缺 sdkSchemas → false 且只记一次日志（快路径缺席不该刷屏）', () => {
