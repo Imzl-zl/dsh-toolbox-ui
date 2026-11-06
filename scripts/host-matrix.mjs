@@ -24,6 +24,11 @@ const HOSTS = {
   '0.2.1-rc.5': { cordis: '~4.0.5', loader: '~1.0.6', include: '1.0.10', stepToolset: '0' },
   '0.2.2-rc.1': { cordis: '~4.1.0', loader: '~1.1.0', include: '~1.1.0', stepToolset: '1' },
 }
+// 现代宿主（0.2.2）的用例要按真实安装形态装上官方执行器插件：`tool-search-rc22-host.test.mjs`
+// 直接 import 它们来搭"真 executor"夹具，插件的 ToolSearch 运行时也会 `loader.import` 这两个包
+// 取渲染器。它们**不是**插件的依赖（插件只说 peer），所以不在 package.json 的 devDependencies 里，
+// 只有这一腿需要——legacy 那代按能力跳过这些用例。
+const MODERN_EXECUTORS = ['@deepseek-ai/dsh-tool-executor-native', '@deepseek-ai/dsh-tool-executor-ptc']
 const HOST_PACKAGES = [
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-agent-loop',
@@ -87,6 +92,9 @@ for (const name of COPY) {
 const manifest = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'))
 manifest.devDependencies = { ...manifest.devDependencies }
 for (const name of HOST_PACKAGES) manifest.devDependencies[name] = host
+if (preset.stepToolset === '1') {
+  for (const name of MODERN_EXECUTORS) manifest.devDependencies[name] = host
+}
 manifest.devDependencies['@deepseek-ai/cordis'] = cordis
 manifest.devDependencies['@deepseek-ai/cordis-plugin-loader'] = loader
 manifest.devDependencies['@deepseek-ai/cordis-plugin-include'] = include
@@ -111,6 +119,10 @@ const env = {
   // package.json 的开发基线在这一腿里就是 host：让契约用例断言"它等于本腿目标"，
   // 而不是硬编码 0.2.1-rc.5（那样这一腿必红，只能靠跳过它变绿）。
   DSH_HOST_MATRIX_BASELINE: host,
+  // cordis / loader 的开发基线同样按本腿实际装的那一代报给用例：漏了这两个，
+  // 契约用例会拿默认的 ~4.0.5 / ~1.0.6 去比 ~4.1.0 / ~1.1.0，两条断言必红（真踩过）。
+  DSH_HOST_MATRIX_CORDIS: cordis,
+  DSH_HOST_MATRIX_LOADER: loader,
   // 安装树里的宿主包是完整元包，lockfile 与"只声明自己用到的那些"不是一回事；
   // 这一条在矩阵腿里按已知容忍处理，但**原因写在报告里**（见 docs/design.md）。
   DSH_HOST_MATRIX: '1',
