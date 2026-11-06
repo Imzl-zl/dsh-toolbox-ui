@@ -300,7 +300,13 @@ test('real host: 没有任何服务器被延迟时，引导段与目录段都不
     // 另一半：不延迟就必须全量可见——那正是关掉这个功能想要的行为。
     assert.ok(assembly.tools.some((tool) => tool.name.startsWith('mcp__deferme__')), '关掉延迟后全局族工具必须全量可见')
     assert.ok(assembly.tools.some((tool) => tool.name.startsWith('mcp__proj__')), '项目族同理')
-    assert.equal(assembly.tools.some((tool) => tool.name === 'tool_search'), true, 'tool_search 仍注册着（总开关没关）')
+    // issue #9：用户报"MCP 全部禁用依然会加载 tool_search"——模型看见它就去搜一次空目录。
+    // 现在的契约：**没有可搜的东西时搜索入口不发给模型**；它本身仍注册在宿主里
+    //（有工具被延迟时，下一次组建立刻又出现），所以 ctx.tools.schemas() 仍能看到它。
+    assert.equal(assembly.tools.some((tool) => tool.name === 'tool_search'), false,
+      '没有延迟工具时不得把搜索入口发给模型（issue #9）')
+    assert.equal(off.tools.schemas().some((schema) => schema.name === 'tool_search'), true,
+      '搜索工具仍应注册在宿主：这是"没有东西可搜"，不是"把功能关掉"')
   } finally {
     await off.dispose()
   }

@@ -43,20 +43,23 @@ test('presentAssembly: mode=both 原样放行（两条投影都有效时不碰�
   assert.equal(output, input)
 })
 
-test('presentAssembly: managed=∅ 只摘引导段，不追加目录', async () => {
+test('presentAssembly: managed=∅ 只摘引导段与搜索入口，不追加目录', async () => {
   const input = assembly()
   const output = await presentAssembly(input, snapshot({ managed: [] }), handlers(), OPTIONS)
   assert.notEqual(output, input)
-  assert.deepEqual(output.tools, input.tools, '工具一个都不许动')
+  // 一个延迟工具都没有 = 没有东西可搜：搜索入口本身也摘掉，否则模型会照着它搜一次空目录
+  // （issue #9：MCP 全部禁用依然会加载 tool_search）。
+  assert.deepEqual(output.tools.map((tool) => tool.name), input.tools.map((tool) => tool.name).filter((name) => name !== 'tool_search'))
   assert.equal(output.sections.length, 2)
   assert.equal(output.sections.find((section) => section.name === 'tool-search:guidance').text, '')
   assert.equal(output.sections.some((section) => section.name === 'tool-search:catalog'), false)
 })
 
-test('presentAssembly: D=∅（全部已发现）时目录与引导段一起消失', async () => {
+test('presentAssembly: D=∅（全部已发现）时目录、引导段与搜索入口一起消失', async () => {
   const input = assembly()
   const output = await presentAssembly(input, snapshot({ discovered: ['mcp__srv__a', 'mcp__srv__b'] }), handlers(), OPTIONS)
-  assert.deepEqual(output.tools, input.tools)
+  // 全被发现了：工具本身都在，但"再去搜"这件事已经没有意义——搜索入口一并摘掉。
+  assert.deepEqual(output.tools.map((tool) => tool.name), ['Read', 'mcp__srv__a', 'mcp__srv__b'])
   assert.equal(output.sections.some((section) => section.name === 'tool-search:catalog'), false)
   assert.equal(output.sections.find((section) => section.name === 'tool-search:guidance').text, '')
 })

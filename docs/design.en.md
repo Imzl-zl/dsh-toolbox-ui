@@ -478,6 +478,7 @@ writes it into its own `.dsh/mcp.json`. Anything not listed is resident.
 
 Why resident by default: the host exposes no tool provenance API, so the plugin cannot tell
 built-in from third-party; hiding anything by default could hide a user's everyday tool.
+**No search entry point when there is nothing to search**: with an empty deferred set (no deferred MCP at all, or everything already discovered), `tool_search` disappears from the model-visible tools together with the catalog section. It stays registered in the host, but "searching would find nothing right now" only invites a wasted round (issue #9). This does not conflict with "the search entry point cannot be hidden by user policy": the former is "there is nothing to search", the latter is "the user cannot turn it off".
 Server-level stays tri-state: `defer: true` = deferred, `defer: false` = explicitly resident,
 absent = follow the rest — so the Deferred/Resident chip always decides.
 

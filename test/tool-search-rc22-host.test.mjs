@@ -61,7 +61,7 @@ async function scopeAgent(ctx, agent) {
  * 宿主在 waterfall 之后才把 provider-owned 的 `tools` 贴回最终 assembly。所以必须
  * 在 `systemPrompt.assemble()` 返回之后投影，否则目录段会出现、声明一个都不会少。
  */
-async function createHost({ presentation = 'native' } = {}) {
+async function createHost({ presentation = 'native', deferral = true } = {}) {
   const [{ default: SystemPrompt }, executorModule] = await Promise.all([
     import(pathToFileURL(toolsRequire.resolve('@deepseek-ai/dsh-system-prompt')).href),
     importHost(presentation === 'ptc' ? '@deepseek-ai/dsh-tool-executor-ptc' : '@deepseek-ai/dsh-tool-executor-native'),
@@ -88,7 +88,8 @@ async function createHost({ presentation = 'native' } = {}) {
   agent.ctx.tools.register(definitionOf('mcp__rc22__alpha', 'RC22 alpha OWN-scope override'))
 
   const dispose = installToolSearchRuntime(ctx, {
-    deferServers: ['rc22'],
+    // deferral=false：一台延迟的服务器都没有——模型不该看见搜索入口（issue #9）。
+    deferServers: deferral ? ['rc22'] : [],
     serverNames: ['rc22'],
     policyFor: () => undefined,
   })
@@ -150,6 +151,30 @@ test('npm 0.2.2-rc.1: native 声明先隐藏、搜索后出现，when=false 与 
     assert.match(host.tools.get('mcp__rc22__alpha', host.agent, admission).description, /OWN-scope override/)
   } finally {
     admission?.dispose()
+    await host.cleanup()
+  }
+})
+
+test('npm 0.2.2-rc.1: 没有任何延迟工具时，搜索入口与目录段一起不出现（issue #9）', MODERN, async () => {
+  // 用户报的现象：MCP 全部禁用后 `tool_search` 还在，模型看见就去搜一次空目录。
+  // 这里用同一套真宿主夹具、只把"有延迟服务器"这一条去掉。
+  const host = await createHost({ deferral: false })
+  try {
+    const admission = await host.admit()
+    const assembly = await host.assemble(host.agent, admission)
+    const names = host.names(assembly)
+    assert.equal(names.includes('tool_search'), false,
+      '没有可搜的工具时不得把搜索入口发给模型（issue #9）')
+    // 其余工具一个都不能少：这是"没有东西可搜"，不是"把工具藏起来"。
+    assert.ok(names.includes('mcp__rc22__alpha') && names.includes('mcp__rc22__beta'),
+      '没有延迟工具时所有工具都该常驻可见')
+    assert.equal(assembly.sections.some((section) => section.name === 'tool-search:catalog'), false,
+      '没有延迟工具时不该有目录段')
+    const guidance = assembly.sections.find((section) => section.name === 'tool-search:guidance')
+    assert.ok(guidance === undefined || guidance.text === '', '引导段不得再声称"有工具被延迟"')
+    // 搜索工具本身仍注册在宿主里（只是不发给模型）：一旦有工具被延迟，下一次组建立刻又出现。
+    assert.ok(host.tools.schemas().some((schema) => schema.name === 'tool_search'), '搜索工具仍应注册在宿主')
+  } finally {
     await host.cleanup()
   }
 })

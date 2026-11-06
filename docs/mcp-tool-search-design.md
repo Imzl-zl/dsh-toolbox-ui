@@ -772,3 +772,21 @@ not only on disk`（夹具 = 临时技能根 × 真 `SkillRegistry` × 真 `dsh-
 所有变更型 RPC 现在返回同一组字段（`persisted` / `live` / `diagnostics`），"写盘成功但运行中没生效"
 如实报 `live: 'skipped'` + 原因，而不是一句「已更新」。契约单源与客户端产物见
 [`docs/design.md`](design.md) 的「写盘与运行中：一条链路」与「契约与产物：同一份定义」两节。
+
+## 12.13 没有可搜的工具时不再发搜索入口（issue #9，1.10.0）
+
+**现象**（用户报的）：把所有 MCP 停用、或把工具全设成常驻之后，模型仍然看得见 `tool_search`，
+于是它先搜一次——而此刻目录是空的，这一轮白花。
+
+**原因**：搜索入口是"稳定项"（不能被自己延迟掉，也不能被用户策略藏掉），旧实现把它当成
+"永远发给模型"。这是两件事被写成了一件：**不可被用户隐藏** ≠ **永远应该出现**。
+
+**现在的判据**（`lib/tool-search-presentation.js` 的 `presentAssembly`）：延迟集
+`D = M − 已发现` 为空时，搜索入口与目录段、引导段一起从模型可见的工具里摘掉；它本身仍注册在
+宿主里（`ctx.tools.schemas()` 依旧能看到），所以一旦有工具被延迟，下一次组建立刻又有它。
+PTC 的手册同理：把搜索入口放进"要摘掉"的集合交给渲染器重画（`trimSdkText` 的 `drop`）。
+
+**覆盖**：`test/tool-search-presentation.test.mjs`（3 个方向的纯层用例）、
+`test/tool-search-real-host.test.mjs`（真 rc.5 宿主：提示词里既无引导段也无目录段、
+声明里没有搜索入口、但宿主里仍注册着）、`test/tool-search-rc22-host.test.mjs`
+（真 rc.1 宿主，同一判据）。
