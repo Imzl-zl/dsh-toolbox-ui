@@ -17,6 +17,7 @@ const lockfile = parse(await readFile(new URL('../pnpm-lock.yaml', import.meta.u
 const dshHostPackages = [
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-agent-loop',
+  '@deepseek-ai/dsh-app-boot',
   '@deepseek-ai/dsh-atomic-write',
   '@deepseek-ai/dsh-mcp-client',
   '@deepseek-ai/dsh-scope',
@@ -24,36 +25,38 @@ const dshHostPackages = [
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/dsh-typert-protocol',
 ]
-// 只支持 0.2.x：ToolSearch 的 per-agent 呈现模式、`tools:sdk` 手册与 `sessionProjections`
-// 都是 0.2 的形态（0.1.x 没有 `modeFor(scope)`，也无法把一个内部投影挂到会话上）。
-// 窗口从原来的 `>=0.1.5-rc.1 <0.2.0` 上修——那条在 0.2.1 一发布就会被宿主判不兼容。
-const COMPAT_WINDOW = '>=0.2.0-rc.1 <0.3.0'
+// 当前支持从已验证的 0.2.1-rc.5 开始：新版 ToolSearch 公开 step toolSet 与独立
+// executor 是 0.2.2 的新路径；0.2.1 继续走兼容适配。更早 0.2.0 只保留在历史
+// loader 回归夹具中，不再作为发布准入范围。
+const COMPAT_WINDOW = '>=0.2.1-rc.5 <0.3.0'
+const DSH_ENGINE_WINDOW = '>=0.2.1-rc.5 <0.3.0'
 // 开发基线跟随已验证的最新 RC；发布边界由 peer 窗口表达。
 // 精确钉（不带 ^）：pin 的语义就是"这一个版本"。`^0.2.1-rc.5` 会接受同 tuple 的后续
 // 预发布（实测 `^0.2.1-rc.5` 匹配 `0.2.1-rc.6`），只有 lockfile 兜着，重生成 lock 就会漂。
-const DEV_BASELINE = '0.2.1-rc.5'
+//
+// 矩阵腿（`scripts/host-matrix.mjs`）会在**独立安装树**里把开发基线换成另一代宿主，
+// 并用 DSH_HOST_MATRIX_* 告诉这里"这一腿的目标是什么"。断言方向不变——仍然是"必须等于
+// 本腿的目标版本"，只是目标来自环境而不是写死：否则 rc.1 那一腿只能靠跳过它变绿。
+const MATRIX_BASELINE = process.env.DSH_HOST_MATRIX_BASELINE
+const DEV_BASELINE = MATRIX_BASELINE || '0.2.1-rc.5'
 // 锁文件里解析出的具体版本。**从 DEV_BASELINE 推导**，不要另写一处：这里原本硬编码
 // /^0\.1\.5-rc\.2/，于是 bump 基线时就有了第二个真源。
 const DEV_BASELINE_VERSION = DEV_BASELINE.replace(/^[^0-9]*/, '')
-// cordis 的**已验窗口**：ensureLogCapture 读写 logger.exporters / logger._snExporter 私有字段，
-// 而两个受支持的 dsh 版本自带不同的 cordis——0.2.0 是 ~4.0.2，0.2.1 是 ~4.0.5。
-// 两端都跑过全量，所以 peer 覆盖整段而不是钉死一端；上界只到 minor（<4.1.0）：
-// 私有面一动就要靠这道声明让宿主判不兼容，而不是静默错位。
-const CORDIS_PEER = '>=4.0.2 <4.1.0'
+// Cordis 的已验窗口覆盖当前 rc.5 的 4.0.5 与新版 rc.1 的 4.1.0；上界
+// 明确挡住下一代未验证的 4.2。
+const CORDIS_PEER = '>=4.0.5 <4.2.0'
 // dev 基线跟随已验证宿主（0.2.1-rc.5）自带的那一代（~4.0.5）：peer 窗口说的是"能装哪些"，
 // devDependencies 说的是"本地这套用例跑在哪个真实组合上"。两者不是一回事。
-const CORDIS_DEV_BASELINE = '~4.0.5'
+const CORDIS_DEV_BASELINE = process.env.DSH_HOST_MATRIX_CORDIS || '~4.0.5'
 // reveal 用 loader 的 interpolate 求值 `!!js` 节点；范围跟随 dsh 自身对它的要求。
-const CORDIS_LOADER_PEER = '^1.0.3'
-// 本地/CI 跑**哪一代** loader 是另一件事，与 peer 窗口分开：0.2.0 宿主自带 ~1.0.3，
-// 0.2.1 自带 ~1.0.6，而两代在「启动错误是否 rethrow」「dispose 会不会写回 include 树」
-// 上行为不同（守卫见 test/loader-compat.test.mjs）。dev 基线跟随已验证宿主的那一代；
-// peer 仍覆盖整段，不因本地跑哪一代而收窄。
-const CORDIS_LOADER_DEV_BASELINE = '~1.0.6'
+const CORDIS_LOADER_PEER = '>=1.0.6 <1.2.0'
+// 1.0.6 与 1.1.0 都在当前支持窗口内；更早 loader 只在历史
+// loader-compat 回归夹具中保留，不是当前发布准入。
+const CORDIS_LOADER_DEV_BASELINE = process.env.DSH_HOST_MATRIX_LOADER || '~1.0.6'
 
 test('package exposes one Web bundle entry', () => {
   assert.equal(packageJson.dsh?.bundle?.patch, './cordis.patch.yml')
-  assert.equal(packageJson.version, '1.9.0')
+  assert.equal(packageJson.version, '1.10.0')
   assert.equal(packageJson.dsh?.client?.platform, 'web')
   // dsh.client.inject 是客户端图里的「工厂先到」依赖边，只能写真实的 client 包名：
   //   @deepseek-ai/dsh-client-runtime  —— 上游 2026-08-22 已删除（be531688 "remove Runtime"）
@@ -87,8 +90,9 @@ test('package declares the DSH compatibility window and pins development to a ve
   // 不随本包发布，仓里也没有它——模拟 semver 只会得到相反结论（见 docs/design.md §版本范围）。
   // 所以这里只钉结构：换了元组就红，至于某个具体版本能不能装，由宿主那道闸门回答。
   const [lower, upper] = COMPAT_WINDOW.split(' ')
-  assert.equal(lower, '>=0.2.0-rc.1', '下限必须是 0.2 的第一个 RC')
+  assert.equal(lower, '>=0.2.1-rc.5', '下限必须是当前已验证开发基线')
   assert.equal(upper, '<0.3.0', '上限必须挡住 0.3（粗上限：只回答"这个大版本没验证过"）')
+  assert.equal(packageJson.engines?.dsh, DSH_ENGINE_WINDOW, 'engines.dsh 必须与 peer 支持窗口一致')
   // devDependencies 必须落在 peer 窗口内：否则开发/测试跑的是一个用户装不上的版本组合。
   assert.equal(DEV_BASELINE_VERSION.startsWith('0.2.'), true, `开发基线 ${DEV_BASELINE_VERSION} 必须在 0.2.x`)
 })
@@ -370,7 +374,8 @@ test('mount failures are attributed to the row and the detail pane, not only a b
 test('global MCPs are inspectable from a project tab but stay read-only there', () => {
   // 长得像列表项却点不开，是最直接的交互不一致。
   assert.match(client, /onClick: \(\) => onSelect\(s\.serverName\),[^]*?onKeyDown[^]*?dsh-mcp-item-name/)
-  assert.match(client, /return global \? \{ \.\.\.global, managed: false, foreign: 'global' \} : null/)
+  assert.match(client, /return shared \? \{ \.\.\.shared, managed: false, foreign: 'global' \} : null/)
+  assert.match(client, /if \(scope === 'global' \|\| !globalOpen\) return servers\.find/)
   assert.match(client, /const isForeign = server\.foreign === 'global'/)
   // 只读的同时仍要能改「对本项目是否可见」，否则详情页比列表还弱。
   assert.match(client, /isForeign\s*\n\s*\? h\(React2\.Fragment, null,[^]*?onToggleExclude\(server\.serverName, next\)/)
@@ -409,15 +414,17 @@ test('client moves focus into dialogs so Escape handlers receive keyboard events
   assert.equal(dialogSites, 3, `手写的 role="dialog" 从三处变成了 ${dialogSites} 处：Dialog 构造器 / 面板本体 / 更新卡片之外不应再有`);
   const dialogCtor = client.slice(client.indexOf('const Dialog = ('), client.indexOf('const CONTROLS_THRESHOLD'))
   assert.match(dialogCtor, /const dialogRef = useRef\(null\)/)
-  assert.match(dialogCtor, /useEffect\(\(\) => \{ dialogRef\.current\?\.focus\(\); \}, \[\]\)/, 'Dialog 必须在挂载时把焦点吸进来（挂载即打开）')
+  assert.match(dialogCtor, /useEffect\(\(\) => \{[\s\S]*?dialogRef\.current\?\.focus\(\);[\s\S]*?\}, \[\]\)/, 'Dialog 必须在挂载时把焦点吸进来（挂载即打开）')
+  assert.match(dialogCtor, /previous\?\.isConnected/, '关闭后恢复原控件焦点')
+  assert.match(dialogCtor, /if \(e\.key !== 'Tab'\) return/, 'Tab 不能逃出模态框')
   assert.match(dialogCtor, /role: 'dialog'/)
   assert.match(dialogCtor, /tabIndex: -1/)
   // 六个 modal 全部走构造器；有任何一个回去手写内层 div，这里就会掉下来。
-  // 5 → 6：1.8.0 的 C2 新增「延迟加载参数」表单（它同样必须走 Dialog，才有焦点与 Escape）。
+  // 6 → 7 后又合并回 6：搜索参数并进了「工具搜索」弹窗，不再单独开一个。
   const uses = [...client.matchAll(/h\(Dialog, \{ label: /g)].length
   assert.equal(uses, 6, `走 Dialog 的对话框数量变了（现在 ${uses} 个）`)
   assert.equal((client.match(/className: 'dsh-mcp-modal' \+ \(cls/g) || []).length, 1, 'modal 的 class 组合只该在 Dialog 里做一次')
-  // 遮罩由调用点渲染一次（六个 modal + 更新卡片自己那层，共七处）。Dialog 内部再套一层就会
+  // 遮罩由调用点渲染一次（七个 modal + 更新卡片自己那层，共八处）。Dialog 内部再套一层就会
   // 嵌套出两个 overlay——实测踩过，所以钉住。
   assert.equal((client.match(/className: 'dsh-mcp-overlay'/g) || []).length, 7, '遮罩只在调用点渲染，Dialog 不重复套一层')
 })
@@ -471,9 +478,10 @@ test('the gateway prototypes are the fourth contract face: no method falls off t
   assert.ok(declared.length >= 40, `从 index.js 读到的 Remote 数量异常（${declared.length}）`)
 
   // 仅内部使用、不上面 wire 的方法必须**显式登记**：漏登记一个，这条就红，而红说的正是
-  // "有个方法没接上 wire"。目前只有一个——`setDisabled` 是 enable/disable 的共用实现，
-  // 面板不直接调它（调的是 enable/disable）。
-  const INTERNAL_ONLY = new Set(['setDisabled'])
+  // "有个方法没接上 wire"。登记表在 lib/rpc-contract.js（与 typert/client 生成物同一份定义），
+  // 所以这里不再抄第二份清单——曾经两处各写一遍，加一个内部方法就得记得改两个地方。
+  const { INTERNAL_ONLY: internalOnly } = await import('../lib/rpc-contract.js')
+  const INTERNAL_ONLY = new Set(internalOnly.map(([name]) => name))
   const faces = [
     ...Object.getOwnPropertyNames(McpManagerGateway.prototype),
     ...Object.getOwnPropertyNames(SkillsManagerGateway.prototype),
@@ -574,15 +582,15 @@ test('workspace tab renders project MCPs as their own card instead of a nested c
   // ServerList 内嵌进项目分区时必须丢掉自身卡片外框，否则出现卡中卡。
   assert.match(client, /\.dsh-mcp-side\.embedded\{[^}]*flex:1 1 auto[^}]*border:0[^}]*padding:0/)
   assert.match(client, /className: 'dsh-mcp-side' \+ \(embedded \? ' embedded' : ''\)/)
-  // 两个分区各自成卡片，不再靠 border-top 分隔。圆角走共享刻度令牌
-  // （docs/ui-radius.md：独立内容卡用 --dsw-radius-xl 一档；此处取 --mcp-r-lg）。
+  // 两个来源共用一张左栏，不能恢复成互相抢高度的嵌套卡片。
   assert.match(client, /\.dsh-mcp-section\{[^}]*border:1px solid var\(--mcp-line\)[^}]*border-radius:var\(--mcp-r-lg\)/)
-  assert.doesNotMatch(client, /\.dsh-mcp-section\+\.dsh-mcp-section\{border-top/)
-  assert.match(client, /\.dsh-mcp-section\.local\{[^}]*border-color:var\(--mcp-accent\)/)
+  assert.match(client, /\.dsh-mcp-section\.local\{[^}]*border-color:var\(--mcp-line\)/)
   assert.match(client, /className: 'dsh-mcp-section local'/)
-  assert.match(client, /className: 'dsh-mcp-section global'/)
-  // ws-body 变成纯布局容器：不再叠一层卡片，放不下时自身滚动而不是裁掉内容。
-  assert.match(client, /\.dsh-mcp-ws-body\{[^}]*overflow-y:auto/)
+  assert.match(client, /className: 'dsh-mcp-source-tabs'/)
+  assert.doesNotMatch(client, /className: 'dsh-mcp-section global'/)
+  assert.doesNotMatch(client, /dsh-mcp-global-drawer/)
+  // ws-body 变成纯布局容器：项目列表自身滚动，外框不再叠一层滚动区。
+  assert.match(client, /\.dsh-mcp-ws-body\{[^}]*overflow:hidden/)
   assert.doesNotMatch(client, /\.dsh-mcp-ws-body\{[^}]*border:1px solid/)
 })
 
@@ -591,7 +599,6 @@ test('server lists keep a minimum visible height and never get clipped to zero o
   assert.match(client, /\.dsh-mcp-list\{flex:1 1 auto;min-height:52px/)
   assert.match(client, /\.dsh-mcp-global-list\{[^}]*min-height:52px/)
   assert.match(client, /\.dsh-mcp-section\.local\{[^}]*min-height:124px/)
-  assert.match(client, /\.dsh-mcp-section\.global\{[^}]*min-height:124px/)
   // 窄屏改为整页滚动 + 列表各自 vh 上限，取代会裁掉整块列表的 max-height:34%。
   assert.doesNotMatch(client, /max-height:34%/)
   assert.match(client, /@media \(max-width:760px\)\{[^]*?\.dsh-mcp-body\{flex-direction:column;overflow-y:auto/)
@@ -645,7 +652,7 @@ test('sparse workspace lists hide filter controls and global search stays outsid
   // 项目 MCP 通常只有 1-3 个，常驻搜索框 + 两个下拉会吃掉整块列表高度。
   assert.match(client, /const showControls = !embedded \|\| count > CONTROLS_THRESHOLD/)
   assert.match(client, /workspace \? null : h\('option', \{ value: 'connected' \}/)
-  assert.match(client, /emptyHint: t\('此项目还没有 MCP。/)
+  assert.match(client, /emptyHint: t\('还没有项目 MCP。/)
   // 搜索框必须是分区的直接子节点，否则会随列表一起滚走。
   assert.match(client, /servers\.length > CONTROLS_THRESHOLD \? h\('div', \{ className: 'dsh-mcp-global-search' \}[^]*?\n\s*h\('div', \{ className: 'dsh-mcp-global-list' \}/)
   assert.match(client, /setTransportFilter\('all'\);\s*\n\s*setStatusFilter\('all'\);/)
@@ -663,13 +670,14 @@ test('visibility and enablement use deliberately different controls', () => {
   assert.match(client, /onClick: \(e\) => \{ e\.stopPropagation\(\); onChange\(!hidden\); \}/)
 })
 
-test('global list collapses to a one-line summary so the project list stays the subject', () => {
-  // 全局可见性是低频操作，展开时占了项目区两倍高度并把详情挤出视口。
+test('project and shared-global sources use the same sidebar while keeping detail visible', () => {
   assert.match(client, /const \[globalOpen, setGlobalOpen\] = useState\(false\)/)
-  assert.match(client, /className: 'dsh-mcp-section global' \+ \(globalOpen \? '' : ' collapsed'\)/)
-  assert.match(client, /t\('\{visible\}\/\{total\} 对本项目可见', \{ visible: visibleGlobalCount, total: globalServers\.length \}\)/)
-  assert.match(client, /globalOpen \? h\(GlobalServerList/)
-  assert.match(client, /\.dsh-mcp-section\.global\.collapsed\{flex:none;min-height:0;border-color:transparent/)
+  assert.match(client, /className: 'dsh-mcp-source-tabs', role: 'tablist'/)
+  assert.match(client, /'aria-selected': !globalOpen/)
+  assert.match(client, /'aria-selected': globalOpen/)
+  assert.match(client, /t\('\{visible\}\/\{total\} 可见', \{ visible: visibleGlobalCount, total: globalServers\.length \}\)/)
+  assert.match(client, /globalOpen \? h\(React2\.Fragment, null,\s*h\(GlobalServerList/)
+  assert.doesNotMatch(client, /dsh-mcp-global-drawer|dsh-mcp-global-entry/)
   assert.match(client, /setGlobalOpen\(false\);/)
 })
 

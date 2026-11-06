@@ -252,6 +252,35 @@ test('toMcpClientConfig maps spec to official client config', () => {
   assert.deepEqual(http.headers, { A: 'abc' })
 })
 
+test('writeWorkspaceConfig preserves tools-only and groups-only tool loading policies', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-tool-loading-policy-'))
+  try {
+    await writeWorkspaceConfig(root, {
+      servers: [],
+      exclude: [],
+      toolLoading: {
+        mode: 'legacy',
+        groups: { browser: 'deferred' },
+        tools: { read: 'resident' },
+      },
+    }, writeFile, (path) => mkdir(path, { recursive: true }))
+    const config = await readWorkspaceConfig(root, readFile)
+    assert.equal(config.error, '')
+    assert.deepEqual(config.toolLoading, {
+      mode: 'legacy',
+      groups: { browser: 'deferred' },
+      tools: { read: 'resident' },
+    })
+    const parsed = JSON.parse(await readFile(join(root, '.dsh', 'mcp.json'), 'utf8'))
+    assert.deepEqual(parsed.toolLoading, {
+      groups: { browser: 'deferred' },
+      tools: { read: 'resident' },
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('writeWorkspaceConfig omits empty exclude', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-ws-'))
   const write = (path, text) => writeFile(path, text)

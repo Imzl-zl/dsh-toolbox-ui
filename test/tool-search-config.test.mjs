@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { deferServersOf, serverNamesOf, toolSearchDisabled } from '../lib/tool-search-config.js'
+import { deferServersOf, deferTableFor, residentServersOf, serverNamesOf, toolSearchDisabled } from '../lib/tool-search-config.js'
 
 // 夹具：loader.entries() 产出 mcp-client 条目（契约同 mcp-registry.allMcpEntries）。
 function createCtx(entries) {
@@ -68,4 +68,16 @@ test('deferServersOf: 未设开关时正常返回', () => {
   } finally {
     if (previous !== undefined) process.env.DSH_MCP_TOOL_SEARCH = previous
   }
+})
+
+test('deferTableFor: 三态合并——true 压过 false，false 压过缺席，顺序无关', () => {
+  const forward = deferTableFor({
+    globalEntries: [{ name: 'a', defer: true }, { name: 'a', defer: false }, { name: 'b', defer: false }, { name: 'b', defer: undefined }],
+  })
+  const reversed = deferTableFor({
+    globalEntries: [{ name: 'a', defer: false }, { name: 'a', defer: true }, { name: 'b', defer: undefined }, { name: 'b', defer: false }],
+  })
+  assert.equal(forward.get('a'), true, '任一 true 即延迟')
+  assert.equal(forward.get('b'), false, 'false 压过缺席')
+  assert.deepEqual([...forward].sort(), [...reversed].sort(), '合并结果与条目顺序无关')
 })

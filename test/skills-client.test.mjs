@@ -669,18 +669,12 @@ test('the list row badges BOTH invocation faces, because either one can be off',
   assert.match(subOf({ modelInvocable: false, userInvocable: false, enabled: false, migrated: true }), /旧机制停用/)
 })
 
-test('the diagnostics row shows the state, never the raw root path (it overflows the sidebar)', async () => {
-  // ⚠️ 真机发现的缺陷（起隔离 DSH 实例点出来的）：诊断行原来在副标题里塞了**整条根路径**，
-  // 而那串路径在侧栏 185px 的单元格里溢出（实测 scrollWidth 237 > clientWidth 185），
-  // 且 `.dsh-mcp-item-sub` **没有** ellipsis（只有 .dsh-mcp-item-name 有），
-  // 于是那行被硬裁成「已」后面什么都没有——用户看到半截字，以为渲染坏了。
-  //
-  // ⚠️⚠️ 这条用例第一版**测错了对象**：它渲染 SkillRow，而诊断组是**内联在 SkillsPanel 里
-  // 手写的**（不走 SkillRow），于是把根路径塞回去也不会有任何用例变红（变异验证当场发现）。
-  // 所以必须渲染**真的 SkillsPanel**，让它自己产出诊断行。
+test('disabled skills appear once and keep their inline state without overflowing root paths', async () => {
+  // 停用技能已在原作用域组里；把同一行再追加到「需要注意」会重复计数，且绕过筛选。
+  // 验证真正的 SkillsPanel 列表，既保留原行状态，也禁止第二份诊断行。
   const internals = loadClientInternals()
   const longRoot = 'C:\\Users\\zhanglu\\AppData\\Local\\Temp\\dsh-uitest-agents\\skills'
-  // 一条**旧机制残留**：它既进「已停用」也进「需要注意」两组，正是真机上溢出的那一行。
+  // 旧机制残留仍要能从原行辨认，并能在原行恢复。
   const parked = {
     name: 'legacy-parked', description: '', entry: 'legacy-parked', kind: 'bundle',
     source: 'user-agents', scope: 'global', writable: true, root: longRoot,
@@ -713,8 +707,65 @@ test('the diagnostics row shows the state, never the raw root path (it overflows
     assert.doesNotMatch(text, /C:\\Users|AppData|dsh-uitest-agents/,
       `副标题里不得出现根路径——它会在 185px 的侧栏里溢出并被硬裁（真机实测）。实际：${text}`)
   }
-  // 状态本身照常说（残留与普通停用要能区分）
-  assert.match(textOf(tree).join(' '), /旧机制停用/, '状态要说出来')
+  const skillList = findNode(tree, (node) => node.props?.className === 'dsh-mcp-list')
+  const renderedRows = collectAll(skillList, (node) => node.props?.className?.split(' ').includes('dsh-mcp-item'))
+  assert.equal(renderedRows.length, 1, '同一停用技能只能在原作用域组出现一次')
+  assert.match(textOf(renderedRows[0]).join(' '), /legacy-parked.*旧机制停用/, '原行保留名称与具体诊断状态')
+  const restore = findNode(renderedRows[0], (node) => node.props?.role === 'switch')
+  assert.equal(restore.props['aria-checked'], false, '原行仍能恢复停用技能')
+  assert.equal(restore.props.disabled, false)
+})
+
+test('scope, query and status filters keep the selected detail inside the visible skill list', async () => {
+  const internals = loadClientInternals()
+  const rows = [
+    skill({ name: 'global-only', entry: 'global-only', description: '', enabled: true }),
+    skill({ name: 'project-running', entry: 'project-running', description: '', source: 'project-agents', scope: 'project', cwd: '/work/project', root: '/work/project/.agents/skills', enabled: true }),
+    skill({ name: 'project-parked', entry: 'project-parked', description: '', source: 'project-agents', scope: 'project', cwd: '/work/project', root: '/work/project/.agents/skills', enabled: false, modelInvocable: false, userInvocable: false }),
+  ]
+  const call = async (method, request) => {
+    if (method === 'list') return { ok: true, skills: rows }
+    if (method === 'detail') return { ok: true, skill: { content: request.name + ' body' } }
+    return { ok: true, targets: [], skills: [], total: 0, labels: {} }
+  }
+  let props = { call, workspaces: ['/work/project'], scopeFilter: 'all', onScopeFilter() {}, onSort() {} }
+  const render = () => internals.__render(internals.SkillsPanel, props)
+  const paneOf = (tree) => findNode(tree, (node) => node.type === internals.SkillDetailPane)
+  const rowsOf = (tree) => collectAll(tree, (node) => node.type === internals.SkillRow)
+  const settle = async () => {
+    internals.__effects.length = 0
+    render()
+    await flushEffects(internals)
+    return render()
+  }
+  render()
+  await flushEffects(internals)
+  let tree = await settle()
+  assert.equal(paneOf(tree).props.row.name, 'global-only', '初始选中可见的第一行')
+
+  props = { ...props, scopeFilter: internals.skillGroups(internals.skillRows(rows)).find((group) => group.scope !== 'global' && group.cwd === '/work/project').key }
+  tree = render()
+  assert.notEqual(paneOf(tree).props.row?.name, 'global-only', '切作用域的第一帧就不能继续操作隐藏的全局行')
+  tree = await settle()
+  assert.equal(paneOf(tree).props.row.name, 'project-running', '切作用域后补选本项目第一行')
+  assert.equal(rowsOf(tree).find((row) => row.props.selected).props.row.key, paneOf(tree).props.row.key, '高亮行与详情是同一身份')
+  assert.deepEqual(rowsOf(tree).map((row) => row.props.row.name), ['project-running', 'project-parked'])
+
+  findNode(tree, (node) => node.props?.placeholder === '搜索技能…').props.onChange({ target: { value: 'project-parked' } })
+  tree = await settle()
+  assert.equal(paneOf(tree).props.row.name, 'project-parked', '查询排除旧选中项后要补选匹配行')
+  assert.deepEqual(rowsOf(tree).map((row) => row.props.row.name), ['project-parked'])
+
+  findNode(tree, (node) => node.props?.['aria-label'] === '按状态过滤').props.onChange({ target: { value: 'enabled' } })
+  tree = await settle()
+  assert.equal(paneOf(tree).props.row, null, '状态与搜索没有交集时详情必须清空')
+  assert.equal(rowsOf(tree).length, 0, '隐藏的停用技能不能从诊断组重新出现')
+  assert.match(textOf(tree).join(' '), /没有匹配的技能/)
+
+  findNode(tree, (node) => node.props?.placeholder === '搜索技能…').props.onChange({ target: { value: '' } })
+  tree = await settle()
+  assert.equal(paneOf(tree).props.row.name, 'project-running', '清空查询后补选仍匹配状态的行')
+  assert.deepEqual(rowsOf(tree).map((row) => row.props.row.name), ['project-running'])
 })
 
 test('the user-invocable face has its OWN switch, wired to its own action', () => {
@@ -1220,6 +1271,51 @@ test('市场搜索请求带 page 与 pageSize 上限：上游 19 万条，只取
   const tree = internals.__expand(internals.__render(internals.SkillsPanel, props))
   assert.ok(textOf(tree).some((text) => text.includes('已显示 1 / 共 192936 条')),
     `计数文案要与实物一致，实际：${JSON.stringify(textOf(tree).filter((t) => t.includes('条')))}`)
+})
+
+test('market target summary follows the selected option scope and the actual installation target', async () => {
+  const internals = loadClientInternals()
+  const targets = [
+    { source: 'user-agents', scope: 'global', root: '/home/u/.agents/skills', writable: true },
+    { source: 'project-agents', scope: 'project', root: '/work/project/.agents/skills', projectPath: '/work/project', writable: true },
+  ]
+  const installed = []
+  const entry = hubSkill('target-check')
+  const call = async (method, request) => {
+    if (method === 'skillTargets') return { ok: true, targets }
+    if (method === 'skillHubSearch') return { ok: true, total: 1, skills: [entry] }
+    if (method === 'skillHubCategories') return { ok: true, labels: {} }
+    if (method === 'skillHubDetail') return { ok: true, pageUrl: entry.pageUrl }
+    if (method === 'skillHubInstall') installed.push(request)
+    return { ok: true, skills: [] }
+  }
+  const props = { call, workspaces: ['/work/project'], mode: 'market' }
+  const render = () => internals.__render(internals.SkillsPanel, props)
+  const summaryOf = (tree) => textOf(findNode(tree, (node) => node.props?.className === 'dsh-mcp-market-section')).join(' ')
+  const modalOf = (tree) => findNode(tree, (node) => node.type === internals.SkillInstallModal)
+  render()
+  await flushEffects(internals)
+  let tree = render()
+  assert.match(summaryOf(tree), /装入全局/, '安装目标 ID 不是字面量 global，要读候选对象的 scope')
+
+  let expanded = internals.__expand(tree)
+  findNode(hubCards(expanded)[0], (node) => node.type === 'button' && node.props?.className?.includes('primary')).props.onClick()
+  tree = render()
+  const modal = modalOf(tree)
+  const projectTarget = list(modal.props.scopeOptions).find((option) => option.scope === 'project')
+  modal.props.onScope(projectTarget.id)
+  tree = render()
+  assert.match(summaryOf(tree), /装入项目/, '选择项目目标后摘要跟随同一对象')
+  await modalOf(tree).props.onConfirm(entry)
+  assert.equal(installed.length, 1)
+  assert.equal(installed[0].source, targets[1].source)
+  assert.equal(installed[0].root, targets[1].root, '摘要与写入的目标来自同一份选择')
+
+  expanded = internals.__expand(render())
+  findNode(hubCards(expanded)[0], (node) => node.type === 'button' && node.props?.className?.includes('primary')).props.onClick()
+  tree = render()
+  assert.equal(modalOf(tree).props.scope, projectTarget.id, '再次安装保留用户选择，不能重置回第一个目标')
+  assert.match(summaryOf(tree), /装入项目/)
 })
 
 test('上游同一页内就会返回重复 slug：条目按 slug 全局去重，React key 不撞车', async () => {

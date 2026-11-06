@@ -11,6 +11,7 @@ import {
   foldEvent,
   parseDiscoveredMeta,
   projectionBound,
+  promise,
   seed,
   sizeOf,
   touch,
@@ -128,18 +129,20 @@ test('versionOf: 只有成员变化才前进（touch 不算）', () => {
   assert.equal(versionOf(state), v1, 'touch 不算成员变化')
 })
 
-// ── 投影 fold（C4 / F18–F20）──
+// ── 投影 fold（C4 / v2 协议 / F18–F20）──
 
-const withProtocol = (value) => ({ protocol: 'dsh-tool-search/v1', ...value })
+const v1 = (value) => ({ protocol: 'dsh-tool-search/v1', ...value })
+const v2 = (orderedNames) => ({ protocol: 'dsh-tool-search/v2', discoverySnapshot: { orderedNames } })
 
 /** `tool/result` 的真实载荷形状（dsh-session types.d.ts:374）。 */
-const toolResult = (value, { isError = false } = {}) => ({
+const toolResult = (value, { isError = false, meta = undefined, seq = 1 } = {}) => ({
   type: 'tool/result',
-  seq: 1,
+  seq,
   time: 0,
   data: {
     turn: 0,
     step: 0,
+    ...(meta === undefined ? {} : { meta }),
     message: {
       role: 'tool',
       toolCallId: 'c1',
@@ -168,46 +171,100 @@ const ptcDispatch = (name, value, { isError = false } = {}) => ({
 const OPTS = { toolName: 'tool_search', max: 100 }
 const init = () => ({ discovered: [] })
 
-test('foldEvent: native 的 tool/result 与 PTC 的 tool/ptc-dispatch 都识别', () => {
+test('foldEvent: native 的 tool/result 与 PTC 的 tool/ptc-dispatch 都识别（v2 有序替换）', () => {
   // PTC 下搜索发生在程序内部，只留 tool/ptc-dispatch 事件（它不在 surface 事件集里，
   // 所以 deriveMessages 看不到它——这正是要用投影的原因，F18）。
-  const fromNative = foldEvent(init(), toolResult(withProtocol({ allDiscoveredTools: ['mcp__a__x'] })), OPTS)
+  const fromNative = foldEvent(init(), toolResult(v2(['mcp__a__x'])), OPTS)
   assert.deepEqual(fromNative.discovered, ['mcp__a__x'])
+  assert.equal(fromNative.protocol, 'dsh-tool-search/v2')
 
-  const fromPtc = foldEvent(init(), ptcDispatch('tool_search', withProtocol({ allDiscoveredTools: ['mcp__a__y'] })), OPTS)
+  const fromPtc = foldEvent(init(), ptcDispatch('tool_search', v2(['mcp__a__y'])), OPTS)
   assert.deepEqual(fromPtc.discovered, ['mcp__a__y'])
+})
+
+test('foldEvent: v2 是替换快照——顺序保留、空数组清空（不能 union、不能排序）', () => {
+  const first = foldEvent(init(), toolResult(v2(['b', 'a']), { seq: 1 }), OPTS)
+  assert.deepEqual(first.discovered, ['b', 'a'], '顺序是 LRU 事实，读侧不许重排')
+  // 替换：丢掉的不再出现，新增的进末尾。
+  const second = foldEvent(first, toolResult(v2(['a', 'c']), { seq: 2 }), OPTS)
+  assert.deepEqual(second.discovered, ['a', 'c'])
+  // 空快照 = 明确清空（这是 v1 做不到、也是"淘汰后恢复"唯一正确的表达）。
+  const cleared = foldEvent(second, toolResult(v2([]), { seq: 3 }), OPTS)
+  assert.deepEqual(cleared.discovered, [], '空快照必须清空，不能保留旧集合')
+  // 已经空了再收到空快照：同一引用（宿主按引用判变化）。
+  assert.equal(foldEvent(cleared, toolResult(v2([]), { seq: 4 }), OPTS), cleared)
+})
+
+test('foldEvent: 结构化 meta 优先于模型可读正文', () => {
+  // 正文是给模型看的投影（可能被渲染器改写）；恢复种子必须读宿主一等公民的 meta。
+  const event = toolResult(v1({ allDiscoveredTools: ['from-text'] }), { meta: v2(['from-meta']) })
+  const state = foldEvent(init(), event, OPTS)
+  assert.deepEqual(state.discovered, ['from-meta'])
+})
+
+test('foldEvent: v1 是兼容输入，只能 union（明确降级）', () => {
+  const first = foldEvent(init(), toolResult(v1({ allDiscoveredTools: ['a'] }), { seq: 1 }), OPTS)
+  assert.deepEqual(first.discovered, ['a'])
+  assert.equal(first.protocol, 'dsh-tool-search/v1')
+  const second = foldEvent(first, toolResult(v1({ allDiscoveredTools: ['a', 'b'] }), { seq: 2 }), OPTS)
+  assert.deepEqual(second.discovered, ['a', 'b'])
+  // v1 的"顺序"没有语义：它不会把已存在的名字重排，也不会删掉任何东西。
+  const reordered = foldEvent(second, toolResult(v1({ allDiscoveredTools: ['b'] }), { seq: 3 }), OPTS)
+  assert.deepEqual(reordered.discovered, ['a', 'b'])
 })
 
 test('foldEvent: 别人的工具结果、错误结果、别的 protocol 一律不认', () => {
   const state = init()
-  assert.equal(foldEvent(state, ptcDispatch('other_tool', withProtocol({ allDiscoveredTools: ['x'] })), OPTS), state)
-  assert.equal(foldEvent(state, toolResult(withProtocol({ allDiscoveredTools: ['x'] }), { isError: true })), state)
-  assert.equal(foldEvent(state, ptcDispatch('tool_search', withProtocol({ allDiscoveredTools: ['x'] }), { isError: true }), OPTS), state)
+  assert.equal(foldEvent(state, ptcDispatch('other_tool', v2(['x'])), OPTS), state)
+  assert.equal(foldEvent(state, toolResult(v2(['x']), { isError: true })), state)
+  assert.equal(foldEvent(state, ptcDispatch('tool_search', v2(['x']), { isError: true }), OPTS), state)
   assert.equal(foldEvent(state, toolResult({ protocol: 'someone-else/v1', allDiscoveredTools: ['x'] })), state)
   assert.equal(foldEvent(state, toolResult('not json at all')), state)
   assert.equal(foldEvent(state, { type: 'assistant/message', seq: 3, time: 0, data: {} }), state)
 })
 
-test('foldEvent: 没有新名字时返回**同一个引用**（注册表按引用变化通知）', () => {
+test('foldEvent: 损坏的 v2 快照不覆盖现有状态，只报诊断', () => {
+  const first = foldEvent(init(), toolResult(v2(['a']), { seq: 1 }), OPTS)
+  const diagnostics = []
+  const broken = [
+    { protocol: 'dsh-tool-search/v2' },
+    { protocol: 'dsh-tool-search/v2', discoverySnapshot: {} },
+    { protocol: 'dsh-tool-search/v2', discoverySnapshot: { orderedNames: [1] } },
+  ]
+  for (const value of broken) {
+    assert.equal(foldEvent(first, toolResult(value, { seq: 2 }), { ...OPTS, onDiagnostic: (event) => diagnostics.push(event) }), first)
+  }
+  assert.equal(diagnostics.length, broken.length)
+  assert.ok(diagnostics.every((event) => event.code === 'DISCOVERY_SNAPSHOT_INVALID'))
+})
+
+test('foldEvent: 重复/过期 seq 幂等（单调事件序号决定覆盖顺序）', () => {
+  const withSeq = (value, seq) => ({ ...toolResult(value), seq })
+  const first = foldEvent(init(), withSeq(v2(['a']), 5), OPTS)
+  assert.deepEqual(first.discovered, ['a'])
+  assert.equal(foldEvent(first, withSeq(v2(['b']), 5), OPTS), first, '同一个 seq 不重放')
+  assert.equal(foldEvent(first, withSeq(v2(['b']), 4), OPTS), first, '更旧的 seq 不覆盖')
+  const newer = foldEvent(first, withSeq(v2(['b']), 6), OPTS)
+  assert.deepEqual(newer.discovered, ['b'])
+})
+
+test('foldEvent: 没有变化时返回**同一个引用**（注册表按引用变化通知）', () => {
   // 宿主文档：未关心的新事件必须返回同一引用，否则每次事件都会产生下游工作。
-  const first = foldEvent(init(), toolResult(withProtocol({ allDiscoveredTools: ['a'] })), OPTS)
-  assert.equal(foldEvent(first, toolResult(withProtocol({ allDiscoveredTools: ['a'] })), OPTS), first)
-  assert.equal(foldEvent(first, toolResult(withProtocol({ discoveredTools: ['a'] })), OPTS), first, '换字段名同样不重复')
-  // 新增才换引用。
-  const next = foldEvent(first, toolResult(withProtocol({ allDiscoveredTools: ['a', 'b'] })), OPTS)
-  assert.notEqual(next, first)
-  assert.deepEqual(next.discovered, ['a', 'b'])
+  const first = foldEvent(init(), toolResult(v2(['a']), { seq: 1 }), OPTS)
+  assert.equal(foldEvent(first, toolResult(v2(['a']), { seq: 2 }), OPTS), first)
+  assert.equal(foldEvent(first, toolResult(v1({ discoveredTools: ['a'] }), { seq: 3 })), first, 'v1 重复同样不换引用')
 })
 
 test('foldEvent: 结果按 max 从旧到新剪枝（状态必须有界）', () => {
   const opts = { toolName: 'tool_search', max: 3 }
   let state = init()
+  let seq = 0
   for (const name of ['a', 'b', 'c', 'd', 'e']) {
-    state = foldEvent(state, toolResult(withProtocol({ allDiscoveredTools: [name] })), opts)
+    state = foldEvent(state, toolResult(v1({ allDiscoveredTools: [name] }), { seq: ++seq }), opts)
   }
   assert.deepEqual(state.discovered, ['c', 'd', 'e'], '只留最新的 max 个，旧的先丢')
   // 一次事件里塞进超过 max 的名字同样被剪。
-  const bulk = foldEvent(init(), toolResult(withProtocol({ allDiscoveredTools: ['1', '2', '3', '4'] })), opts)
+  const bulk = foldEvent(init(), toolResult(v2(['1', '2', '3', '4'])), opts)
   assert.deepEqual(bulk.discovered, ['2', '3', '4'])
 })
 
@@ -229,12 +286,17 @@ test('foldEvent: apply 恒返回状态对象（写成 undefined 会把状态设�
 test('discoveryProjection: 定义面符合宿主契约，状态是纯 JSON', () => {
   const projection = discoveryProjection({ z, toolName: 'tool_search', max: 100 })
   assert.equal(projection.key, PROJECTION_KEY)
-  assert.equal(projection.stateVersion, 1)
+  // v1 的累积列表与 v2 的替换快照不是同一种状态：版本必须前进，旧持久化行才会作废。
+  assert.equal(projection.stateVersion, 2)
   assert.equal(projection.wire, undefined, '内部投影不暴露给客户端（无 wire 重载）')
   assert.equal(typeof projection.init, 'function')
   assert.equal(typeof projection.apply, 'function')
   // stateSchema 是宿主的两处校验入口：从持久化行恢复时 parse 一次。
   assert.deepEqual(projection.stateSchema.parse({ discovered: ['a'] }), { discovered: ['a'] })
+  assert.deepEqual(
+    projection.stateSchema.parse({ protocol: 'dsh-tool-search/v2', discovered: ['a'], seq: 7 }),
+    { protocol: 'dsh-tool-search/v2', discovered: ['a'], seq: 7 },
+  )
   assert.throws(() => projection.stateSchema.parse({ discovered: 'nope' }))
   // 空日志的初始状态必须是可 JSON 往返的（宿主按纯 JSON 持久化）。
   const state = projection.init({}, 0)
@@ -248,14 +310,65 @@ test('projectionBound: 有界剪枝的上限公式', () => {
   assert.equal(projectionBound(1), 100, '下限 100：太小的上限会让恢复集比运行集还小')
 })
 
-test('parseDiscoveredMeta / discoveredFromMessages: 迁到 state 模块后行为不变', () => {
+test('parseDiscoveredMeta / discoveredFromMessages: 同一份协议定义，v1 兼容读取', () => {
   // 这两个是"发现集长什么样"的定义，与 fold 同住一个模块（协议 + 解析器 + fold 必须同步）。
-  assert.deepEqual(parseDiscoveredMeta(withProtocol({ allDiscoveredTools: ['x'] })), ['x'])
+  assert.deepEqual(parseDiscoveredMeta(v1({ allDiscoveredTools: ['x'] })), ['x'])
+  assert.deepEqual(parseDiscoveredMeta(v2(['y', 'x'])), ['y', 'x'], 'v2 保留有序快照的顺序')
   assert.equal(parseDiscoveredMeta({ protocol: 'other/v1' }), undefined)
+  assert.equal(parseDiscoveredMeta(v1({})), undefined, 'v1 却没有列表 = 损坏，不是空集')
   const messages = [{
     role: 'tool',
     isError: false,
-    content: [{ type: 'text', text: JSON.stringify(withProtocol({ discoveredTools: ['mcp__a__x'] })) }],
+    content: [{ type: 'text', text: JSON.stringify(v1({ discoveredTools: ['mcp__a__x'] })) }],
   }]
   assert.deepEqual([...discoveredFromMessages(messages)], ['mcp__a__x'])
 })
+
+test('promise: 已返回给模型的工具在未被使用前不进淘汰候选', () => {
+  const state = createState()
+  discover(state, ['a', 'b', 'c'])
+  promise(state, ['a', 'b', 'c'], 20)
+  // 模型真的调用了 b：它离开"已承诺未使用"集合，只剩 LRU 冷热。
+  touch(state, 'b')
+  // 上限压到 2：唯一可淘汰的是刚被用过的 b（a/c 仍被保护）。
+  assert.deepEqual(evict(state, 2), ['b'])
+  assert.deepEqual([...state.discovered.keys()].sort(), ['a', 'c'])
+  // 再压到 1：没有可淘汰的（全在保护集里），宁可暂时超限也不收回刚给出去的 schema。
+  assert.deepEqual(evict(state, 1), [])
+  assert.deepEqual([...state.discovered.keys()].sort(), ['a', 'c'])
+})
+
+test('promise: 本批返回的旧工具也必须被保护（混合批次自洽）', () => {
+  // 复现过的缺陷：cap=2 时先加载 a、b，再 select:a,c → c 是新发现，触发淘汰；
+  // 旧实现按"本批新增数"当保护下限，a 作为最旧项被淘汰，结果同一条结果里
+  // instruction 说"直接调"，调用却被守卫拒。
+  const state = createState()
+  discover(state, ['a', 'b'])
+  promise(state, ['a', 'b'], 2)
+  touch(state, 'a')
+  touch(state, 'b')
+  const fresh = discover(state, ['c'])
+  assert.deepEqual(fresh, ['c'])
+  promise(state, ['a', 'c'], 2)
+  const removed = evict(state, 2)
+  assert.equal(removed.includes('a'), false, '本批返回过的 a 不得被本次淘汰')
+  assert.deepEqual([...state.discovered.keys()].sort(), ['a', 'c'])
+})
+
+test('promise: 保护集自身有界，超上限时先丢最旧的承诺', () => {
+  const state = createState()
+  discover(state, ['a', 'b', 'c'])
+  promise(state, ['a', 'b'], 2)
+  promise(state, ['c'], 2)
+  assert.equal(state.promised.has('a'), false, '承诺集不得超过上限，最旧的承诺先释放')
+  assert.equal(state.promised.has('c'), true)
+})
+
+test('promise: 未发现的名字不进保护集（守卫本来就会拒它）', () => {
+  const state = createState()
+  discover(state, ['a'])
+  promise(state, ['a', 'ghost'], 20)
+  assert.deepEqual([...state.promised.keys()], ['a'])
+})
+
+

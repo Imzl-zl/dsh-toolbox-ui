@@ -34,6 +34,51 @@ jobs:
       - name: Install development dependencies
         run: pnpm install --frozen-lockfile
 
+      # 单源契约：宿主 @Remote / lib/typert.js / lib/client.js 的 descriptor 三面必须由
+      # lib/rpc-contract.js 同一次生成得出。有人手改生成产物或加了方法没重生成，这里就红。
+      - name: RPC contract is generated from its single source
+        run: npm run contract:check
+
+      # 客户端产物必须由 lib/client/ 的部件拼出来（单文件产物仍在，但不能手改）。
+      - name: Client bundle is generated from its parts
+        run: npm run client:check
+
       # 含真机集成用例（真 cordis/dsh-tools/dsh-scope/dsh-mcp-client + 真 stdio MCP 子进程）。
       - name: Test
         run: npm test
+
+  # 双宿主矩阵：同一份源码在两代宿主的真实安装树上各跑一次全量。
+  # 每一腿用 DSH_EXPECT_STEP_TOOLSET 在**加载期**断言"跑到的确实是目标那一代"，
+  # 另一代的用例按能力跳过（理由写在 skip 文案里），不靠整腿跳过变绿。
+  host-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: 0.2.1-rc.5
+            cordis: ~4.0.5
+            loader: ~1.0.6
+            include: 1.0.10
+          - host: 0.2.2-rc.1
+            cordis: ~4.1.0
+            loader: ~1.1.0
+            include: ~1.1.0
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Full suite on ${{ matrix.host }}
+        run: >-
+          node scripts/host-matrix.mjs
+          --host ${{ matrix.host }}
+          --cordis ${{ matrix.cordis }}
+          --loader ${{ matrix.loader }}
+          --include ${{ matrix.include }}

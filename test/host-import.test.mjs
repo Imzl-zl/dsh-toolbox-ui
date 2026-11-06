@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 
-async function createProfileFixture(content, extraEntries = []) {
+async function createProfileFixture(content, extraEntries = [], { live = null } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-mcp-host-'))
   const rootConfig = join(root, 'cordis.yml')
   const patchPath = join(root, 'cordis.patch.yml')
@@ -30,43 +30,63 @@ async function createProfileFixture(content, extraEntries = []) {
       entry.update = async (options) => { Object.assign(entry.options, options ?? {}) }
     }
   }
+  // `live` 给一个组合 API 的替身（真宿主里是 @deepseek-ai/dsh-app-boot）：用它把
+  // "写盘之后再生效失败"这条事务路径从 RPC 层走到。不给就代表"没有 profile 启动器的部署"。
+  const loaderStub = {
+    entries: () => entries,
+    create: async (options) => {
+      const entry = { options: { ...options }, parent: group, update: async (next) => { Object.assign(entry.options, next ?? {}) } }
+      entries.push(entry)
+      return options.id
+    },
+    remove: async (id) => group.remove(id),
+    ...(live === null ? {} : { import: async () => live.api }),
+  }
   return {
     root,
     rootConfig,
     patchPath,
     entries,
     ctx: {
-      // create/remove 同样必须补：add / removeServer / installBuiltins 靠它们在**运行中的
-      // 进程**里增删 loader 条目（只写盘的那半是旧行为，已由 test/real-host-loader.test.mjs
-      // 的真 loader 夹具覆盖连接效果）。桩上做同一份 entries 数组上的增删——稳定引用、
-      // 可观测，与 entries() 是同一个真相源。
-      loader: {
-        entries: () => entries,
-        create: async (options) => {
-          const entry = { options: { ...options }, parent: group, update: async (next) => { Object.assign(entry.options, next ?? {}) } }
-          entries.push(entry)
-          return options.id
-        },
-        remove: async (id) => group.remove(id),
-      },
+      loader: loaderStub,
       tools: { schemas: () => [] },
-      get: () => undefined,
+      // 真 cordis 里 `ctx.get('loader')` 与 `ctx.loader` 是同一个服务；桩也必须一致，
+      // 否则"组合层用 get 取 loader"这类真实路径会被夹具凭空判成不可用。
+      get(name) {
+        if (name === 'loader') return loaderStub
+        if (live !== null && name === 'profileContext') return { name: 'test', dir: root }
+        return undefined
+      },
     },
     async cleanup() {
       await rm(root, { recursive: true, force: true })
     },
   }
 }
+/** 组合 API 的替身：生效性判定通过（行在），reconcile 按需失败。 */
+function createLiveStub({ reconcileError, rowId = 'mcp-one' } = {}) {
+  const reconcile = []
+  return {
+    reconcile,
+    api: {
+      loadProfileDirectory: () => ({ patches: [], layers: [] }),
+      readProfilePatches: () => [{ insert: [{ id: rowId, name: '@deepseek-ai/dsh-mcp-client', config: {} }] }],
+      composeEntries: () => [{ id: rowId, name: '@deepseek-ai/dsh-mcp-client', config: {}, disabled: true }],
+      async reconcileProfilePatches(_ctx, patches, _bin, requiredIds) {
+        reconcile.push({ patches, requiredIds })
+        if (reconcileError) throw new Error(reconcileError)
+        return []
+      },
+    },
+  }
+}
 test('profile mutations use host-owned storage outside the session workspace', async () => {
   const { McpManagerGateway } = await import('../lib/index.js')
   const fixture = await createProfileFixture('[]\n')
-  const sandboxedFs = {
-    resolve: async (path) => ({ targetKey: path, displayPath: path }),
-    stat: async () => ({ type: 'file', version: 'v1' }),
-    readText: async () => await readFile(fixture.patchPath, 'utf8'),
-    writeText: async () => { throw new Error('file access denied under workspace-write mode') },
-  }
-  const ctx = { ...fixture.ctx, get(name) { assert.equal(name, 'fs'); return sandboxedFs } }
+  // 断言的是"**不碰** ctx.fs"（profile 存储在会话工作区之外，受 workspace-write 策略围栏）。
+  // 其它服务探测（hmr 事务锁、profileContext 生效校验）是合法的宿主能力查询，返回 undefined
+  // 即走各自的降级分支——把它们也钉成"只允许问 fs"会把实现细节当成契约。
+  const ctx = { ...fixture.ctx, get(name) { assert.notEqual(name, 'fs'); return undefined } }
 
   try {
     await McpManagerGateway.prototype.add.call({ ctx }, { name: 'demo', transport: 'stdio', command: 'node' })
@@ -341,16 +361,16 @@ test('failed live disable restores the previous persisted patch', async () => {
     options: { id: 'mcp-one', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'one', transport: 'stdio', command: 'node' } },
     disabled: false,
     fiber: null,
-    update: async () => { throw new Error('live update failed') },
   }
-  const fixture = await createProfileFixture(content, [entry])
+  // live 那半由官方组合 API 负责；这里让它失败，验证事务把盘上的内容写回原样。
+  const fixture = await createProfileFixture(content, [entry], { live: createLiveStub({ reconcileError: 'live update failed' }) })
 
   try {
     await assert.rejects(
       McpManagerGateway.prototype.setDisabled.call({ ctx: fixture.ctx }, 'one', true),
       /live update failed/,
     )
-    assert.equal(await readFile(fixture.patchPath, 'utf8'), content)
+    assert.equal(await readFile(fixture.patchPath, 'utf8'), content, '生效失败必须把 patch 写回原样')
   } finally {
     await fixture.cleanup()
   }
@@ -463,7 +483,11 @@ test('duplicate cross-layer server names collapse into one row, and the profile-
 
     const gateway = { ctx: fixture.ctx }
     await McpManagerGateway.prototype.update.call(gateway, { name: 'shared', transport: 'stdio', command: 'node-edited' })
-    assert.equal(profile.options.config.command, 'node-edited', '编辑必须落到自己那条上')
+    // 身份按 id：编辑只写进**自己那一行**（mcp-shared-profile）。运行中的条目由官方组合
+    // reconcile 应用（真宿主行为见 test/real-host-loader.test.mjs）——在"没有 profile 启动器"
+    // 的桩上，可核对的事实就是盘上那一行。
+    const edited = (await import('../lib/mcp-config.js')).readManagedMcpServers(await readFile(fixture.patchPath, 'utf8')).servers
+    assert.equal(edited.find((server) => server.name === 'shared').command, 'node-edited', '编辑必须落到自己那条上')
     assert.equal(external.options.config.command, 'external', '别的配置层的条目一个字节都不能动')
 
     // 导入仍然跳过同名：再写一行下去就是**第三条**同作用域条目，那才是真的制造冲突。
@@ -485,15 +509,15 @@ test('duplicate cross-layer server names collapse into one row, and the profile-
     assert.match(written, /serverName: shared/)
     assert.equal(written.includes('updated'), false, '被其他层占用的条目不得被覆盖')
 
-    // 移除只删自己那条：别层的条目必须原样留着（它不在我们的 patch 里，也不归我们管），
+    // 移除只删自己那条：别层的条目**不在我们的 patch 里**，也不会被我们写；运行中的
+    // 销毁由官方组合 reconcile 按 id 完成（真宿主上的证据见 test/real-host-loader.test.mjs）。
     // 而且必须把「还剩下谁」说出来——否则删完仍看到失败日志，用户会以为移除没生效。
     const removed = await McpManagerGateway.prototype.removeServer.call(gateway, 'shared')
     assert.match(removed.note, /另有 1 条同名条目/)
     assert.match(removed.note, /mcp-shared-external/)
-    const after = fixture.entries.filter((entry) => entry.options.name === '@deepseek-ai/dsh-mcp-client')
-    assert.deepEqual(after.map((entry) => entry.options.id), ['mcp-shared-external'], '只有自己那条被移除')
+    assert.equal(external.options.config.command, 'external', '别的配置层的条目一个字节都不能动')
     const rewritten = await readFile(fixture.patchPath, 'utf8')
-    assert.equal(rewritten.includes('shared'), false, '移除后 patch 里不再有这一行')
+    assert.equal(rewritten.includes('serverName: shared'), false, '移除后 patch 里不再有这一行')
   } finally {
     await fixture.cleanup()
   }

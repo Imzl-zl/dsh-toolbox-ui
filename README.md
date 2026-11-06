@@ -11,7 +11,7 @@
   <a href="https://www.npmjs.com/package/dsh-toolbox-ui"><img src="https://img.shields.io/npm/dm/dsh-toolbox-ui" alt="downloads"></a>
   <a href="https://github.com/Imzl-zl/dsh-toolbox-ui/actions/workflows/ci.yml"><img src="https://github.com/Imzl-zl/dsh-toolbox-ui/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/npm/l/dsh-toolbox-ui" alt="license"></a>
-  <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.0--rc.1-blue" alt="DSH >= 0.2.0-rc.1">
+  <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.1--rc.5-blue" alt="DSH >= 0.2.1-rc.5">
 </p>
 
 <p align="center"><b>中文</b> | <a href="README.en.md">English</a></p>
@@ -45,6 +45,8 @@
 - **跨工作区搬运**：把本项目的 MCP 复制到另一个已注册工作区（在宿主内完成，凭据不经过浏览器），或导出成 JSON 备份 / 分享
 - **工具延迟加载（ToolSearch）**：让某个服务器的工具不再每轮常驻上下文——模型先看到一份**只列工具名**的目录，用内置的 `tool_search` 搜到（关键词或 `select:<确切名字>`）之后，完整参数 schema 才进它的工具列表并可直接调用。默认不开：行上的「延迟 / 全量」标签点一下就切（或列表顶部一键「全部延迟」）；环境变量 `DSH_MCP_TOOL_SEARCH=off` 整体退回全量注入。机制的三个上限（一次返回条数 / 目录行数 / 已发现集大小）可在「延迟参数」里调，写进 profile patch 的 `config.toolSearch`
 
+- **工具搜索**：面板顶部「工具搜索」是一张**工具列表**——内置工具与其他插件的工具按名字列出，逐个选「常驻 / 可搜索」，默认全部常驻；MCP 服务器的启停与「延迟 / 全量」仍在原列表，不重复加开关。选成「可搜索」的工具模型要先经搜索拿到 schema 才能用，搜索入口本身不可被关掉
+
 **技能面**
 
 - 真实作用域与同名遮蔽：同名技能跨作用域是合法配置，面板逐条列出并标出哪一份生效
@@ -63,10 +65,10 @@
 
 ```sh
 # 推荐：npm 安装 —— 之后 `dsh plugin update` 在 ^1.x 内自动升小版本
-dsh plugin --profile web add dsh-toolbox-ui@^1.9.0
+dsh plugin --profile web add dsh-toolbox-ui@^1.10.0
 
 # 或固定 GitHub release tag（不自动跨版本，升级要换 tag 重新 add）
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.9.0
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.10.0
 ```
 
 装完**重启 `dsh web`**。卸载（不会删除 profile 里已有的 MCP 条目）：
@@ -139,14 +141,11 @@ dsh plugin --profile web update dsh-toolbox-ui
 
 | 项目 | 已验证 |
 |---|---|
-| DeepSeek Harness | `0.2.0-rc.1` 及以上（`0.2.0-rc.2`、`0.2.1-rc.2`、`0.2.1-rc.3` 与 `0.2.1-rc.5` 都跑过全量；0.2.1 宿主自带的 cordis 4.0.5 / loader 1.0.6 也在覆盖内） |
+| DeepSeek Harness | 支持准入从 `0.2.1-rc.5` 起；已验证 `0.2.1-rc.5`（Cordis 4.0.5 / Loader 1.0.6）与 `0.2.2-rc.1`（Cordis 4.1.0 / Loader 1.1.0）。旧宿主仅保留历史回归，不属于当前发布支持面。 |
 | Node.js | DSH 自带/支持的运行时 |
 | 平台 | Windows；Linux/macOS 使用同一 DSH Web 契约 |
 
-只支持 0.2.x 起：ToolSearch 依赖 0.2 的 per-agent 呈现模式（`ctx.tools.modeFor(agent)`）与
-`tools:sdk` 手册段，0.1.x 上这两样都不存在。不为旧版本保留降级分支。
-支持面就是 **0.2.0 与 0.2.1 两条线**：两者之间宿主换了两代 loader（1.0.3 → 1.0.6），
-启动错误传播与 dispose 写盘行为都变了，插件对这两处做了显式适配并各有一条常驻用例。
+当前发布支持从 **0.2.1-rc.5** 起：ToolSearch 的 0.2.1 兼容适配与 0.2.2 的 step-owned toolSet / 独立 executor 路径均已覆盖。更早宿主只保留历史 loader 回归，不再作为发布准入；新版 Loader/Include 生命周期按目标宿主整套验证。
 
 ## 开发
 

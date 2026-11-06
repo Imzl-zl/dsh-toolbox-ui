@@ -9,11 +9,12 @@
 // provider 改算法时这里要一起改——下面这些用例钉的是**语义**（rank、路径形状、只读性、
 // 项目根怎么找、DSH_HOME 怎么解析），而不是内部实现。
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
-import { skillTargetsView } from '../lib/skills-registry.js'
+import { pathToFileURL } from 'node:url'
+import { listSkillViews, resolveSkillReference, resolveTargetReference, skillTargetsView } from '../lib/skills-registry.js'
 
 const PROVIDER = '@deepseek-ai/dsh-skill-filesystem'
 
@@ -23,6 +24,54 @@ const ctxWith = (config) => ({
 })
 
 const tempRoot = () => mkdtemp(join(tmpdir(), 'dsh-skill-targets-'))
+
+test('loader 的 Generator 保留自定义位置，并忽略已禁用的 provider', { timeout: 60_000 }, async (t) => {
+  const base = await tempRoot()
+  t.after(() => rm(base, { recursive: true, force: true }))
+  const custom = join(base, 'custom')
+  const config = { includeDefaultRoots: false, customSkillDirs: [custom] }
+  const ctx = { loader: { *entries() {
+    yield { disabled: true, options: { name: PROVIDER, config: { customSkillDirs: [join(base, 'inactive')] } } }
+    yield { options: { name: PROVIDER, config } }
+  } } }
+  const { targets } = await skillTargetsView(ctx)
+  assert.deepEqual(targets.map(({ source, root }) => ({ source, root })), [{ source: 'custom', root: custom }])
+  assert.deepEqual(await resolveTargetReference(ctx, targets[0]), targets[0], '目标引用重新核对时仍能消费新 Generator')
+})
+
+test('真实 loader 与 provider 的表达式 custom root 能从列表解析到可操作引用', { timeout: 60_000 }, async (t) => {
+  const { Context } = await import('@deepseek-ai/cordis')
+  const { default: Loader } = await import('@deepseek-ai/cordis-plugin-loader')
+  const { SkillRegistry } = await import('@deepseek-ai/dsh-skill')
+  const base = await tempRoot()
+  t.after(() => rm(base, { recursive: true, force: true }))
+  const custom = join(base, 'custom')
+  await mkdir(join(custom, 'disk-entry'), { recursive: true })
+  await writeFile(join(custom, 'disk-entry', 'SKILL.md'), '---\nname: custom-probe\ndescription: custom root probe\n---\n\ncustom body\n')
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  await ctx.plugin(Loader, { baseUrl: pathToFileURL(resolve('package.json')).href })
+  await ctx.plugin(SkillRegistry)
+  const entryId = await ctx.loader.create({
+    id: 'custom-skills', name: PROVIDER,
+    config: { includeDefaultRoots: false, customSkillDirs: [{ __jsExpr: JSON.stringify(custom) }], watch: false },
+  })
+  const entry = [...ctx.loader.entries()].find((candidate) => candidate.options.id === entryId)
+  assert.equal(Array.isArray(ctx.loader.entries()), false, '正式 loader 的枚举不是数组')
+  assert.equal(typeof entry.options.config.customSkillDirs[0], 'object', '原始配置仍保留表达式')
+  const rows = await listSkillViews(ctx)
+  assert.equal(rows.length, 1)
+  const [row] = rows
+  const { targets } = await skillTargetsView(ctx)
+  assert.deepEqual(targets.map((target) => target.root), [row.root], '安装位置使用 provider 真正收到的生效配置')
+  assert.equal(row.root, custom)
+  const target = await resolveTargetReference(ctx, { source: row.source, root: row.root })
+  assert.equal(target.root, row.root)
+  const reference = await resolveSkillReference(ctx, row)
+  assert.equal(reference.entry, row.entry)
+  assert.equal(reference.path, row.path)
+  await assert.rejects(() => resolveTargetReference(ctx, { source: 'custom', root: base }), /未知的技能目标/)
+})
 
 test('六档位置都列出来，并按宿主 rank 排序', async () => {
   const base = await tempRoot()
@@ -144,10 +193,19 @@ test('DSH_HOME 走环境变量（与 dsh-home-paths 的 resolveDshHome 同语义
     if (previous === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previous
   }
-  // 没有配置也没有环境变量时退回 ~/.dsh（绝不写死某个磁盘路径）
-  const { targets: fallback } = await skillTargetsView({ loader: { entries: () => [] } }, { workspaces: [] })
-  const userDsh = fallback.find((t) => t.source === 'user-dsh')
-  if (userDsh) assert.equal(userDsh.root, resolve(join(homedir(), '.dsh', 'skills')))
+  // 没有配置也没有环境变量时退回 ~/.dsh（绝不写死某个磁盘路径）。
+  // 这里必须**真的**把 DSH_HOME 摘掉：CI 会全局导出 DSH_HOME，断言却写着"没有环境变量"，
+  // 不摘就是拿环境当结论（本机跑绿、CI 红，或反过来）。
+  const savedHome = process.env.DSH_HOME
+  delete process.env.DSH_HOME
+  try {
+    const { targets: fallback } = await skillTargetsView({ loader: { entries: () => [] } }, { workspaces: [] })
+    const userDsh = fallback.find((t) => t.source === 'user-dsh')
+    if (userDsh) assert.equal(userDsh.root, resolve(join(homedir(), '.dsh', 'skills')))
+  } finally {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+  }
 })
 
 test('同一个项目根只列一次，且不因找不到 provider 条目而失败', async () => {

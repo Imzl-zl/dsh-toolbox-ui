@@ -91,7 +91,8 @@ test('every skills invocation is namespaced, correctly identified and self-consi
   // 它回答的是"manifest 里到底有几条"，与那道比对互为冗余。
   const mcp = TYPERT.invocations.filter((invocation) => invocation.namespace === 'mcpManager')
   // 37 → 38（1.8.1）：新增 setDefer（行内单台的延迟开关）。
-  assert.equal(mcp.length, 38, `MCP 的方法数应保持 38，实际 ${mcp.length}`)
+  // 38 → 42（1.10.0）：统一工具加载策略的全局/项目读写四个方法。
+  assert.equal(mcp.length, 42, `MCP 的方法数应保持 42，实际 ${mcp.length}`)
 
   for (const invocation of skills) {
     const where = `skills 调用 ${invocation.method}`
@@ -136,10 +137,10 @@ test('every strict codec carries both the schema value and the create() factory'
   assert.ok(codecs.length > 0)
   for (const [subject, codec] of codecs) {
     assert.equal(codec.mode, 'strict', subject + ' 必须是 strict codec')
-    // 0.1.5-rc.x 的 loader/registry 走这条（`latest` 已在 2026-09-24 推进到 0.1.7-rc.2，
-    // 但 peer 范围 >=0.1.5-rc.1 <0.2.0 仍允许旧版装上，所以这半边不能省）。
-    assert.equal(typeof codec.schema?.parse, 'function', subject + ' 缺少 schema（0.1.5-rc.x 那条线会加载即拒）')
-    // 0.1.6-alpha.2 起的 loader/registry 走这条（含当前基线 0.1.7-rc.2 与 `next`）。
+    // 历史 Loader/registry 可能检查 schema；当前支持组合也继续保留这半边，避免旧 profile
+    // 在兼容宿主上加载时被拒。
+    assert.equal(typeof codec.schema?.parse, 'function', subject + ' 缺少 schema（历史 loader 线会加载即拒）')
+    // 当前支持组合与历史 0.1.6-alpha.2+ 线都检查 create()；两种形状都必须可用。
     assert.equal(typeof codec.create, 'function', subject + ' 缺少 create() 工厂（0.1.6-alpha.2 起会加载即拒）')
     assert.equal(typeof codec.create().parse, 'function', subject + ' 的 create() 没有返回可用的 schema')
   }

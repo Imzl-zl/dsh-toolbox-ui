@@ -2,9 +2,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import * as dshTools from '@deepseek-ai/dsh-tools'
+import { resolveToolLoadingPolicy } from '../lib/tool-loading-policy.js'
 import {
   DEFAULTS,
-  activeMaskedServers,
   allocateCatalogNames,
   buildToolSearchView,
   catalogSectionText,
@@ -18,13 +18,18 @@ import {
   instructionFingerprint,
   instructionReader,
   maskGuidanceSection,
-  maskInstructionSections,
   parseDiscoveredMeta,
   partitionSchemas,
   resolveRuntimeConfig,
   uniqueOwner,
   viewRevision,
 } from '../lib/tool-search-runtime.js'
+
+// 旧宿主专属：宿主的 SDK 渲染器（0.2.1 在 dsh-tools 上）与 presentAs 模式选择。
+// 0.2.2 两者都不存在；现代等价能力由 test/tool-search-rc22-host.test.mjs 用真实宿主覆盖。
+const hasLegacyRenderers = typeof dshTools.renderToolsSdk === 'function'
+if (process.env.DSH_EXPECT_STEP_TOOLSET === '0') assert.equal(hasLegacyRenderers, true, 'the legacy baseline must expose the SDK renderers')
+const LEGACY_RENDERERS = { skip: !hasLegacyRenderers && 'requires the 0.2.1 SDK renderers from @deepseek-ai/dsh-tools; 0.2.2 moved them to @deepseek-ai/dsh-tool-executor-ptc' }
 
 // ── 纯决策函数 ──
 
@@ -103,7 +108,7 @@ test('parseDiscoveredMeta: 协议不符不认，累积列表与 matches 兜底',
   assert.deepEqual(parseDiscoveredMeta({ protocol: 'dsh-tool-search/v1', allDiscoveredTools: ['x', 'y'] }), ['x', 'y'])
   assert.deepEqual(parseDiscoveredMeta({ protocol: 'dsh-tool-search/v1', discoveredTools: ['z'] }), ['z'])
   assert.deepEqual(parseDiscoveredMeta({ protocol: 'dsh-tool-search/v1', matches: [{ name: 'm' }, { name: 'bad', found: false }] }), ['m'])
-  assert.deepEqual(parseDiscoveredMeta({ protocol: 'dsh-tool-search/v1' }), [])
+  assert.equal(parseDiscoveredMeta({ protocol: 'dsh-tool-search/v1' }), undefined, 'v1 但没有任何列表 = 损坏，不能当有效空集')
   assert.equal(parseDiscoveredMeta({ protocol: 'someone-else/v1', allDiscoveredTools: ['x'] }), undefined)
   assert.equal(parseDiscoveredMeta(null), undefined)
   assert.equal(parseDiscoveredMeta('text'), undefined)
@@ -152,22 +157,20 @@ test('buildToolSearchView: 纯函数；per-server 与聚合门槛都不存在（
   const config = resolveRuntimeConfig({ deferServers: ['jshook'], serverNames: ['jshook'] })
   const view = buildToolSearchView(many, config)
   assert.equal(view.managed.size, 16)
-  assert.deepEqual([...activeMaskedServers(view, new Set())], ['mcp:jshook'], '被延迟的服务器指令段要一并遮掉')
+  assert.deepEqual([...view.managedByServer.keys()], ['jshook'], '受管工具按服务器归组（目录分组与说明摘要都用它）')
 
   // 小服务器也照常启用：这是去门槛的核心可观测点（原来 ≤10 工具整台不延迟）。
   const tiny = Array.from({ length: 3 }, (_, i) => ({ name: `mcp__tiny__t${i}`, description: 'd', parameters: null }))
   const tinyView = buildToolSearchView(tiny, resolveRuntimeConfig({ deferServers: ['tiny'], serverNames: ['tiny'] }))
   assert.equal(tinyView.managed.size, 3, '3 工具服务器也必须启用（旧行为是 ≤10 整台不参与）')
-  assert.deepEqual([...activeMaskedServers(tinyView, new Set())], ['mcp:tiny'])
 
-  // 混合：大服务器与小服务器都启用，且各自的指令段都遮。
+  // 混合：大服务器与小服务器都启用。
   const mixed = [
     ...many,
     ...Array.from({ length: 8 }, (_, i) => ({ name: `mcp__tiny__t${i}`, description: 'd', parameters: null })),
   ]
   const mixedView = buildToolSearchView(mixed, resolveRuntimeConfig({ deferServers: ['jshook', 'tiny'], serverNames: ['jshook', 'tiny'] }))
   assert.equal(mixedView.managed.size, 24, '两台服务器的工具都受管')
-  assert.deepEqual([...activeMaskedServers(mixedView, new Set())].sort(), ['mcp:jshook', 'mcp:tiny'])
 
   // 不以 defer 的服务器照旧不受管（那是本机制唯一的"不介入"判据）。
   const off = buildToolSearchView(many, resolveRuntimeConfig({ deferServers: [], serverNames: ['jshook'] }))
@@ -193,13 +196,6 @@ test('filterCatalog + catalogSectionText: 目录只列还没被发现的工具',
   assert.equal(text.includes('mcp__jshook__t5'), false)
   assert.ok(text.includes('mcp__jshook__t1'), '未发现的必须还在目录里')
   assert.ok(text.includes('mcp__jshook__t15'))
-})
-
-test('activeMaskedServers: 全部发现后指令段恢复', () => {
-  const schemas = Array.from({ length: 16 }, (_, i) => ({ name: `mcp__jshook__t${i}`, description: 'd', parameters: null }))
-  const view = buildToolSearchView(schemas, resolveRuntimeConfig({ deferServers: ['jshook'], serverNames: ['jshook'] }))
-  const all = new Set(view.managed.keys())
-  assert.deepEqual([...activeMaskedServers(view, all)], [], '服务器工具全部被发现后，它的指令段不再占上下文')
 })
 
 test('catalogSectionText: 只列工具名、按 code-unit 名序、字符预算带"另有 N 个"', () => {
@@ -405,22 +401,6 @@ test('instructionFingerprint: 只认 mcp: 段，且随文本长度变化（缓�
   assert.equal(instructionFingerprint(undefined), 0)
 })
 
-test('maskInstructionSections: 只清空被延迟服务器的指令段，且不改原对象', () => {
-  const sections = [
-    { name: 'harness:identity', text: 'identity' },
-    { name: 'mcp:jshook', text: 'JSHOOK INSTRUCTIONS' },
-    { name: 'mcp:firecrawl', text: 'FIRECRAWL INSTRUCTIONS' },
-    { name: 'tool-search:catalog', text: 'CATALOG' },
-  ]
-  const masked = maskInstructionSections(sections, new Set(['mcp:jshook']))
-  assert.equal(masked[0], sections[0], '无关段原对象复用')
-  assert.equal(masked[1].text, '', '被延迟服务器的指令段清空')
-  assert.notEqual(masked[1], sections[1], '必须是新对象——assembly 的段对象可能被别处共享')
-  assert.equal(sections[1].text, 'JSHOOK INSTRUCTIONS', '原对象绝不被 mutate')
-  assert.equal(masked[2].text, 'FIRECRAWL INSTRUCTIONS')
-  assert.equal(masked[3].text, 'CATALOG')
-})
-
 test('maskGuidanceSection: 只清空引导段，段里没有它时原样返回', () => {
   // "没事情可做就不碰 assembly"这条惯例的可测形式：没有引导段时必须返回**同一个**
   // 数组，调用方才谈得上零干预（低于阈值的组装本来就不该被本功能改一个字节）。
@@ -616,7 +596,7 @@ test('assembly 过滤：被管理工具移出，目录 section 追加且不插�
   fixture.cleanup()
 })
 
-test('assembly 过滤：每次组装只读一次工具视图，且清空被延迟服务器的指令段', async () => {
+test('assembly 过滤：每次组装只读一次工具视图，且服务器的使用说明始终保留', async () => {
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
   const assembly = {
     tools: [{ name: 'Read' }, ...BIG_SCHEMAS.map((schema) => ({ name: schema.name }))],
@@ -624,7 +604,9 @@ test('assembly 过滤：每次组装只读一次工具视图，且清空被延�
   }
   const result = await assemble(fixture, assembly)
   assert.equal(fixture.schemasCalls(), 1, '一次组装只向宿主读一次视图（revision 也靠它算）')
-  assert.equal(result.sections.find((s) => s.name === 'mcp:jshook').text, '')
+  // 省上下文的对象是**工具定义**，不是服务器的操作约束。工具还没加载时，
+  // 模型更需要知道「这台服务器怎么用」；整份清空会让已加载的工具在缺少约束的情况下被调用。
+  assert.equal(result.sections.find((s) => s.name === 'mcp:jshook').text, 'JSHOOK INSTRUCTIONS (up to 32KB)')
   assert.equal(result.sections.find((s) => s.name === 'mcp:other').text, 'OTHER')
   fixture.cleanup()
 })
@@ -675,7 +657,7 @@ test('引导段跟着活状态显隐：同一进程里翻 defer，不用重装',
   }
 })
 
-test('D = ∅（全部发现）：目录段、引导段、指令段遮罩一起消失', async () => {
+test('D = ∅（全部发现）：目录段与引导段一起消失', async () => {
   // B11/B14 的验收，也是 F15 的复发闸门：修复前目录列的是 `managed` 全集、引导看的是
   // `deferring`，所以"全部发现"之后模型仍会读到「The tools below stay deferred」与
   // 「Some tools are deferred」——两句话都是假的。
@@ -690,7 +672,7 @@ test('D = ∅（全部发现）：目录段、引导段、指令段遮罩一起�
     }
     const before = await assemble(fixture, assembly)
     assert.ok(before.sections.some((section) => section.name === 'tool-search:catalog'), '有未发现的工具时目录在')
-    assert.equal(before.sections.find((section) => section.name === 'mcp:jshook').text, '')
+    assert.equal(before.sections.find((section) => section.name === 'mcp:jshook').text, 'JSHOOK INSTRUCTIONS', '说明不随工具定义一起被隐藏')
 
     // 全部发现。
     const tool = fixture.registered.get('tool_search')
@@ -699,7 +681,7 @@ test('D = ∅（全部发现）：目录段、引导段、指令段遮罩一起�
     const after = await assemble(fixture, assembly)
     assert.equal(after.sections.some((section) => section.name === 'tool-search:catalog'), false, 'D = ∅ 时不得再注入目录段')
     assert.equal(after.sections.find((section) => section.name === 'tool-search:guidance').text, '', 'D = ∅ 时引导段也必须摘掉')
-    assert.equal(after.sections.find((section) => section.name === 'mcp:jshook').text, 'JSHOOK INSTRUCTIONS', '全部发现后指令段恢复')
+    assert.equal(after.sections.find((section) => section.name === 'mcp:jshook').text, 'JSHOOK INSTRUCTIONS', '说明段自始至终保留（省的是工具定义，不是操作约束）')
     assert.deepEqual(after.tools.map((entry) => entry.name), assembly.tools.map((entry) => entry.name), '工具全部回到清单')
   } finally {
     fixture.cleanup()
@@ -730,6 +712,30 @@ test('目录只列还没被发现的工具，且按 (revision, discoveredVersion
   }
 })
 
+test('统一策略：非 MCP 工具默认常驻、MCP 工具按策略延迟，搜索入口受保护', () => {
+  // 策略由网关合成（纯层 tool-loading-policy），运行时只消费结果。这里钉的是
+  // "运行时确实按逐工具集合划分，而不是退回服务器级"。
+  const schemas = [
+    { name: 'read', description: 'read a file', parameters: null },
+    { name: 'mcp__alpha__a', description: 'alpha tool', parameters: null },
+    { name: 'tool_search', description: 'search', parameters: null },
+  ]
+  const config = resolveRuntimeConfig({
+    serverNames: ['alpha'],
+    deferServers: [],
+    policyFor: () => resolveToolLoadingPolicy({
+      tools: schemas,
+      ownerOf: (name) => (name.startsWith('mcp__alpha__') ? 'alpha' : null),
+      policy: { mode: 'recommended' },
+      protectedNames: ['tool_search'],
+    }),
+  })
+  const view = buildToolSearchView(schemas, config)
+  assert.deepEqual([...view.managed.keys()], ['mcp__alpha__a'], '只有 MCP 工具被延迟')
+  assert.equal(view.managed.has('read'), false, '非 MCP 工具默认常驻（来源不可证明，不猜）')
+  assert.equal(view.managed.has('tool_search'), false, '搜索入口永不被自己延迟')
+})
+
 // ── S5：装配时裁 SDK 手册（PTC 下唯一真正省字的地方）──
 
 const PTC_RUNTIME = { language: 'typescript' }
@@ -742,7 +748,7 @@ const ptcAssembly = (fixture) => ({
 
 const sdkTextOf = (result) => result.sections.find((section) => section.name === 'tools:sdk').text
 
-test('裁手册：PTC agent 的 tools:sdk 不含未发现的延迟工具，kept 的还在', async () => {
+test('裁手册：PTC agent 的 tools:sdk 不含未发现的延迟工具，kept 的还在', LEGACY_RENDERERS, async () => {
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
   try {
     const hostText = fixture.hostSdkText()
@@ -765,7 +771,7 @@ test('裁手册：PTC agent 的 tools:sdk 不含未发现的延迟工具，kept 
   }
 })
 
-test('裁手册：同进程的 native agent 一个字节都不动（模式判据是 per-agent 的）', async () => {
+test('裁手册：同进程的 native agent 一个字节都不动（模式判据是 per-agent 的）', LEGACY_RENDERERS, async () => {
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
   try {
     // native 形状：清单里有真实工具（不是 run_code），且手册段仍给了文本——
@@ -783,7 +789,7 @@ test('裁手册：同进程的 native agent 一个字节都不动（模式判据
   }
 })
 
-test('裁手册：requireDiscovery: false 时不裁（B12）', async () => {
+test('裁手册：requireDiscovery: false 时不裁（B12）', LEGACY_RENDERERS, async () => {
   // 守卫在 requireDiscovery:false 时直接放行，若再把签名裁掉就是"藏了签名却允许盲调"——
   // 正是本项目定性为不可接受的半失效。
   const fixture = createFixture({
@@ -800,7 +806,7 @@ test('裁手册：requireDiscovery: false 时不裁（B12）', async () => {
   }
 })
 
-test('裁手册：前提自检失败就退回原文（别处改写过段文本）', async () => {
+test('裁手册：前提自检失败就退回原文（别处改写过段文本）', LEGACY_RENDERERS, async () => {
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
   try {
     const tampered = fixture.hostSdkText().replace('tool number 0', 'tool number zero')
@@ -811,7 +817,7 @@ test('裁手册：前提自检失败就退回原文（别处改写过段文本�
   }
 })
 
-test('裁手册：段文本为空时短路，不白跑一次全集重渲染', async () => {
+test('裁手册：段文本为空时短路，不白跑一次全集重渲染', LEGACY_RENDERERS, async () => {
   // PTC 部署下的 native agent 就是这样：段存在但 `sdkSection` 对 native 返回 ''。
   // 此时 render(全集) !== '' 会命中 premise-mismatch —— 白跑一趟（701 工具 15ms）。
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
@@ -824,7 +830,7 @@ test('裁手册：段文本为空时短路，不白跑一次全集重渲染', as
   }
 })
 
-test('both 模式：全 inert——不遮罩、不加目录、不摘引导、不裁手册', async () => {
+test('both 模式：全 inert——不遮罩、不加目录、不摘引导、不裁手册', LEGACY_RENDERERS, async () => {
   // B4/§11.4：`both` 是**唯一** inert 的取值。技术上皮革在这里完全能生效（遮罩有效、手册可裁），
   // 不做的理由只有一条：0.2.1 已删除该模式（V1），为将死的功能写行为不划算。
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, toolsMode: 'both', ptcRuntime: PTC_RUNTIME })
@@ -844,7 +850,7 @@ test('both 模式：全 inert——不遮罩、不加目录、不摘引导、不
   }
 })
 
-test('ptc 模式：必须启用（把 inert 判据写成"非 native"会在这里红）', async () => {
+test('ptc 模式：必须启用（把 inert 判据写成"非 native"会在这里红）', LEGACY_RENDERERS, async () => {
   // 这条是 S6 的护栏：正确判据是"只有 both 才 inert"。写成 `mode !== 'native'` 会让 PTC
   // 会话连目录/引导/守卫都没有——那等于把这个功能最大的受益面关掉。
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, toolsMode: 'ptc', ptcRuntime: PTC_RUNTIME })
@@ -863,7 +869,7 @@ test('ptc 模式：必须启用（把 inert 判据写成"非 native"会在这里
   }
 })
 
-test('裁手册：已发现的工具必须留在手册里', async () => {
+test('裁手册：已发现的工具必须留在手册里', LEGACY_RENDERERS, async () => {
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, ptcRuntime: PTC_RUNTIME })
   try {
     await fixture.registered.get('tool_search').execute({ query: 'select:mcp__jshook__tool_3' }, { agent: fixture.agent })
@@ -907,9 +913,9 @@ function fakeProjections() {
 }
 
 /** 宿主记录一条 native 工具结果事件时，落进日志的正是 render 出来的文本。 */
-const toolResultEvent = (definition, value) => ({
+const toolResultEvent = (definition, value, seq = 1) => ({
   type: 'tool/result',
-  seq: 1,
+  seq,
   time: 0,
   data: {
     turn: 0,
@@ -919,8 +925,11 @@ const toolResultEvent = (definition, value) => ({
       toolCallId: 'c1',
       isError: false,
       source: { kind: 'tool', callId: 'c1' },
+      // 模型读的是 render 的文本（已剥掉累积快照）；宿主给投影留的是 presentationMeta。
+      // 恢复种子必须走后者——这正是本轮 v2 协议的核心改变。
       content: definition.output.render({}, value),
     },
+    meta: definition.output.presentationMeta?.({}, value),
   },
 })
 
@@ -942,14 +951,14 @@ test('tool_search：没有延迟服务器时明确报错，全部发现后再搜
     const tool = busy.registered.get('tool_search')
     await tool.execute({ query: `select:${BIG_SCHEMAS.map((entry) => entry.name).join(',')}` }, { agent: busy.agent })
     const again = await tool.execute({ query: 'browser work' }, { agent: busy.agent })
-    assert.equal(again.protocol, 'dsh-tool-search/v1', '全部发现之后再搜一次必须正常返回（不是错误）')
+    assert.equal(again.protocol, 'dsh-tool-search/v2', '全部发现之后再搜一次必须正常返回（不是错误）')
     assert.deepEqual(again.discoveredTools, [], '没有新发现而已')
   } finally {
     busy.cleanup()
   }
 })
 
-test('tool_search：PTC 下补签名（参数 + 返回类型），native 下不给（C1）', async () => {
+test('tool_search：PTC 下补签名（参数 + 返回类型），native 下不给（C1）', LEGACY_RENDERERS, async () => {
   // PTC 的手册本来就给这两样；搜索结果只还参数 = 比不延迟时更少 = 半失效。
   const ptc = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, toolsMode: 'ptc', ptcRuntime: PTC_RUNTIME })
   try {
@@ -1051,17 +1060,18 @@ test('搜索工具：命中即激活，返回完整 schema 与 meta 协议', asy
   const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
   const definition = fixture.registered.get('tool_search')
   const value = await definition.execute({ query: 'select:mcp__jshook__tool_7' }, { agent: fixture.agent })
-  assert.equal(value.protocol, 'dsh-tool-search/v1')
+  assert.equal(value.protocol, 'dsh-tool-search/v2')
   assert.equal(value.matches.length, 1)
   assert.equal(value.matches[0].name, 'mcp__jshook__tool_7')
   assert.deepEqual(value.matches[0].parameters, { type: 'object', properties: { arg: { type: 'string' } } })
   assert.deepEqual(value.discoveredTools, ['mcp__jshook__tool_7'])
-  assert.deepEqual(value.allDiscoveredTools, ['mcp__jshook__tool_7'])
-  // meta 带累积列表，render 剥掉（不泄回提示词）。
+  assert.deepEqual(value.discoverySnapshot.orderedNames, ['mcp__jshook__tool_7'])
+  // meta 带有序替换快照，render 剥掉（不泄回提示词）。
   const meta = definition.output.presentationMeta({}, value)
-  assert.deepEqual(meta.allDiscoveredTools, ['mcp__jshook__tool_7'])
+  assert.equal(meta.protocol, 'dsh-tool-search/v2')
+  assert.deepEqual(meta.discoverySnapshot.orderedNames, ['mcp__jshook__tool_7'])
   const rendered = definition.output.render({}, value)
-  assert.equal(JSON.parse(rendered[0].text).allDiscoveredTools, undefined)
+  assert.equal(JSON.parse(rendered[0].text).discoverySnapshot, undefined)
   assert.equal(JSON.parse(rendered[0].text).matches.length, 1)
   fixture.cleanup()
 })
@@ -1187,7 +1197,7 @@ test('maxDiscovered 上限：无界发现被最旧淘汰', async () => {
     value = await tool.execute({ query: `select:mcp__jshook__tool_${index}` }, { agent: fixture.agent })
   }
   assert.equal(value.discoveredCount, 3)
-  assert.deepEqual(value.allDiscoveredTools, ['mcp__jshook__tool_2', 'mcp__jshook__tool_3', 'mcp__jshook__tool_4'])
+  assert.deepEqual(value.discoverySnapshot.orderedNames, ['mcp__jshook__tool_2', 'mcp__jshook__tool_3', 'mcp__jshook__tool_4'])
   fixture.cleanup()
 })
 
@@ -1208,8 +1218,28 @@ test('maxDiscovered 上限：单批 select 超过上限时不得淘汰本批', a
   // 6 个名字、cap 3 → 淘汰 3 个最旧的（tool_0..tool_2），剩下的照常存活。
   const after = await tool.execute({ query: 'select:mcp__jshook__tool_9' }, { agent: fixture.agent })
   assert.equal(after.discoveredCount, 3, '下一批按 cap 回落')
-  assert.deepEqual(after.allDiscoveredTools, ['mcp__jshook__tool_3', 'mcp__jshook__tool_4', 'mcp__jshook__tool_9'])
+  assert.deepEqual(after.discoverySnapshot.orderedNames, ['mcp__jshook__tool_3', 'mcp__jshook__tool_4', 'mcp__jshook__tool_9'])
   fixture.cleanup()
+})
+
+test('混合批次：本批返回的已发现工具不得被本次淘汰（守卫不得反口）', async () => {
+  // 复现过的缺陷：cap=2，先加载 tool_0、tool_1；再 select:tool_0,tool_2 → tool_2 是新发现，
+  // 触发淘汰，而旧实现只把「本批新增数」当保护下限，于是最旧的 tool_0 被当场淘汰。
+  // 结果同一条结果里 instruction 写着"按名字直接调"，tool_0 一调就被守卫拒绝。
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: { ...DEFER_CONFIG, maxResults: 1, maxDiscovered: 2 } })
+  try {
+    const tool = fixture.registered.get('tool_search')
+    await tool.execute({ query: 'select:mcp__jshook__tool_0' }, { agent: fixture.agent })
+    await tool.execute({ query: 'select:mcp__jshook__tool_1' }, { agent: fixture.agent })
+    const value = await tool.execute({ query: 'select:mcp__jshook__tool_0,mcp__jshook__tool_2' }, { agent: fixture.agent })
+    assert.deepEqual(value.matches.map((match) => match.name), ['mcp__jshook__tool_0', 'mcp__jshook__tool_2'])
+    for (const match of value.matches) {
+      assert.equal(fixture.guards[0]({ name: match.name, agent: fixture.agent }), undefined,
+        `${match.name} 刚在结果里返回过，必须可以直接调用`)
+    }
+  } finally {
+    fixture.cleanup()
+  }
 })
 
 test('晚连服务器：工具后出现，同一次组装里就被滤掉（无窗口）', async () => {

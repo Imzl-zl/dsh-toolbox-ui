@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { installAgentRuntime } from '../lib/workspace-runtime.js'
 import { projectMcpServers } from '../lib/workspace-runtime.js'
+import { agentToolLoadingPolicy, setAgentToolLoadingPolicy } from '../lib/workspace-runtime.js'
 // 把一份 session 展开成真实 setup 契约的两个参数：setup(agentCtx, agent)。
 const spawn = (s) => [s, s.sessionAgent]
 
@@ -24,13 +25,23 @@ test('project MCP defer flag reaches the ToolSearch config bridge', async () => 
     await created.setup(...spawn(fixture.agentCtx))
 
     assert.deepEqual(projectMcpServers(fixture.ctx).sort((a, b) => a.name.localeCompare(b.name)), [
-      { name: 'db', defer: false },
-      { name: 'deferred', defer: true },
-      { name: 'plain', defer: false },
+      { name: 'db', defer: false, wsPath: fixture.wsRoot },
+      { name: 'deferred', defer: true, wsPath: fixture.wsRoot },
+      { name: 'plain', defer: false, wsPath: fixture.wsRoot },
     ])
-    // 全局族（loader 条目）与项目族（共享连接）合并成同一张表。
-    assert.deepEqual(serverNamesOf(fixture.ctx).sort(), ['db', 'deferred', 'exa', 'github', 'plain'])
-    assert.deepEqual(deferServersOf(fixture.ctx), ['deferred'])
+    // 全局族（loader 条目）与项目族（共享连接）合并成同一张表；项目族只取**本会话所在项目**。
+    const agent = fixture.agentCtx.sessionAgent
+    assert.deepEqual(serverNamesOf(fixture.ctx, agent).sort(), ['db', 'deferred', 'exa', 'github', 'plain'])
+    assert.deepEqual(deferServersOf(fixture.ctx, agent), ['deferred'])
+
+    // 项目策略随挂载进入会话状态；面板保存后由 setAgentToolLoadingPolicy 就地更新存活会话
+    // （视图按 revision 自愈，不需要重连）。两个方向都钉住，避免"只写盘不生效"。
+    // 没配过时是"跟随既有行为"（mode: legacy），不是 undefined：读侧归一后永远是一份可用策略。
+    assert.deepEqual(agentToolLoadingPolicy(agent), { mode: 'legacy', groups: {}, tools: {} })
+    const policy = { mode: 'recommended', groups: {}, tools: {} }
+    assert.equal(setAgentToolLoadingPolicy(fixture.ctx, fixture.wsRoot, policy), 1, '本项目有 1 个存活会话')
+    assert.deepEqual(agentToolLoadingPolicy(agent), policy)
+    assert.equal(setAgentToolLoadingPolicy(fixture.ctx, fixture.wsRoot + '-other', policy), 0, '别的项目不受影响')
   } finally {
     await fixture.cleanup()
   }
