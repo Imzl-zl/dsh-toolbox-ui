@@ -179,6 +179,25 @@ test('npm 0.2.2-rc.1: 没有任何延迟工具时，搜索入口与目录段一�
   }
 })
 
+test('npm 0.2.2-rc.1: 没有延迟工具时 PTC 手册里也不出现搜索入口（issue #9 的另一半）', MODERN, async () => {
+  // PTC 下模型看的不是函数清单而是 `tools:sdk` 手册——手册里留着 tool_search，模型照样会去搜。
+  // 这一条用真宿主 + 真 executor + 真手册渲染器验"摘掉"这件事真的发生了（不是只在代码里推断）。
+  const host = await createHost({ presentation: 'ptc', deferral: false })
+  try {
+    const admission = await host.admit()
+    const assembly = await host.assemble(host.agent, admission)
+    assert.deepEqual(host.names(assembly), ['run_code'], 'PTC 声明里只应有 run_code')
+    const sdk = assembly.sections.find((section) => section.name === 'tools:sdk')
+    assert.ok(sdk, 'PTC 必须有 tools:sdk 段')
+    assert.equal(sdk.text.includes('tool_search'), false,
+      '没有可搜的工具时，手册里也不得出现搜索入口（否则模型照样会照着手册去搜）')
+    // 其余工具的手册条目不能被顺手删掉：这只是在摘"搜索入口"。
+    assert.match(sdk.text, /mcp__rc22__alpha/, '常驻工具的签名必须仍在手册里（只摘搜索入口）')
+  } finally {
+    await host.cleanup()
+  }
+})
+
 test('npm 0.2.2-rc.1: PTC 手册隐藏未发现工具、保留合法程序绑定，同一执行根搜索后立即可调', MODERN, async () => {
   const host = await createHost({ presentation: 'ptc' })
   let admission
