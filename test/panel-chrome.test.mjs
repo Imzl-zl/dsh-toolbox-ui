@@ -23,7 +23,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import vm from 'node:vm'
-import { createHookRenderer } from './helpers/hook-renderer.mjs'
+import { createHookRenderer } from '../test-support/hook-renderer.mjs'
 
 // Source-shape contracts compare canonical newlines on Windows and Unix.
 const clientSource = (await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
@@ -1037,3 +1037,4 @@ test('市场的搜索是「提交才打上游」：草稿与已提交关键字�
   assert.equal((clientSource.match(/void searchHub\(\);/g) ?? []).length, 1,
     'searchHub 的直接调用点只应有挂载/依赖变化那一处（重试按钮用 onClick 传函数）')
 })
+

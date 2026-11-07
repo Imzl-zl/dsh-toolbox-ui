@@ -237,8 +237,9 @@ test('工具加载面板：全局页的搜索参数可编辑且与策略统一�
   }
   const tree = await openModal(internals, call, { inline: true })
   const numberInputs = collectAll(tree, (node) => node.type === 'input' && node.props?.type === 'number')
-  assert.ok(numberInputs.length > 0)
-  assert.equal(numberInputs.every((input) => input.props.disabled === false), true, '全局页参数可编辑')
+  assert.ok(numberInputs.length >= 3, '目录上限输入框即使开关关着也必须渲染（置灰保留，不卸载）')
+  assert.equal(numberInputs.slice(0, 2).every((input) => input.props.disabled === false), true, '全局页参数可编辑')
+  assert.equal(numberInputs[2].props.disabled, true, '目录上限开关默认关闭时该框置灰')
   numberInputs[0].props.onChange({ target: { value: '12' } })
   const after = internals.__render(internals.ToolLoadingModal, { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} })
   // 统一保存按钮：只写发生改动的配置，参数与策略仍使用各自的 RPC。

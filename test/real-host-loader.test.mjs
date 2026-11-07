@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
@@ -15,7 +15,7 @@ import {
   MCP_NAME,
   TEST_TIMEOUT_MS,
   waitFor,
-} from './helpers/loader-host.mjs'
+} from '../test-support/loader-host.mjs'
 
 // 这一组用例打的是 **O1 的生产形状**：真 cordis Context + 真 Loader + **官方 mountRootInclude**
 // 挂的根 Include + 真 ToolRuntime + 真 mcp-client 连**真 stdio 子进程**。
@@ -332,7 +332,7 @@ test('每个变更型 RPC 都返回 persisted / live / diagnostics', { timeout: 
   const host = await createLoaderHost(
     `- insert:\n    - id: mcp-a\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: a\n        command: ${process.execPath}\n        args: [ '${server}', '${sentinel}' ]\n`,
   )
-  const assertResult = (label, result) => {
+  const assertResult = (label, result, expected) => {
     assert.ok(['applied', 'unchanged', 'rolled-back', 'failed'].includes(result.persisted), `${label}.persisted=${result.persisted}`)
     assert.ok(['applied', 'unchanged', 'skipped', 'failed'].includes(result.live), `${label}.live=${result.live}`)
     assert.ok(Array.isArray(result.diagnostics), `${label}.diagnostics 必须是数组`)
@@ -340,19 +340,27 @@ test('每个变更型 RPC 都返回 persisted / live / diagnostics', { timeout: 
       assert.equal(typeof entry.code, 'string', `${label} 的诊断必须带 code`)
       assert.equal(typeof entry.message, 'string', `${label} 的诊断必须带 message`)
     }
+    // 只验"值在枚举内"是不够的：返回 failed 也能过。调用点给了期望值就必须逐字命中。
+    if (expected !== undefined) {
+      assert.equal(result.persisted, expected.persisted, `${label}.persisted 必须是 ${expected.persisted}`)
+      assert.equal(result.live, expected.live, `${label}.live 必须是 ${expected.live}`)
+    }
     // note 是可选的人类文案（读类字段不需要）；三字段才是契约。
   }
   try {
     assert.ok(await waitFor(() => host.toolNames().includes('mcp__a__echo')), '前置条件：行必须真的连上')
-    assertResult('add', await host.manager.add({ name: 'b', transport: 'stdio', command: process.execPath, args: [server, join(root, 'b-exited')] }))
-    assertResult('disable', await host.manager.disable('b'))
-    assertResult('enable', await host.manager.enable('b'))
-    assertResult('update', await host.manager.update({ name: 'b', transport: 'stdio', command: process.execPath, args: [server, join(root, 'b-exited')], directTools: true }))
-    assertResult('setDefer', await host.manager.setDefer({ name: 'b', defer: true }))
-    assertResult('setDeferAll', await host.manager.setDeferAll({ defer: false }))
-    assertResult('reconnect', await host.manager.reconnect('b'))
+    assertResult('add', await host.manager.add({ name: 'b', transport: 'stdio', command: process.execPath, args: [server, join(root, 'b-exited')] }), { persisted: 'applied', live: 'applied' })
+    assertResult('disable', await host.manager.disable('b'), { persisted: 'applied', live: 'applied' })
+    assertResult('enable', await host.manager.enable('b'), { persisted: 'applied', live: 'applied' })
+    // 这条 update 只带 `directTools`（映射成 disabled:false，而服务器刚被启用），连接字段一字未改，
+    // 所以盘上无变化（unchanged），运行中的遮罩照样应用（applied）。
+    assertResult('update', await host.manager.update({ name: 'b', transport: 'stdio', command: process.execPath, args: [server, join(root, 'b-exited')], directTools: true }), { persisted: 'unchanged', live: 'applied' })
+    assertResult('setDefer', await host.manager.setDefer({ name: 'b', defer: true }), { persisted: 'applied', live: 'applied' })
+    assertResult('setDeferAll', await host.manager.setDeferAll({ defer: false }), { persisted: 'applied', live: 'applied' })
+    // 重连不改配置：盘上 unchanged，运行中确实重建了连接。
+    assertResult('reconnect', await host.manager.reconnect('b'), { persisted: 'unchanged', live: 'applied' })
     assertResult('importJson', await host.manager.importJson({ mode: 'merge', json: { mcpServers: {} } }))
-    assertResult('updateToolSearchSettings', await host.manager.updateToolSearchSettings({ settings: { maxResults: 12 } }))
+    assertResult('updateToolSearchSettings', await host.manager.updateToolSearchSettings({ settings: { maxResults: 12 } }), { persisted: 'applied', live: 'applied' })
     // 同一份值再存一次：盘上不该再写（persisted=unchanged），运行值已经等于目标（live=unchanged）。
     // 这条比"字段齐全"更硬：它钉住的是这两个字段的**语义**，而不只是形状。
     const repeatSettings = await host.manager.updateToolSearchSettings({ settings: { maxResults: 12 } })
@@ -523,5 +531,129 @@ test('real loader host: 并发保存后，运行值与盘上配置一致（不�
       '模型可见的上限也必须等于盘上的值')
   } finally {
     await host.cleanup()
+  }
+})
+
+test('real loader host: update() 只改 disabled 时必须真的停掉条目，而不是只翻遮罩', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 复现过的缺陷：`touchesConnection` 只比 `MANAGED_CONFIG_FIELDS`（mcp-client 的 config 字段），
+  // 而 `disabled` 是 loader 条目的**外壳**字段，不在那份清单里。于是"禁用一台服务器"被判成
+  // "纯遮罩变更"，走进 applyLive 分支：盘上写了 `disabled: true`，运行中的条目照旧启用、
+  // 工具照旧可见，还回一句"立即生效"——盘上与运行中直接相反。
+  const root = await mkdtemp(join(tmpdir(), 'dsh-disabled-'))
+  const server = join(root, 'fixture-server.mjs')
+  const sentinel = join(root, 'fixture-exited')
+  await writeFile(server, FIXTURE_SERVER)
+  const host = await createLoaderHost(
+    `- insert:\n    - id: mcp-fixture\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: fixture\n        command: ${process.execPath}\n        args: [ '${server}', '${sentinel}' ]\n`,
+  )
+  try {
+    assert.ok(await waitFor(() => host.toolNames().includes('mcp__fixture__echo')), '前置条件：fixture 必须真的连上')
+
+    const result = await host.manager.update({
+      name: 'fixture', transport: 'stdio', command: process.execPath, args: [server, sentinel], disabled: true,
+    })
+    assert.equal(result.persisted, 'applied', '禁用必须写进 profile patch')
+
+    const live = host.entries().filter((entry) => entry.options.config?.serverName === 'fixture')
+    assert.equal(live.length, 1, '条目仍然该在，只是被禁用')
+    assert.equal(live[0].disabled, true,
+      '盘上写了 disabled，运行中的条目也必须被禁用（否则"立即生效"是假话）')
+    assert.equal(host.toolNames().includes('mcp__fixture__echo'), false, '被禁用的服务器不得再提供工具')
+  } finally {
+    await host.cleanup()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('real loader host: 只翻延迟遮罩时，不得把「盘上已改、尚未重载」的条目热应用进来', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 复现过的缺陷：`commitProfilePatches` 在写盘之前就解析组合 API，而解析会跑一次真 reconcile
+  // （`probeComposition` 用它辨认"拿到的是不是宿主那一份模块实例"）。于是"翻一个布尔位"这种
+  // 明确不改变行生命周期的操作，会把盘上还没重载的外部改动顺带应用掉——可能顺带重启
+  // mcp-client（冷启动分钟级），而用户只是点了一下延迟开关。
+  const root = await mkdtemp(join(tmpdir(), 'dsh-defermask-'))
+  const server = join(root, 'fixture-server.mjs')
+  await writeFile(server, FIXTURE_SERVER)
+  const alphaExited = join(root, 'alpha-exited')
+  const betaExited = join(root, 'beta-exited')
+  const host = await createLoaderHost(
+    `- insert:\n    - id: mcp-alpha\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: alpha\n        command: ${process.execPath}\n        args: [ '${server}', '${alphaExited}' ]\n`,
+  )
+  try {
+    assert.ok(await waitFor(() => host.toolNames().includes('mcp__alpha__echo')), '前置条件：alpha 必须真的连上')
+
+    // 外部改动：直接往 patch 追加一台 beta，不经过插件、也不触发重载。
+    await appendFile(host.patch,
+      `    - id: mcp-beta\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: beta\n        command: ${process.execPath}\n        args: [ '${server}', '${betaExited}' ]\n`)
+    const betaEntries = () => host.entries().filter((entry) => entry.options.config?.serverName === 'beta')
+    assert.equal(betaEntries().length, 0, '前置条件：外部改动此刻还没生效')
+
+    const result = await host.manager.setDeferAll({ defer: true })
+    assert.equal(result.live, 'applied', '延迟开关本身要立即生效')
+
+    assert.equal(betaEntries().length, 0,
+      '翻遮罩不改变任何条目的生命周期：不得把外部改动热应用进来')
+  } finally {
+    await host.cleanup()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('real loader host: 策略压过服务器开关时，setDefer 必须如实报告而不是假装切了', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 芯片读的是"统一策略下的实际状态"（deferEffective）。当工具页把整台服务器设成按需时，
+  // 服务器级 defer 开关（legacyResident）优先级更低，翻它不会有任何变化。
+  // 旧行为：回一句"已切回全量常驻"，用户看着毫无变化的列表不知发生了什么。
+  const root = await mkdtemp(join(tmpdir(), 'dsh-governed-'))
+  const server = join(root, 'fixture-server.mjs')
+  const sentinel = join(root, 'fixture-exited')
+  await writeFile(server, FIXTURE_SERVER)
+  const host = await createLoaderHost(
+    `- insert:\n    - id: mcp-fixture\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: fixture\n        command: ${process.execPath}\n        args: [ '${server}', '${sentinel}' ]\n`,
+  )
+  try {
+    assert.ok(await waitFor(() => host.toolNames().includes('mcp__fixture__echo')), '前置条件：fixture 必须真的连上')
+    // 工具页把整台服务器设成按需 —— 这是比服务器开关更高优先级的策略层。
+    await host.manager.updateToolLoadingSettings({ policy: { groups: { fixture: 'deferred' } } })
+
+    const result = await host.manager.setDefer({ name: 'fixture', defer: false })
+    assert.equal(result.persisted, 'applied', '开关本身照样写盘')
+    assert.ok(
+      (result.diagnostics ?? []).some((entry) => entry.code === 'DEFER_GOVERNED_BY_POLICY'),
+      '必须报出"被工具页策略压着"这条诊断，而不是只说已切换',
+    )
+    assert.match(result.note ?? '', /工具.*页的策略决定/, 'note 必须说清为什么没生效')
+  } finally {
+    await host.cleanup()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+
+test('real loader host: home patch 覆盖了同一 id 的 config 时，add 必须回滚并说清被覆盖', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 这条是"整份 config 深比较"的端到端验收，也是 1.10 审查里指出的缺口：
+  // 以前只有桩验证，真 home 层从没跑过。判据与官方配置编辑器一致（config-editor:137-140）。
+  const root = await mkdtemp(join(tmpdir(), 'dsh-override-'))
+  const server = join(root, 'fixture-server.mjs')
+  await writeFile(server, FIXTURE_SERVER)
+  const host = await createLoaderHost(
+    `- insert:\n    - id: mcp-fixture\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: fixture\n        command: ${process.execPath}\n        args: [ '${server}', '${join(root, 'fixture-exited')}' ]\n`,
+  )
+  try {
+    assert.ok(await waitFor(() => host.toolNames().includes('mcp__fixture__echo')), '前置条件：fixture 必须真的连上')
+    // 更高层（home patch）把即将新增的那一行整份 config 改掉。
+    await writeFile(join(host.root, 'home', 'cordis.patch.yml'),
+      "- id: mcp-beta\n  config:\n    serverName: beta\n    env:\n      A: 'overridden'\n")
+
+    await assert.rejects(
+      host.manager.add({ name: 'beta', transport: 'stdio', command: process.execPath, args: [server, join(root, 'beta-exited')] }),
+      (error) => {
+        assert.match(error.message, /与本次写入不一致/)
+        return true
+      },
+    )
+    const patchText = await readFile(host.patch, 'utf8')
+    assert.doesNotMatch(patchText, /mcp-beta/, '判定不过必须把已写的那一行回滚掉')
+  } finally {
+    await host.cleanup()
+    await rm(root, { recursive: true, force: true })
   }
 })

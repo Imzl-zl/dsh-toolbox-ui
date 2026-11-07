@@ -4,9 +4,9 @@
 - FinalizationStatus: complete
 - Truth: .tasks/unified-tool-loading/TODO.csv（8/8 DONE）
 - Current: 已交付。统一策略、一致性修复、RPC/持久化、面板与文档均已落地并有回归证据。
-- Latest validation: 2026-11-05 完整测试 895/895 通过（测试进程 HOME=USERPROFILE）；MCP/技能/工具/市场/弹窗已在 19791 的真实 GUI 验证桌面与390px，详见 UI-VALIDATION.md。
-- Next: 用户在 19791 审阅效果；没有提交、推送或发布。
-- Workspace: D:/sudy/github/dsh-toolbox-ui/.worktrees/feature/unified-tool-loading @ feature/unified-tool-loading，基线 cb02d6e；**未提交、未推送、未发布**。
+- Latest validation: 2026-11-07 完整测试 977 例 / 970 pass / 0 fail / 7 skip（0.2.1-rc.5 本树）；隔离树 0.2.2-rc.1 同数量、947 pass / 32 skip。逐条证据见 REVIEW-1.10.0.md 与 PLAN-1.11-architecture.md。
+- Next: 按 PLAN-1.11 继续 P2 收尾（文档剩余处、发布说明）；v1.10.0 已发布，修复以 1.10.1 形式提交。
+- Workspace: D:/sudy/github/dsh-toolbox-ui/.worktrees/feature/unified-tool-loading @ feature/unified-tool-loading，基线 cb02d6e。v1.10.0 已提交并推送到 origin/main；本轮修复尚在工作区，未提交。
 - SetupChange: node_modules 为 junction（复用已安装依赖，未改 lockfile）；.worktrees 已被既有 .gitignore 忽略。
 
 ## 事故记录（2026-11-01）

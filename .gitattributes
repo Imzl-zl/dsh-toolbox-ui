@@ -1,0 +1,12 @@
+# 统一 LF：仓库在 Windows 上开发（core.autocrlf=true），而 CI 在 Linux 上跑。
+# `lib/client.js` 是构建产物、`client:check` 逐字节比对分片拼接结果——任何一侧的换行差异
+# 都会让这条闸门变成"看运气"。文本文件一律按 LF 存取，二进制显式声明。
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.zip binary
+*.gz binary

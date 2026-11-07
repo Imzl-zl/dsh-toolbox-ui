@@ -112,7 +112,7 @@ export async function createLoaderHost(patchBody) {
   // profile 目录里的宿主包解析路径：真实 profile 的 node_modules 就是启动器装出来的那一份。
   // 没有它，include 子树按自己的 baseUrl（= profile 目录）解析 `@deepseek-ai/dsh-mcp-client`
   // 会失败——那是夹具缺东西，不是被测代码的问题。
-  await symlink(join(import.meta.dirname, '..', '..', 'node_modules'), join(root, 'node_modules'), 'junction')
+  await symlink(join(import.meta.dirname, '..', 'node_modules'), join(root, 'node_modules'), 'junction')
   const profileContext = {
     name: 'test',
     dir: root,
@@ -132,7 +132,7 @@ export async function createLoaderHost(patchBody) {
   if (!tools) throw new Error('ToolRuntime 未激活')
   ctx.provide('profileContext', profileContext)
   await mountRootInclude(ctx, baseConfig, readProfilePatches('dsh', profileContext))
-  const { McpManagerGateway } = await import('../../lib/index.js')
+  const { McpManagerGateway } = await import('../lib/index.js')
   await ctx.plugin(McpManagerGateway, {})
   return {
     ctx,
@@ -151,3 +151,4 @@ export async function createLoaderHost(patchBody) {
     },
   }
 }
+

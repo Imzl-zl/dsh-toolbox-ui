@@ -56,7 +56,7 @@ const CORDIS_LOADER_DEV_BASELINE = process.env.DSH_HOST_MATRIX_LOADER || '~1.0.6
 
 test('package exposes one Web bundle entry', () => {
   assert.equal(packageJson.dsh?.bundle?.patch, './cordis.patch.yml')
-  assert.equal(packageJson.version, '1.10.0')
+  assert.equal(packageJson.version, '1.10.1')
   assert.equal(packageJson.dsh?.client?.platform, 'web')
   // dsh.client.inject 是客户端图里的「工厂先到」依赖边，只能写真实的 client 包名：
   //   @deepseek-ai/dsh-client-runtime  —— 上游 2026-08-22 已删除（be531688 "remove Runtime"）
@@ -388,9 +388,19 @@ test('revealed values are generation-scoped and cleared when persisted configura
   assert.match(client, /generation !== revealGeneration\.current/)
   assert.match(client, /revealRevisionRef/)
   assert.match(client, /if \(consumeRevision\(revealRevisionRef, res\.revealRevision\)\) clearRevealed\(\)/)
-  assert.match(client, /clearRevealed\(\);\s*flash\(editTarget/)
+  // 展示文案必须经过唯一出口 resultMessage（宿主 note 优先），加/改两句仍按 editTarget 区分。
+  assert.match(client, /clearRevealed\(\);\s*flash\(resultMessage\(res, editTarget/)
   assert.match(client, /clearRevealed\(\);\s*flash\(res\.note/)
 })
+test('结果提示以宿主 note 为准，live:failed 按错误显示（不再用固定成功文案盖掉）', () => {
+  // 缺陷原样：act() 写的是 `flash(successMsg || res.note)`，于是 `live: 'skipped'`
+  // （写盘成功、运行中没生效）被报成"已保存"，正好盖掉契约要说给用户的那句话。
+  assert.match(client, /res\?\.note \|\| res\?\.liveReason \|\| fallback/, 'note 必须优先于调用方文案')
+  assert.match(client, /res\?\.live === 'failed' \? 'err'/, 'live:failed 必须按错误显示')
+  assert.match(client, /flash\(resultMessage\(res, successMsg/, 'act 必须经过唯一出口')
+  assert.doesNotMatch(client, /flash\(successMsg \|\|/, '旧顺序（successMsg 优先）不得回来')
+})
+
 test('client validates reconnect delay ordering without rejecting DSH-supported decimals', () => {
   assert.match(client, /Number\.isFinite\(initialDelay\)/)
   assert.match(client, /initialDelay > maxDelay/)

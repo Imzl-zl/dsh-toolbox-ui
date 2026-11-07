@@ -44,7 +44,9 @@ const HOST_PACKAGES = [
   '@deepseek-ai/dsh-typert-protocol',
 ]
 // 只复制跑测试需要的东西。`node_modules` / `.git` 不复制（安装树自己装）。
-const COPY = ['lib', 'test', 'scripts', 'docs', '.tasks', '.github', 'cordis.patch.yml', 'README.md', 'README.en.md', 'LICENSE']
+// `test-support` 是测试夹具（不是测试用例本身）：放在 `test/` 之外，`node --test` 才不会把
+// 它们当成测试文件执行——它们没有断言，跑起来只会白占时间并虚高计数。
+const COPY = ['lib', 'test', 'test-support', 'scripts', 'docs', '.tasks', '.github', 'cordis.patch.yml', 'README.md', 'README.en.md', 'LICENSE']
 
 function parseArgs(argv) {
   const args = { keep: false, install: true }

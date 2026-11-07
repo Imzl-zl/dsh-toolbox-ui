@@ -473,7 +473,7 @@ DSH 已经有一个接 skillhub 的第三方插件（`@cocofhu/skillhub`），�
 3. **判**这一行在**最终有效配置**里算不算数——官方 `composeEntries`，被覆盖或被禁用就当场失败；
 4. **应用**整份组合——官方 `reconcileProfilePatches(root, patches, name, requiredIds)`，
    条目由宿主自己挂起来/移除/重启，插件不再调用 `loader.create` / `entry.update` / `parent.remove`；
-5. **验**运行中的条目（数量、启用态、目标工具出现），失败就把盘上内容写回上一份并再应用一次，
+5. **验**运行中的条目（live owner 数量；`setDisabled` 另验启用态），失败就把盘上内容写回上一份并再应用一次，
    然后把"两份失败原因"一起报给调用方。
 
 结果是所有变更型 RPC 都返回同一组字段：`persisted`（`applied` / `unchanged` / `rolled-back`）、

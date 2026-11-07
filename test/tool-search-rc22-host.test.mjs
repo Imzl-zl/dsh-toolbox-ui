@@ -258,3 +258,47 @@ test('npm 0.2.2-rc.1: 两个 agent 的发现集互不污染（同一宿主、同
   }
 })
 
+
+test('npm 0.2.2-rc.1: PTC 会话的搜索结果必须带签名（模式在执行时读装配记录）', MODERN, async () => {
+  // 缺陷原样：`execute` 用 `viewFor(agent, undefined, toolSet)` 取模式，没有 assembly 可看，
+  // 现代宿主又没有 modeFor，于是恒判 native → 签名分支短路，而能力面照报 ready。
+  const host = await createHost({ presentation: 'ptc' })
+  let admission
+  try {
+    admission = await host.admit()
+    // 先装配：模式是**装配时**的事实，执行时读回的就是这一条。
+    const assembly = await host.assemble(host.agent, admission)
+    assert.deepEqual(host.names(assembly), ['run_code'], '前置条件：PTC 下声明只剩 run_code')
+
+    const result = await host.search(host.agent, admission, 'select:mcp__rc22__beta')
+    assert.equal(typeof result.matches[0].signature, 'string',
+      'PTC 下模型是在程序里调用工具，必须同时给出参数与返回类型')
+    assert.match(result.matches[0].signature, /mcp__rc22__beta/)
+  } finally {
+    admission?.dispose()
+    await host.cleanup()
+  }
+})
+
+test('npm 0.2.2-rc.1: 同一进程里 native 作用域不得被当成 PTC 加签名（按作用域判，不按 ptcRuntime）', MODERN, async () => {
+  // executor 是 per-scope 的，而 `ptcRuntime` 对所有作用域都可见。用 ptcRuntime 判模式，
+  // 会把"root 挂 PTC、这个 agent 挂 native"的会话判成 PTC，给原生调用附加返回类型签名。
+  const host = await createHost({ presentation: 'ptc' })
+  let admission
+  try {
+    const nativeExecutor = await importHost('@deepseek-ai/dsh-tool-executor-native')
+    await host.agent.ctx.plugin(nativeExecutor, {})
+    admission = await host.admit()
+    const assembly = await host.assemble(host.agent, admission)
+    // native 的判别式不是"完整清单"——延迟工具本来就要搜过才出现，所以搜索前只剩入口本身。
+    assert.deepEqual(host.names(assembly), ['tool_search'],
+      '前置条件：该作用域走的是 native（声明里是搜索入口，不是 run_code）')
+
+    const result = await host.search(host.agent, admission, 'select:mcp__rc22__beta')
+    assert.equal('signature' in result.matches[0], false,
+      'native 会话没有"返回类型"这个契约，加签名只是噪声')
+  } finally {
+    admission?.dispose()
+    await host.cleanup()
+  }
+})

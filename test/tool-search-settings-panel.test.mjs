@@ -242,17 +242,21 @@ test('参数非法时先报错，工具策略和搜索参数都不能落盘', as
   assert.match(allText(internals.__render(internals.ToolLoadingModal, base)), /正整数/)
 })
 
-test('目录限制开关打开后显示输入框，保存时才写入 maxCatalogChars', async () => {
+test('目录限制开关打开后显示输入框并预填建议起点，保存时才写入 maxCatalogChars', async () => {
   const internals = loadInternals()
   const { calls, call } = fakeCall()
   const { base, tree } = await openPanel(internals, call)
   const toggle = collectAll(tree, (node) => node?.type === internals.Toggle)[0]
   assert.equal(toggle.props.on, false)
+  // 关着的时候输入框也在（置灰），所以打开前后控件数量不变——这是"不卸载"的直接证据。
+  assert.equal(numericInputs(tree).length, 3)
+  assert.equal(numericInputs(tree)[2].props.disabled, true)
   toggle.props.onChange(true)
   let changed = internals.__render(internals.ToolLoadingModal, base)
   assert.equal(numericInputs(changed).length, 3)
-  numericInputs(changed)[2].props.onChange({ target: { value: '12500' } })
-  changed = internals.__render(internals.ToolLoadingModal, base)
+  assert.equal(numericInputs(changed)[2].props.disabled, false)
+  // 打开时预填建议起点：用户不该对着空白框猜一个数，也不该在测试里替产品敲这个数。
+  assert.equal(numericInputs(changed)[2].props.value, '12500')
   await primaryButton(changed, internals).props.onClick()
   await flush()
   const update = calls.find((entry) => entry.method === 'updateToolSearchSettings')
@@ -275,13 +279,15 @@ test('目录限制打开后清空输入会保留控件并拒绝保存', async ()
   assert.match(allText(internals.__render(internals.ToolLoadingModal, base)), /目录上限需要一个正整数/)
 })
 
-test('关闭目录限制会移除 maxCatalogChars，而不是写入 0', async () => {
+test('关闭目录限制会移除 maxCatalogChars，而不是写入 0；输入框置灰保留', async () => {
   const internals = loadInternals()
   const { calls, call } = fakeCall({ settings: { maxResults: 10, maxDiscovered: 20, maxCatalogChars: 120 } })
   const { base, tree } = await openPanel(internals, call)
   collectAll(tree, (node) => node?.type === internals.Toggle)[0].props.onChange(false)
   const changed = internals.__render(internals.ToolLoadingModal, base)
-  assert.equal(numericInputs(changed).length, 2)
+  // 关掉是"可见、不可改、不生效"，不是把控件拿走：卸载会让表单跳一下，用户也看不出这一项原本是什么。
+  assert.equal(numericInputs(changed).length, 3)
+  assert.equal(numericInputs(changed)[2].props.disabled, true)
   await primaryButton(changed, internals).props.onClick()
   await flush()
   const update = calls.find((entry) => entry.method === 'updateToolSearchSettings')

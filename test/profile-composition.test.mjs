@@ -50,7 +50,7 @@ function createApi(overrides = {}) {
     async reconcileProfilePatches(ctx, patches, bin, requiredIds) {
       calls.reconcile.push({ patches, requiredIds })
       if (overrides.reconcileThrows) throw new Error(overrides.reconcileThrows)
-      return []
+      return overrides.reconcileWarnings ?? []
     },
   }
   return { api, calls }
@@ -183,4 +183,79 @@ test('组合 API 缺函数时按"不可用"处理，而不是半途抛错', asyn
   const sources = await profileSources(ctx)
   assert.equal(sources.api, undefined)
   assert.match(sources.reason, /缺少/)
+})
+
+test('内容没变、只是 live 失败：persisted 报 unchanged（一个字节都没写，不能说 failed）', async () => {
+  // `failed` 的语义是"写过但写不动"。内容与盘上一致时压根没有写动作，
+  // 报 failed 会让面板说"保存失败"，而事实是"本来就是这个值、只是没能重新应用"。
+  const { commitProfilePatches } = await import('../lib/profile-composition.js')
+  const { api } = createApi({ reconcileThrows: 'reconcile boom' })
+  const ctx = createCtx({ api })
+  const patch = createPatch('SAME')
+  await assert.rejects(
+    commitProfilePatches(ctx, patch, 'SAME', { label: '探针' }),
+    (error) => {
+      assert.equal(error.result.persisted, 'unchanged')
+      return true
+    },
+  )
+  assert.equal(patch.writes.length, 0, '内容没变就不该写盘')
+})
+
+test('活值路径同样判定覆盖：被更高层盖住时不执行 applyLive，并回滚写盘', async () => {
+  // applyLive 只用来改遮罩，但"我写的这一行算不算数"与 reconcile 路径是同一个问题。
+  // 少判这一步 = 盘上按新值写了、运行中却是被覆盖后的旧值，而面板还说成功。
+  const { commitProfilePatches } = await import('../lib/profile-composition.js')
+  const { api } = createApi({ composed: [] })
+  const ctx = createCtx({ api })
+  const patch = createPatch('BEFORE')
+  let applied = 0
+  await assert.rejects(
+    commitProfilePatches(ctx, patch, 'AFTER', {
+      label: '探针',
+      entryId: 'mcp-a',
+      expect: { present: true },
+      applyLive: () => { applied += 1 },
+    }),
+    (error) => {
+      assert.equal(error.result.persisted, 'rolled-back')
+      assert.match(error.message, /被更高层覆盖|不在最终有效配置里/)
+      return true
+    },
+  )
+  assert.equal(applied, 0, '覆盖判定不过就不该执行 applyLive')
+  assert.deepEqual(patch.writes.map((write) => write.next), ['AFTER', 'BEFORE'], '已写的盘要回滚')
+})
+
+test('宿主返回的 warnings 进 diagnostics（成功路径不再恒为空）', async () => {
+  const { commitProfilePatches } = await import('../lib/profile-composition.js')
+  const { api } = createApi({ reconcileWarnings: ['entry mcp-b is inactive (unchanged)'] })
+  const ctx = createCtx({ api })
+  const patch = createPatch('OLD')
+  const result = await commitProfilePatches(ctx, patch, 'NEW', { label: '探针' })
+  assert.equal(result.persisted, 'applied')
+  assert.ok(
+    result.diagnostics.some((entry) => entry.code === 'RECONCILE_WARNING' && /mcp-b/.test(entry.message)),
+    '既有未激活条目的告警必须传到面板，不能静默丢弃',
+  )
+})
+
+test('覆盖判定支持整份 config 深比较：只被改了 env 也算"不算数"', async () => {
+  // 官方配置编辑器比的是 `isDeepStrictEqual(有效组合.config, next)`（config-editor:137-140）。
+  // 只验"条目在不在、disabled 对不对"时，上层只盖 env / args 的行会被判成算数——
+  // 用户于是拿到一份被覆盖的配置，而面板说保存成功。
+  const { checkComposedRow } = await import('../lib/profile-composition.js')
+  const api = { composeEntries: () => [{ id: 'mcp-a', name: 'x', config: { serverName: 'a', env: { TOKEN: 'other' } } }] }
+  const patches = [{}]
+
+  const mismatch = checkComposedRow(api, patches, 'mcp-a', { present: true, config: { serverName: 'a', env: { TOKEN: 'mine' } } })
+  assert.equal(mismatch.ok, false)
+  assert.match(mismatch.reason, /与本次写入不一致/)
+
+  // 键序不同不算不一致（JSON.stringify 直接比会误报）。
+  const reordered = checkComposedRow(api, patches, 'mcp-a', { present: true, config: { env: { TOKEN: 'other' }, serverName: 'a' } })
+  assert.equal(reordered.ok, true)
+
+  // 不传 config 时退回旧判据（只验存在与 disabled），保持既有调用点行为不变。
+  assert.equal(checkComposedRow(api, patches, 'mcp-a', { present: true }).ok, true)
 })

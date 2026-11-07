@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createLoaderHost, FIXTURE_SERVER, MCP_NAME, TEST_TIMEOUT_MS, waitFor } from './helpers/loader-host.mjs'
+import { createLoaderHost, FIXTURE_SERVER, MCP_NAME, TEST_TIMEOUT_MS, waitFor } from '../test-support/loader-host.mjs'
 
 // 这一组钉的是**行生命周期失败时的语义**：行没起来 / 没禁用成功 / 没移除成功，都必须
 // 冒到调用方、并且把盘上的内容写回原样。
@@ -25,7 +25,7 @@ test('update() 改了连接字段但重连失败：报错并把 patch 写回原�
   // 任何走 `Entry.update()` 的路径都中招（官方设置界面同样如此），插件层修不了，所以这里
   // 把它**显式断言**下来，免得它日后悄悄变成"点一下保存就崩"。
   const { spawn } = await import('node:child_process')
-  const scenario = join(import.meta.dirname, 'helpers', 'update-failure-scenario.mjs')
+  const scenario = join(import.meta.dirname, '..', 'test-support', 'update-failure-scenario.mjs')
   const child = spawn(process.execPath, [scenario], { stdio: ['ignore', 'pipe', 'pipe'] })
   let stdout = ''
   let stderr = ''
@@ -118,3 +118,4 @@ test('update() 只翻 defer 时不重启连接（遮罩不是生命周期变化�
     await rm(root, { recursive: true, force: true })
   }
 })
+
