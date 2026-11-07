@@ -125,12 +125,16 @@ jobs:
         run: |
           name="$(node -p "require('./package.json').name")"
           notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          # Release 可能已经存在：手动 `gh release create` 过、或上一次重跑。`create` 遇到已存在的
+          # tag 会 422 "tag_name already exists" 并让整条流水线变红——而它的产物其实是对的。
+          # 已有就改成 update 语义，让这一步幂等。
           if [ -f "$notes" ]; then
-            gh release create "$GITHUB_REF_NAME" \
-              --title "${name} ${GITHUB_REF_NAME}" \
-              --notes-file "$notes" --verify-tag
+            body=(--notes-file "$notes")
           else
-            gh release create "$GITHUB_REF_NAME" \
-              --title "${name} ${GITHUB_REF_NAME}" \
-              --generate-notes --verify-tag
+            body=(--generate-notes)
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "${name} ${GITHUB_REF_NAME}" "${body[@]}"
+          else
+            gh release create "$GITHUB_REF_NAME" --title "${name} ${GITHUB_REF_NAME}" "${body[@]}" --verify-tag
           fi
