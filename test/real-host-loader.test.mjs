@@ -489,6 +489,22 @@ test('real loader host: 工具加载面板读到的是真实工具与理由（�
   }
 })
 
+test('real loader host: 插件加载前已存在的会话由宿主 agent 注册表补进来', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const host = await createLoaderHost('[]\n')
+  try {
+    const agent = {
+      ctx: { tools: { schemas: () => [{ name: 'read', description: 'read a file', parameters: {} }] } },
+      session: { header: { cwd: host.root } },
+    }
+    // 模拟「插件已经加载，但会话早于插件」：没有 agent/created 事件，只有宿主注册表。
+    host.ctx.provide('agents', { list: () => [agent] })
+    const view = await host.manager.toolLoadingSettings()
+    assert.ok(view.tools.some((row) => row.name === 'read'), '宿主注册表里的已存在会话必须被枚举到')
+  } finally {
+    await host.cleanup()
+  }
+})
+
 test('real loader host: 拼错的参数键拒绝而不是被静默当成"恢复默认"', { timeout: TEST_TIMEOUT_MS }, async () => {
   // 加载期的 config schema 一直是 strict 的（拼错键当场报错），而保存走的 RPC 载荷
   // 只按已知键摘值——于是 `maxResutls` 这种拼写会**静默**变成 {}，把用户此前的设置
