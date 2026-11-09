@@ -315,7 +315,7 @@ test('OpenCode (jsonc) and pi are importable through the same RPC path', async (
         )
         const written = await readFile(fixture.patchPath, 'utf8')
         assert.match(written, /command: npx/)
-        assert.match(written, /args: \[ -y, demo-mcp \]/, 'OpenCode 的 command 数组要拆成 command + args')
+        assert.match(written, /args: \[-y, demo-mcp\]/, 'OpenCode 的 command 数组要拆成 command + args')
         assert.match(written, /TOKEN: !!js .*process\.env\.OC_TOKEN/)
         assert.match(written, /Authorization: !!js .*process\.env\.OC_PAT/)
 

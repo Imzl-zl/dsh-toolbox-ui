@@ -3,9 +3,12 @@ import test from 'node:test'
 import {
   REASONS,
   deferredNamesOf,
+  groupPolicyOf,
+  groupStatesOf,
   normalizePolicyConfig,
   resolveToolLoadingPolicy,
   validatePolicyConfig,
+  writablePolicy,
 } from '../lib/tool-loading-policy.js'
 
 // 统一加载策略的纯决策层：不碰宿主、不读文件。
@@ -170,4 +173,53 @@ test('总开关 off：所有策略路径统一常驻，且**不删偏好**', () 
   assert.equal(off.entries.get('mcp__alpha__b').reason, REASONS.MASTER_SWITCH)
   assert.equal(off.entries.get('tool_search').reason, REASONS.PROTECTED, '保护项仍是保护项（理由更靠前）')
   assert.equal(JSON.stringify({ policy, projectPolicy }), snapshot, '关掉展示优化不得改配置一个字')
+})
+
+test('groupPolicyOf：项目组 > 全局组 > 旧 defer > 模式默认（芯片与工具页组头共用这一条）', () => {
+  const global = { mode: 'recommended', groups: { alpha: 'resident' }, tools: {} }
+  const project = { groups: { alpha: 'deferred' }, tools: {} }
+  // 项目组压过全局组
+  assert.equal(groupPolicyOf({ serverName: 'alpha', policy: global, projectPolicy: project }), 'deferred')
+  // 没有项目组时回落全局组（项目作用域也一样：它继承的是“全局组”，不是模式默认）
+  assert.equal(groupPolicyOf({ serverName: 'alpha', policy: global, projectPolicy: { groups: {}, tools: {} } }), 'resident')
+  // 两层组都没有：旧 defer 优先于模式默认
+  assert.equal(groupPolicyOf({ serverName: 'beta', policy: global, legacyDefer: true }), 'deferred')
+  assert.equal(groupPolicyOf({ serverName: 'beta', policy: global, legacyDefer: false }), 'resident')
+  // 都没有：跟随模式
+  assert.equal(groupPolicyOf({ serverName: 'beta', policy: { mode: 'recommended' } }), 'deferred')
+  assert.equal(groupPolicyOf({ serverName: 'beta', policy: { mode: 'legacy' } }), 'resident')
+})
+
+test('groupStatesOf：项目跟随回落到全局组，而不是模式默认', () => {
+  // 回归：曾经这里把全局 groups 也一起清空，于是项目页组头显示常驻，而 MCP 芯片
+  // （groupPolicyOf 看到全局组）显示按需——同一个值两个答案。
+  const states = groupStatesOf({
+    owners: ['alpha'],
+    ownPolicy: { groups: {} },
+    inheritedPolicy: { mode: 'legacy', groups: { alpha: 'deferred' } },
+    inheritedProjectPolicy: { groups: {} },
+  })
+  assert.equal(states[0].configured, 'inherit')
+  assert.equal(states[0].inherited, 'deferred', '项目未设组时要回落到全局组')
+})
+
+test('groupStatesOf：全局跟随不把自己的组算进 inherited', () => {
+  const states = groupStatesOf({
+    owners: ['alpha'],
+    ownPolicy: { groups: { alpha: 'deferred' } },
+    inheritedPolicy: { groups: { alpha: 'deferred' } },
+  })
+  assert.equal(states[0].configured, 'deferred')
+  assert.equal(states[0].inherited, 'resident', '跟随是删自己这一层，不能把自己的组算回去')
+})
+
+test('writablePolicy：legacy 用删键表达，不把 legacy 写进配置', () => {
+  assert.deepEqual(writablePolicy({ mode: 'legacy', groups: {}, tools: {} }), { groups: {}, tools: {} })
+  assert.deepEqual(writablePolicy({ mode: 'recommended', groups: { a: 'deferred' }, tools: { x: 'resident' } }), {
+    mode: 'recommended',
+    groups: { a: 'deferred' },
+    tools: { x: 'resident' },
+  })
+  // 写出去的东西必须能通过写侧校验（这就是它存在的理由：validate 不接受 legacy）。
+  assert.doesNotThrow(() => validatePolicyConfig(writablePolicy({ mode: 'legacy', groups: {}, tools: {} })))
 })

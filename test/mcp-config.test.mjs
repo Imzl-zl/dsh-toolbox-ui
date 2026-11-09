@@ -381,6 +381,40 @@ test('generates a unique loader entry id when another plugin already owns the de
   assert.match(next, /serverName: new/)
 })
 
+test('新增 MCP 并入既有的 MCP insert 块，不再往文件末尾补第二个块', () => {
+  // 用户实测：在面板里加一台服务器，cordis.patch.yml 末尾多出一个顶层 `- insert:`，
+  // 新条目落在 llm/theme 这些 id 覆盖项之后，离 MCP 段几百行。功能不受影响（loader
+  // 认多块），但每次都要人肉把两段拼回去——这条钉住“加一条就并进 MCP 块”。
+  const original = `# user comment\n- insert:\n    - id: other-plugin\n      name: other-plugin\n- insert:\n    - id: mcp-one\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        transport: stdio\n        serverName: one\n        command: node\n`
+  const next = updateManagedMcpPatch(original, [{ name: 'two', transport: 'stdio', command: 'node' }])
+  // 两个块都不是新加的：别的插件的块 + 原本就有的 MCP 块。
+  assert.equal((next.match(/^- insert:/gm) || []).length, 2)
+  // 新条目必须在装着 mcp-one 的那个块里，而不是末尾另起一块。
+  const mcpBlock = next.slice(next.indexOf(`- insert:\n    - id: mcp-one`))
+  assert.match(mcpBlock, /serverName: two/)
+  assert.equal(mcpBlock.match(/^- insert:/gm)?.length ?? 0, 1)
+  assert.equal(readManagedMcpServers(next).servers.length, 2)
+})
+
+test('新增只增加自己那几行：不重排无关的 flow 序列，不换引号风格', () => {
+  // 真实文件里 `input: [text, image]` 很多。yaml 默认的 flowCollectionPadding 会把它
+  // 重写成 `[ text, image ]`，于是“加一台服务器”的 diff 里混进 15 行无关改动——语义没变，
+  // 但用户会怀疑动错了地方。这条钉住“除新条目外一字不动”。
+  const original = `- insert:\n    - id: mcp-one\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        transport: stdio\n        serverName: one\n        command: node\n- id: llm\n  name: '@deepseek-ai/dsh-llm'\n  config:\n    models:\n      - id: m\n        input: [text, image]\n`
+  const next = updateManagedMcpPatch(original, [{ name: 'two', transport: 'stdio', command: 'node' }])
+  assert.match(next, /input: \[text, image\]/, '无关行的 flow 序列写法必须原样')
+  assert.doesNotMatch(next, /input: \[ text, image \]/, '不得引入 flowCollectionPadding')
+  assert.match(next, /name: '@deepseek-ai\/dsh-mcp-client'/, '新条目沿用单引号风格')
+})
+
+test('没有 MCP 块时才新建一个 insert（不会把条目塞进别的插件的块）', () => {
+  const original = `- insert:\n    - id: other-plugin\n      name: other-plugin\n`
+  const next = updateManagedMcpPatch(original, [{ name: 'one', transport: 'stdio', command: 'node' }])
+  assert.equal((next.match(/^- insert:/gm) || []).length, 2)
+  assert.doesNotMatch(next.slice(0, next.indexOf(`- insert:\n    - id: other-plugin`) + 10), /serverName: one/)
+  assert.equal(readManagedMcpServers(next).servers.length, 1)
+})
+
 test('removes selected managed MCP entries without touching other managed entries', () => {
   const original = `- insert:\n    - id: mcp-one\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        transport: stdio\n        serverName: one\n        command: node\n    - id: mcp-two\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        transport: stdio\n        serverName: two\n        command: node\n`
 

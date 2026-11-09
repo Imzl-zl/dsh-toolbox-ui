@@ -111,7 +111,7 @@ mcpManager/projectConnections → { connections: [{ wsPath, serverName, state, r
 
 ## Entry display preference (why you cannot turn off both)
 
-The panel has only two entries: the floating button in the bottom-right corner (`shell.overlay`) and "MCP" at the bottom of the left sidebar (`sidebar.footer.action`, declared since 0.1.5). Both can be turned off individually, but **they cannot be turned off at the same time** — if both really were off, the panel could never be opened again (you would have to hand-edit localStorage to get it back).
+The panel has only two entries: the floating button in the bottom-right corner (`shell.overlay`) and "Toolbox" at the bottom of the left sidebar (`sidebar.footer.action`, declared since 0.1.5). Both can be turned off individually, but **they cannot be turned off at the same time** — if both really were off, the panel could never be opened again (you would have to hand-edit localStorage to get it back).
 
 This is guaranteed not by UI disabling logic but by the **data model**: the preference stores a three-valued enum (`both` / `fab` / `sidebar`), not one boolean per entry. The combination "both off" does not exist in the type, so there is no need for a guard, a greyed-out button, or a "keep at least one" hint; `test/client-entry.test.mjs` asserts directly against that visibility table that "at least one entry is visible for each item", so a future new entry goes red there first instead of waiting for a user to lock themselves out.
 
@@ -348,7 +348,7 @@ Existence must be checked against a list, so the repository carries a generated 
 
 ## The skill ability pane: why it sits alongside the MCP pane instead of merging with it
 
-The panel has **two ability panes** (MCP / Skills), switched by an ability-layer enum at the top, sharing the same floating window and sidebar entry. They must be two independent host services:
+The panel has **three ability panes** (MCP / Skills / Tools), switched by an ability-layer enum at the top, sharing the same floating window and sidebar entry. The skills pane must be an independent host service (reasons below); the tools pane is served by `mcpManager`, which already owns the tool loading policy, so it does not add a service.
 
 - **`skills` cannot go into the MCP gateway's `static inject`**. Cordis's `inject` is a **dependency declaration** — when the service is missing, the fiber simply stays inactive and waits, **without raising an error**. But the host's built-in plugin `dsh-skill` can be disabled by the user, and once `skills` is added to the existing gateway's inject, those profiles would have the **MCP panel fail silently along with it**. So `SkillsManagerGateway` is a separate sub-plugin with its own `inject = ["skills"]`; when unmet, only the skill surface is affected.
 - **The two services must be mounted within the same patch entry**: `cordis.patch.yml` has only one, and `package-contract` asserts that its id and name each appear exactly once, so the sub-plugin is mounted by the existing plugin's constructor via `ctx.plugin()`.
@@ -461,26 +461,61 @@ runs `npm run contract:check`, so hand-editing a generated file or adding a meth
 fails immediately. The client is split into parts by capability, and `lib/client.js` stays a single-file
 artifact produced and verified by `scripts/build-client.mjs` (`--check`).
 
-## Tool search policy
+## Tool loading policy
 
-**One job only: decide, per tool, whether it can be searched.**
+**One source of truth: `toolLoading` with its `mode / groups / tools` layers.** Every tool's outcome
+follows a single precedence chain (implemented only in `lib/tool-loading-policy.js`):
 
-- "Tool search" lists DSH built-in and third-party tools; each is **Resident** or **Searchable**,
-  resident by default. There is no global switch and no "recommended / everything resident" mode —
-  the list itself is the switch.
-- MCP servers are not controlled twice: enable/disable and Deferred/Resident stay on the MCP list,
-  one switch per server.
-- A searchable tool stays out of the model's context; the model must find it via `tool_search`
-  and only then can call it. The search entry and PTC's `run_code` can never be hidden.
+```
+protected (tool_search / run_code)
+  → master switch DSH_MCP_TOOL_SEARCH=off
+  → mode = all-resident
+  → project per-tool → global per-tool
+  → project per-group → global per-group
+  → legacy defer (true / false)
+  → mode default (recommended defers MCP tools, otherwise resident)
+```
 
-Configuration lives in `toolLoading.tools` (tool name → `resident` / `deferred`); a project
-writes it into its own `.dsh/mcp.json`. Anything not listed is resident.
+**One writer per concept.** The chip and bulk button on the MCP list write `groups` (the server
+default, and the **only** entry point); the Tools page writes `tools` (per tool) only, and its
+group headers show the server default read-only. `mode` has no UI and is decided by the config
+file alone; when it overrides per-tool settings the page shows a banner saying those settings are
+kept but have no effect. Legacy `defer` is **read-only**: it stays an input layer so old configs
+behave the same after an upgrade, but no UI writes it any more. "Inherit" therefore always deletes
+the override key, which makes overrides reversible.
 
-Why resident by default: the host exposes no tool provenance API, so the plugin cannot tell
-built-in from third-party; hiding anything by default could hide a user's everyday tool.
-**No search entry point when there is nothing to search**: with an empty deferred set (no deferred MCP at all, or everything already discovered), `tool_search` disappears from the model-visible tools together with the catalog section. It stays registered in the host, but "searching would find nothing right now" only invites a wasted round (issue #9). This does not conflict with "the search entry point cannot be hidden by user policy": the former is "there is nothing to search", the latter is "the user cannot turn it off".
-Server-level stays tri-state: `defer: true` = deferred, `defer: false` = explicitly resident,
-absent = follow the rest — so the Deferred/Resident chip always decides.
+**The Tools page groups by purpose and server, with built-ins first.** Known host built-ins are
+grouped by purpose (files / commands and terminals / web / MCP resources / tasks and jobs /
+subagents and teams / skills and interaction / schedules / code and workspace / host and plugins)
+and come **first** — MCP server defaults are managed by the chip on the MCP page, so the Tools page
+is mainly for per-tool built-in configuration. MCP servers are grouped by `serverName` after them
+(read-only, collapsible headers) for per-tool exceptions. Unknown non-MCP names get one honest
+"Other plugins and unrecognised" group — the host exposes no provenance API, so the plugin does not
+guess. MCP tools with ambiguous ownership get their own "Unassigned" group; `tool_search` /
+`run_code` are read-only. Each group header shows the server default, the actual distribution, and
+the number of per-tool overrides; each row offers Follow the server / Host default / Follow global
+(current value) / Resident / On demand.
+
+**Scopes.** Global policy lives in the plugin's `config.toolLoading`; a project's policy lives in
+`.dsh/mcp.json` under the same shape. "Inherit" in a project deletes the project key and falls back
+to the global group, legacy `defer`, then the mode. Search parameters (`maxResults` /
+`maxDiscovered` / `maxCatalogChars`) are the other half — `toolSearch` — and sit in a
+"Search settings" section at the **top** of the Tools page, visible by default; it is core
+configuration, not a collapsed section at the end of the list.
+
+Why non-MCP tools default to resident: the host exposes no tool provenance API, so hiding anything
+by default could hide a user's everyday tool. Users opt tools in explicitly.
+
+**No search entry point when there is nothing to search**: with an empty deferred set (no deferred
+MCP at all, or everything already discovered), `tool_search` disappears from the model-visible
+tools together with the catalog section. It stays registered in the host, but "searching would find
+nothing right now" only invites a wasted round (issue #9). This does not conflict with "the search
+entry point cannot be hidden by user policy": the former is "there is nothing to search", the
+latter is "the user cannot turn it off".
+
+**Reading legacy `defer`**: `true` = deferred, `false` = explicitly resident, absent = follow other
+settings. It still decides a server's default while no `groups` entry exists; once the chip or a
+group header writes `groups`, that layer wins.
 
 ## Package structure
 

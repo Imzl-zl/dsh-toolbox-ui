@@ -132,7 +132,8 @@ async function openPanel(internals, call, props = {}) {
   internals.__render(internals.ToolLoadingModal, base)
   internals.__drainEffects()
   await flush()
-  return { base, tree: internals.__render(internals.ToolLoadingModal, base) }
+  const tree = internals.__render(internals.ToolLoadingModal, base)
+  return { base, tree }
 }
 
 test('表单关闭时不渲染任何东西（统一工具加载面板也保持惰性）', () => {
@@ -230,10 +231,16 @@ test('参数非法时先报错，工具策略和搜索参数都不能落盘', as
   const internals = loadInternals()
   const { calls, call } = fakeCall({ tools: TOOLS })
   const { base, tree } = await openPanel(internals, call)
-  const pick = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-pick')[0]
+  // 所有分组默认收起：先展开内置的“文件”分类才有行内三态。
+  const groupToggle = collectAll(tree, (node) => node?.props?.className === 'dsh-mcp-tool-group-toggle')
+    .find((node) => allText(node).includes('文件'))
+  assert.ok(groupToggle, '文件分类必须存在')
+  groupToggle.props.onClick()
+  const expanded = internals.__render(internals.ToolLoadingModal, base)
+  const pick = collectAll(expanded, (node) => node.props?.className === 'dsh-mcp-tool-pick')[0]
   assert.ok(pick)
   pick.children[1].props.onClick()
-  numericInputs(tree)[0].props.onChange({ target: { value: '1.5' } })
+  numericInputs(expanded)[0].props.onChange({ target: { value: '1.5' } })
   const changed = internals.__render(internals.ToolLoadingModal, base)
   await primaryButton(changed, internals).props.onClick()
   await flush()
@@ -293,4 +300,13 @@ test('关闭目录限制会移除 maxCatalogChars，而不是写入 0；输入�
   const update = calls.find((entry) => entry.method === 'updateToolSearchSettings')
   assert.ok(update)
   assert.equal('maxCatalogChars' in JSON.parse(JSON.stringify(update.payload)).settings, false)
+})
+
+test('搜索参数固定在顶部默认可见，不折叠', async () => {
+  const internals = loadInternals()
+  const { call } = fakeCall()
+  const { tree } = await openPanel(internals, call)
+  assert.equal(numericInputs(tree).length, 3, '三个数字控件默认都在')
+  assert.ok(allText(tree).includes('搜索设置'), '顶部有明确的标题')
+  assert.ok(allText(tree).includes('这些参数管的是 tool_search 本身'), '说明这些参数管什么')
 })

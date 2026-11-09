@@ -249,33 +249,34 @@ test('real loader host: 单台延迟开关只改那一台，并同步内存活�
   const host = await createLoaderHost(patchBody)
   try {
     await waitFor(() => host.toolNames().includes('mcp__beta__echo'))
-    const deferOf = async (name) => (await host.manager.list()).servers.find((row) => row.serverName === name)?.defer
-    assert.equal(await deferOf('beta'), true, '前置：beta 已在延迟')
-    assert.notEqual(await deferOf('alpha'), true, '前置：alpha 未延迟（没写 defer 时是 undefined，语义上等同不延迟）')
+    const deferOf = async (name) => (await host.manager.list()).servers.find((row) => row.serverName === name)?.deferConfigured
+    assert.equal(await deferOf('beta'), 'deferred', '前置：beta 的 legacy defer:true 让它默认延迟')
+    assert.equal(await deferOf('alpha'), 'resident', '前置：alpha 没写 defer，默认常驻')
 
     const result = await host.manager.setDefer({ name: 'alpha', defer: true })
     assert.equal(result.changed, 1, '只该改一台')
     assert.match(result.note, /alpha/)
 
-    // ① 盘上：alpha 变 true，beta 原样。用**生产解析器**读回来（正则会被长路径撑破，
-    //    而且断言的是"面板读到的配置"，不是 YAML 文本长什么样）。
+    // ① 盘上：alpha 的组级值落盘，beta 的旧 defer 一个字节不动（它只是读侧输入）。
+    //    用**生产解析器**读回来，断言的是“面板读到的配置”，不是 YAML 文本长什么样。
     const written = await readFile(host.patch, 'utf8')
     const parsedRows = readManagedMcpServers(written).servers
-    assert.equal(parsedRows.find((row) => row.name === 'alpha').defer, true, 'alpha 的 defer 必须落盘')
-    assert.equal(parsedRows.find((row) => row.name === 'beta').defer, true, 'beta 本来就在延迟，不该被这次操作带成别的值')
-    assert.equal(await deferOf('alpha'), true)
-    assert.equal(await deferOf('beta'), true, 'beta 本来就在延迟，不该被这次操作带成别的值')
+    assert.equal(parsedRows.find((row) => row.name === 'alpha').defer, undefined, '旧 defer 不该再被服务器级开关写入')
+    assert.equal(parsedRows.find((row) => row.name === 'beta').defer, true, 'beta 的旧 defer 必须原样保留')
+    assert.match(written, /groups:\n\s+alpha: deferred/)
+    assert.equal(await deferOf('alpha'), 'deferred')
+    assert.equal(await deferOf('beta'), 'deferred', 'beta 本来就在延迟，不该被这次操作带成别的值')
 
-    // ② 内存活条目同步：deferServersOf 读的正是它，只写盘不改内存 = 运行中的会话读旧值。
-    const alphaEntry = host.entries().find((entry) => entry.options.config?.serverName === 'alpha')
-    assert.equal(alphaEntry.options.config.defer, true)
+    // ② 内存活策略同步：loadingPolicy 读的是 globalToolLoading，不是 entry.options.config.defer。
+    //    只写盘不改内存 = 运行中的会话读旧值（这条不变量在 1.8 曾以旧字段验证过）。
+    assert.equal(host.manager.globalToolLoading.groups.alpha, 'deferred')
 
     // ③ 名字不存在：明确报错，不静默 no-op。
     await assert.rejects(host.manager.setDefer({ name: 'ghost', defer: true }), /没有这个 MCP/)
     // 反向再切回来，别把 beta 一起带走。
     await host.manager.setDefer({ name: 'alpha', defer: false })
-    assert.notEqual(await deferOf('alpha'), true)
-    assert.equal(await deferOf('beta'), true)
+    assert.equal(await deferOf('alpha'), 'resident')
+    assert.equal(await deferOf('beta'), 'deferred')
   } finally {
     await host.cleanup()
     await rm(root, { recursive: true, force: true })
@@ -598,10 +599,9 @@ test('real loader host: 只翻延迟遮罩时，不得把「盘上已改、尚�
   }
 })
 
-test('real loader host: 策略压过服务器开关时，setDefer 必须如实报告而不是假装切了', { timeout: TEST_TIMEOUT_MS }, async () => {
-  // 芯片读的是"统一策略下的实际状态"（deferEffective）。当工具页把整台服务器设成按需时，
-  // 服务器级 defer 开关（legacyResident）优先级更低，翻它不会有任何变化。
-  // 旧行为：回一句"已切回全量常驻"，用户看着毫无变化的列表不知发生了什么。
+test('real loader host: 组级开关遇到逐工具覆盖时如实报出例外，不假装整台都变了', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 芯片只管“整台默认”（组级）。逐工具覆盖在它之上，所以整台切了之后仍可能有工具不跟随：
+  // 这不是失败，但必须当场说清楚（诊断码 + note），否则用户会以为按钮没生效。
   const root = await mkdtemp(join(tmpdir(), 'dsh-governed-'))
   const server = join(root, 'fixture-server.mjs')
   const sentinel = join(root, 'fixture-exited')
@@ -611,22 +611,93 @@ test('real loader host: 策略压过服务器开关时，setDefer 必须如实�
   )
   try {
     assert.ok(await waitFor(() => host.toolNames().includes('mcp__fixture__echo')), '前置条件：fixture 必须真的连上')
-    // 工具页把整台服务器设成按需 —— 这是比服务器开关更高优先级的策略层。
-    await host.manager.updateToolLoadingSettings({ policy: { groups: { fixture: 'deferred' } } })
+    // 工具页给这台留下一个逐工具例外（整台常驻，但这个工具按需）。
+    await host.manager.updateToolLoadingSettings({ policy: { groups: { fixture: 'resident' }, tools: { 'mcp__fixture__echo': 'deferred' } } })
 
-    const result = await host.manager.setDefer({ name: 'fixture', defer: false })
-    assert.equal(result.persisted, 'applied', '开关本身照样写盘')
+    const result = await host.manager.setDefer({ name: 'fixture', defer: true })
+    assert.equal(result.persisted, 'applied', '组级开关本身照样写盘')
     assert.ok(
-      (result.diagnostics ?? []).some((entry) => entry.code === 'DEFER_GOVERNED_BY_POLICY'),
-      '必须报出"被工具页策略压着"这条诊断，而不是只说已切换',
+      (result.diagnostics ?? []).some((entry) => entry.code === 'DEFER_HAS_TOOL_OVERRIDES'),
+      '必须报出“仍有工具被单独设置”，而不是只说已切换',
     )
-    assert.match(result.note ?? '', /工具.*页的策略决定/, 'note 必须说清为什么没生效')
+    assert.match(result.note ?? '', /单独设置/, 'note 必须说清例外还在')
+
+    const row = (await host.manager.list()).servers.find((item) => item.serverName === 'fixture')
+    assert.equal(row.deferConfigured, 'deferred', '组级默认已改成延迟')
+    assert.equal(row.deferOverrides, 1, '逐工具例外的条数必须如实下发')
   } finally {
     await host.cleanup()
     await rm(root, { recursive: true, force: true })
   }
 })
 
+test('real loader host: 整体方案为全部常驻时 setDefer 明确拒绝，不静默写一条不生效的配置', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-locked-'))
+  const server = join(root, 'fixture-server.mjs')
+  const sentinel = join(root, 'fixture-exited')
+  await writeFile(server, FIXTURE_SERVER)
+  const host = await createLoaderHost(
+    `- insert:\n    - id: mcp-fixture\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: fixture\n        command: ${process.execPath}\n        args: [ '${server}', '${sentinel}' ]\n`,
+  )
+  try {
+    assert.ok(await waitFor(() => host.toolNames().includes('mcp__fixture__echo')), '前置条件：fixture 必须真的连上')
+    await host.manager.updateToolLoadingSettings({ policy: { mode: 'all-resident' } })
+    const before = await readFile(host.patch, 'utf8')
+    await assert.rejects(
+      host.manager.setDefer({ name: 'fixture', defer: true }),
+      /全部常驻/,
+      '锁定态必须拒绝并说明原因',
+    )
+    assert.equal(await readFile(host.patch, 'utf8'), before, '拒绝时一个字节都不该改')
+  } finally {
+    await host.cleanup()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+
+test('real loader host: setDefer 写组级策略（toolLoading.groups），不再写旧 defer，且立即生效', { timeout: TEST_TIMEOUT_MS }, async () => {
+  // 语义收敛的端到端：芯片只改“整台默认”（组级），旧 defer 只作为读侧输入。
+  // 判据两头都要：盘上是 groups、没有新的 defer；运行中的行立刻读出新值。
+  const root = await mkdtemp(join(tmpdir(), 'dsh-group-defer-'))
+  const server = join(root, 'fixture-server.mjs')
+  await writeFile(server, FIXTURE_SERVER)
+  const host = await createLoaderHost(
+    `- insert:\n    - id: mcp-fixture\n      name: '${MCP_NAME}'\n      config:\n        transport: stdio\n        serverName: fixture\n        command: ${process.execPath}\n        args: [ '${server}', '${join(root, 'fixture-exited')}' ]\n`,
+  )
+  try {
+    assert.ok(await waitFor(() => host.toolNames().includes('mcp__fixture__echo')), '前置条件：fixture 必须真的连上')
+    const before = (await host.manager.list()).servers.find((row) => row.serverName === 'fixture')
+    assert.equal(before.deferConfigured, 'resident', '默认（legacy + 没有 defer）是常驻')
+
+    const outcome = await host.manager.setDefer({ name: 'fixture', defer: true })
+    assert.equal(outcome.persisted, 'applied')
+    assert.equal(outcome.live, 'applied')
+
+    const patchText = await readFile(host.patch, 'utf8')
+    assert.match(patchText, /toolLoading:/)
+    assert.match(patchText, /groups:/)
+    assert.match(patchText, /fixture: deferred/)
+    assert.doesNotMatch(patchText, /defer:/, '旧 defer 不应再由服务器级开关产生')
+
+    // 同一次写入之后，运行中的视图必须已经变了（策略是活值，不重连、不重启）。
+    const after = await waitFor(async () => {
+      const row = (await host.manager.list()).servers.find((item) => item.serverName === 'fixture')
+      return row?.deferEffective === 'deferred' ? row : null
+    })
+    assert.ok(after, '组级延迟必须在运行中立即生效')
+    assert.equal(after.deferConfigured, 'deferred')
+
+    // 关回去：写 resident，不删旧字段，也不把 groups 搞成一半。
+    await host.manager.setDefer({ name: 'fixture', defer: false })
+    const back = (await host.manager.list()).servers.find((row) => row.serverName === 'fixture')
+    assert.equal(back.deferConfigured, 'resident')
+    assert.equal(back.deferEffective, 'resident')
+  } finally {
+    await host.cleanup()
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('real loader host: home patch 覆盖了同一 id 的 config 时，add 必须回滚并说清被覆盖', { timeout: TEST_TIMEOUT_MS }, async () => {
   // 这条是"整份 config 深比较"的端到端验收，也是 1.10 审查里指出的缺口：

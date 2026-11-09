@@ -56,7 +56,7 @@ const CORDIS_LOADER_DEV_BASELINE = process.env.DSH_HOST_MATRIX_LOADER || '~1.0.6
 
 test('package exposes one Web bundle entry', () => {
   assert.equal(packageJson.dsh?.bundle?.patch, './cordis.patch.yml')
-  assert.equal(packageJson.version, '1.10.1')
+  assert.equal(packageJson.version, '1.11.0')
   assert.equal(packageJson.dsh?.client?.platform, 'web')
   // dsh.client.inject 是客户端图里的「工厂先到」依赖边，只能写真实的 client 包名：
   //   @deepseek-ai/dsh-client-runtime  —— 上游 2026-08-22 已删除（be531688 "remove Runtime"）
@@ -65,7 +65,7 @@ test('package exposes one Web bundle entry', () => {
   assert.deepEqual(packageJson.dsh?.client?.inject, ['@deepseek-ai/dsh-api-remotes'])
   // docs 的 markdown 随包发布（使用者能从包里读到设计与安装说明），
   // 但 **截图不随包**：README 里的相对路径会被 npm 改写到 raw.githubusercontent 渲染
-  // （实测 5/5 张图正常），带进 tarball 只是白付 956KB。
+  // （实测 7/7 张图正常），带进 tarball 只是白付 956KB。
   assert.equal(packageJson.files?.includes('docs/*.md'), true)
   assert.equal(packageJson.files?.includes('README.en.md'), true)
   assert.equal(

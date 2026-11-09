@@ -1,9 +1,9 @@
 // 工具页（第三个能力面）的面板侧行为。
 //
-// 四条要钉的约束，全部来自真实使用反馈：
-//   ① 只有两态：常驻 / 按需。没有「继承」——工具页只管全局，没有上一层可跟随。
-//   ② 不出现 MCP：服务器的启停与延迟在 MCP 页面，这里再列一遍就是同一件事两个入口。
-//   ③ 没有作用域切换：内置与其他插件工具在每个项目里都是同一批宿主工具。
+// 四条要钉的约束：
+//   ① 逐工具三态：跟随来源（服务器/宿主默认/全局）/ 常驻 / 按需；“跟随”= 删覆盖键，可逆。
+//   ② 内置工具按用途分组排前，MCP 按服务器分组排后；整台默认只读，写入口在 MCP 页芯片。
+//   ③ 全局与项目作用域分别读写：项目只写自己的 toolLoading，搜索参数是全局配置。
 //   ④ 受保护的工具（搜索入口）不进列表；工具名用宿主原名，中文短名只做标记。
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
@@ -14,7 +14,7 @@ const clientSource = await readFile(new URL('../lib/client.js', import.meta.url)
 const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
-  `${exportMarker}\nexports.__settingsPanel = { HintMarker, Toggle, Btn, ToolLoadingModal };`,
+  `${exportMarker}\nexports.__settingsPanel = { HintMarker, Toggle, Btn, ToolLoadingModal, BUILTIN_LABELS, BUILTIN_CATEGORY };`,
 )
 assert.notEqual(instrumentedClient, clientSource, 'client test export marker must stay current')
 
@@ -110,6 +110,16 @@ async function openModal(internals, call, props = {}) {
   return internals.__render(internals.ToolLoadingModal, base)
 }
 
+/** 展开一个分组（默认全部收起）：按组头文本找，点一下再重渲染。 */
+function expandGroup(internals, props, label) {
+  const tree = internals.__render(internals.ToolLoadingModal, props)
+  const toggle = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-group-toggle')
+    .find((node) => allText(node).includes(label))
+  assert.ok(toggle, `找不到分组：${label}`)
+  toggle.props.onClick()
+  return internals.__render(internals.ToolLoadingModal, props)
+}
+
 const TOOLS = [
   { name: 'working_directory', owner: null, kind: 'builtin', description: 'Read the current working directory', protected: false, policy: 'resident', reason: 'default-resident' },
   { name: 'tool_search', owner: null, kind: 'builtin', description: 'Search deferred MCP tools', protected: true, policy: 'resident', reason: 'protected' },
@@ -120,6 +130,7 @@ const TOOLS = [
 const SETTINGS = {
   ok: true,
   policy: { groups: {}, tools: {} },
+  groups: [{ owner: 'alpha', configured: 'inherit', inherited: 'deferred' }],
   tools: TOOLS,
   configKey: 'toolLoading',
 }
@@ -130,21 +141,29 @@ test('工具加载面板：关闭时不渲染任何东西', () => {
   assert.equal(internals.__render(internals.ToolLoadingModal, { open: false, onClose: () => {}, call: async () => SETTINGS }), null)
 })
 
-test('工具加载面板：只有常驻/按需两态，没有继承、模式或全局开关', async () => {
+test('工具加载面板：逐工具三态（跟随来源/常驻/按需），组头只读显示整台默认', async () => {
   const internals = loadInternals()
-  const tree = await openModal(internals, async (method) => (method === 'toolSearchSettings' ? { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } } : SETTINGS), { inline: true })
-  const text = allText(tree)
-  assert.equal(text.includes('继承'), false, '工具页只管全局，没有上一层可继承')
-  assert.equal(text.includes('跟随全局'), false, '不存在项目层，也就没有“跟随全局”')
-  assert.equal(collectAll(tree, (node) => node.type === 'input' && node.props?.type === 'radio').length, 0, '没有模式单选')
-  // 选择控件是行内的常驻/按需分段按钮，不是下拉：每行一对，选项文案各出现一次。
+  const call = async (method) => (method === 'toolSearchSettings' ? { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } } : SETTINGS)
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  const headers = allText(tree)
+  assert.ok(headers.includes('MCP 服务器'), 'MCP 必须是一个独立的顶层分区，不能和内置混在一起')
+  assert.ok(headers.includes('内置工具（按用途）'), '内置工具必须单独一个分区，并按用途再分组')
+  assert.ok(headers.includes('文件'), '内置分区里必须有用途分类（文件/命令/网络…）')
   assert.equal(collectAll(tree, (node) => node.type === 'select').length, 0, '工具页不再有下拉')
-  const picks = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-pick')
-  assert.ok(picks.length >= 1, '行内分段按钮存在')
-  assert.deepEqual(picks[0].children.map((button) => button.children?.[0]), ['常驻', '按需'])
-  assert.ok(picks[0].children.every((button) => typeof button.props?.['aria-pressed'] === 'boolean'),
-    '两个选项都以 aria-pressed 表达选中态')
-  assert.equal(collectAll(tree, (node) => node.type === internals.Toggle).length, 1, '唯一的开关是参数区的「限制目录大小」')
+  // 默认全部收起；展开“文件”后才看得到行内三态。
+  tree = expandGroup(internals, props, '文件')
+  const picks = collectAll(tree, (node) => typeof node.props?.className === 'string' && node.props.className.includes('dsh-mcp-tool-pick'))
+  assert.ok(picks.length >= 1, '展开分类后必须有行内三态')
+  const rowPick = picks.find((node) => String(node.props['aria-label'] || '').includes(' · 加载方式'))
+  assert.ok(rowPick, '行内三态的分段控件存在')
+  assert.deepEqual(rowPick.children.map((button) => button.children?.[0]), ['宿主默认（常驻）', '常驻', '按需'])
+  assert.ok(rowPick.children.every((button) => typeof button.props?.['aria-pressed'] === 'boolean'),
+    '三个选项都以 aria-pressed 表达选中态')
+  // 整台默认只在组头上**只读**显示，写入口是 MCP 列表的芯片——这里没有第二个三态控件。
+  assert.ok(allText(tree).includes('整台：按需（未单独设置）'), '组头要显示整台默认及其来源（未单独设置）')
+  assert.equal(picks.filter((node) => String(node.props['aria-label'] || '').includes('整台默认')).length, 0,
+    '工具页不得再出现整台默认的写入口')
 })
 
 // 规格变更（真机发现）：这张表原来按 `kind === 'mcp'` 把 MCP 行整类排除，理由是"MCP 的开关在
@@ -154,15 +173,21 @@ test('工具加载面板：只有常驻/按需两态，没有继承、模式或�
 // 新不变量：**这张表是每个工具实际加载策略的唯一展示面**（受保护项除外），计数从同一份 rows 派生。
 test('工具加载面板：列出全部可设置工具（含 MCP），计数与行同源', async () => {
   const internals = loadInternals()
-  const tree = await openModal(internals, async () => SETTINGS, { inline: true })
+  const call = async (method) => (method === 'toolSearchSettings' ? { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } } : SETTINGS)
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  // 默认全部收起；展开内置的“文件”和 MCP 的 alpha 后才看得到行。
+  tree = expandGroup(internals, props, '文件')
+  tree = expandGroup(internals, props, 'alpha')
   const text = allText(tree)
   assert.ok(text.includes('working_directory'), '工具名按宿主原名显示')
   assert.ok(text.includes('切换工作目录'), '中文短名作为说明标记一并显示')
   assert.ok(text.includes('mcp__alpha__a'), 'MCP 工具必须出现在这张表里，否则它的真实策略没有展示面')
   assert.ok(text.includes('mcp__alpha__b'), '常驻的 MCP 工具同样要出现')
   assert.ok(text.includes('受保护'), '受保护的工具应有一句说明')
-  // 可编辑行 = 带常驻/按需分段的行：working_directory + 两个 MCP 工具。
-  const picks = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-pick')
+  // 可编辑行 = 带三态分段的行：working_directory + 两个 MCP 工具。组头也有分段控件，不计入。
+  const picks = collectAll(tree, (node) => typeof node.props?.className === 'string' && node.props.className.includes('dsh-mcp-tool-pick'))
+    .filter((node) => String(node.props['aria-label'] || '').includes(' · 加载方式'))
   assert.equal(picks.length, 3, '可设置项 = 全部非受保护工具（内置 + MCP）')
   assert.equal(String(picks[0].props['aria-label'] ?? '').includes('tool_search'), false,
     '受保护的工具不能被编辑')
@@ -185,7 +210,10 @@ test('工具加载面板：保存只改全局逐工具选择，不接管 MCP 的
   internals.__drainEffects()
   await new Promise((resolve) => setTimeout(resolve, 0))
   let tree = internals.__render(internals.ToolLoadingModal, base)
-  const pick = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-pick')[0]
+  // 默认全部收起：先展开内置的“文件”分类才有行内三态。
+  tree = expandGroup(internals, base, '文件')
+  const pick = collectAll(tree, (node) => typeof node.props?.className === 'string' && node.props.className.includes('dsh-mcp-tool-pick'))
+    .find((node) => String(node.props['aria-label'] || '').includes(' · 加载方式'))
   const deferredButton = collectAll(pick, (node) => node.type === 'button' && node.children?.[0] === '按需')[0]
   deferredButton.props.onClick()
   tree = internals.__render(internals.ToolLoadingModal, base)
@@ -198,31 +226,45 @@ test('工具加载面板：保存只改全局逐工具选择，不接管 MCP 的
   assert.equal(sent.some(([method]) => method.startsWith('setWorkspace')), false)
 })
 
-test('工具加载面板：只有工具列表进入滚动区，参数与概览固定在上方', async () => {
+test('工具加载面板：搜索参数固定在顶部可见，只有列表滚动', async () => {
   const internals = loadInternals()
-  const tree = await openModal(internals, async (method) => (method === 'toolSearchSettings' ? { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } } : SETTINGS), { inline: true })
+  const call = async (method) => (method === 'toolSearchSettings' ? { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } } : SETTINGS)
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  const tree = await openModal(internals, call, props)
   const fixed = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-fixed')[0]
   const scroll = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-scroll')[0]
   assert.ok(fixed && scroll, '固定区与滚动区必须同时存在')
-  assert.equal(collectAll(scroll, (node) => node.props?.className === 'dsh-mcp-tool-list').length, 1,
-    '工具列表必须真的落在滚动区里，不能留在固定区把滚动容器挤成零高')
-  assert.equal(collectAll(fixed, (node) => node.props?.className === 'dsh-mcp-tool-list').length, 0,
+  assert.equal(collectAll(scroll, (node) => node.props?.className === 'dsh-mcp-tool-groups').length, 1,
+    '工具分组必须真的落在滚动区里，不能留在固定区把滚动容器挤成零高')
+  assert.equal(collectAll(fixed, (node) => node.props?.className === 'dsh-mcp-tool-groups').length, 0,
     '固定区不得再包含工具列表')
-  assert.ok(collectAll(fixed, (node) => node.props?.className === 'dsh-mcp-tool-params').length === 1,
-    '搜索参数固定在顶部')
-  assert.ok(collectAll(fixed, (node) => node.props?.className === 'dsh-mcp-tool-overview').length === 1,
-    '数量统计固定在顶部')
+  // 搜索参数是 ToolSearch 的核心配置，用户明确要求放在最上面、默认可见。
+  assert.equal(collectAll(fixed, (node) => node.props?.className === 'dsh-mcp-tool-params').length, 1,
+    '搜索参数必须固定在顶部可见')
+  assert.equal(collectAll(scroll, (node) => node.props?.className === 'dsh-mcp-tool-params').length, 0,
+    '搜索参数不得藏进滚动区')
   const sections = collectAll(fixed, (node) => ['dsh-mcp-tool-params', 'dsh-mcp-tool-overview', 'dsh-mcp-tool-toolbar'].includes(node.props?.className))
   assert.deepEqual(sections.map((node) => node.props.className), ['dsh-mcp-tool-params', 'dsh-mcp-tool-overview', 'dsh-mcp-tool-toolbar'],
-    '顺序来自用户要求：搜索参数在统计上方，筛选在统计下方')
+    '固定区顺序：搜索设置 → 概览 → 筛选')
 })
 
 test('工具加载面板：宿主报错留在表单里', async () => {
   const internals = loadInternals()
-  const call = async (method) => (method === 'toolLoadingSettings' ? SETTINGS : { ok: false, error: 'mode 只能是 recommended / all-resident' })
-  const tree = await openModal(internals, call, { inline: true })
+  const call = async (method) => {
+    if (method === 'toolLoadingSettings') return SETTINGS
+    if (method === 'toolSearchSettings') return { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } }
+    return { ok: false, error: 'mode 只能是 recommended / all-resident' }
+  }
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  // 先制造一个改动，否则保存按钮是禁用的；默认收起，先展开“文件”分类。
+  tree = expandGroup(internals, props, '文件')
+  const rowPick = collectAll(tree, (node) => typeof node.props?.className === 'string' && node.props.className.includes('dsh-mcp-tool-pick'))
+    .find((node) => String(node.props['aria-label'] || '').includes(' · 加载方式'))
+  collectAll(rowPick, (node) => node.type === 'button' && node.children?.[0] === '常驻')[0].props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
   await collectAll(tree, (node) => node.props?.cls === 'primary')[0].props.onClick()
-  const after = internals.__render(internals.ToolLoadingModal, { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} })
+  const after = internals.__render(internals.ToolLoadingModal, props)
   assert.ok(allText(after).includes('mode 只能是 recommended / all-resident'))
 })
 
@@ -235,14 +277,15 @@ test('工具加载面板：全局页的搜索参数可编辑且与策略统一�
     if (method === 'toolSearchSettings') return { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } }
     return { ok: true, settings: { maxResults: 12 }, policy: SETTINGS.policy }
   }
-  const tree = await openModal(internals, call, { inline: true })
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  // 搜索参数固定在顶部、默认可见（不再折叠）。
   const numberInputs = collectAll(tree, (node) => node.type === 'input' && node.props?.type === 'number')
   assert.ok(numberInputs.length >= 3, '目录上限输入框即使开关关着也必须渲染（置灰保留，不卸载）')
   assert.equal(numberInputs.slice(0, 2).every((input) => input.props.disabled === false), true, '全局页参数可编辑')
   assert.equal(numberInputs[2].props.disabled, true, '目录上限开关默认关闭时该框置灰')
   numberInputs[0].props.onChange({ target: { value: '12' } })
-  const after = internals.__render(internals.ToolLoadingModal, { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} })
-  // 统一保存按钮：只写发生改动的配置，参数与策略仍使用各自的 RPC。
+  const after = internals.__render(internals.ToolLoadingModal, props)
   const saveBtn = collectAll(after, (node) => node.type === internals.Btn && node.props.cls === 'primary')[0]
   assert.ok(saveBtn, '保存按钮存在')
   assert.equal(saveBtn.props.disabled, false, '参数有改动时保存按钮可用')
@@ -279,11 +322,120 @@ test('工具加载面板：参数无效时先报错，工具策略也不能先�
   }
   const props = { open: true, inline: true, call, onClose() {}, onSaved() {} }
   let tree = await openModal(internals, call, props)
-  collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-pick')[0].children[1].props.onClick()
+  tree = expandGroup(internals, props, '文件')
+  const rowPick = collectAll(tree, (node) => typeof node.props?.className === 'string' && node.props.className.includes('dsh-mcp-tool-pick'))
+    .find((node) => String(node.props['aria-label'] || '').includes(' · 加载方式'))
+  collectAll(rowPick, (node) => node.type === 'button' && node.children?.[0] === '常驻')[0].props.onClick()
   collectAll(tree, (node) => node.type === 'input' && node.props.type === 'number')[0].props.onChange({ target: { value: '1.5' } })
   tree = internals.__render(internals.ToolLoadingModal, props)
   await collectAll(tree, (node) => node.type === internals.Btn && node.props.cls === 'primary')[0].props.onClick()
   assert.equal(writes.length, 0, '所有本地输入先通过校验，再写任一配置')
   tree = internals.__render(internals.ToolLoadingModal, props)
   assert.match(allText(tree), /正整数/)
+})
+
+test('工具加载面板：组头只读显示整台默认，写入口只有 MCP 芯片', async () => {
+  const internals = loadInternals()
+  const call = async (method) => (method === 'toolSearchSettings' ? { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } } : SETTINGS)
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  const tree = await openModal(internals, call, props)
+  assert.match(allText(tree), /整台默认在 MCP 页的芯片上改/, '页面要直接说清两个写入口的分工')
+  assert.match(allText(tree), /整台：按需（未单独设置）/, '组头要显示整台默认及它从哪来')
+  const groupPicks = collectAll(tree, (node) => String(node.props?.['aria-label'] || '').includes('整台默认'))
+  assert.equal(groupPicks.length, 0, '工具页不提供整台默认的第二个写入口')
+})
+
+test('工具加载面板：逐工具「跟随」删掉覆盖键，而不是写一个和当前值相同的值', async () => {
+  const internals = loadInternals()
+  const sent = []
+  const withOverride = {
+    ...SETTINGS,
+    policy: { groups: {}, tools: { 'mcp__alpha__a': 'deferred' } },
+  }
+  const call = async (method, payload) => {
+    if (method === 'toolLoadingSettings') return withOverride
+    if (method === 'toolSearchSettings') return { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } }
+    sent.push([method, payload])
+    return { ok: true, policy: withOverride.policy }
+  }
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  const groupToggle = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-group-toggle')
+    .find((node) => allText(node).includes('alpha'))
+  groupToggle.props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  const row = collectAll(tree, (node) => node.props?.className?.includes?.('dsh-mcp-tool-row') && allText(node).includes('mcp__alpha__a'))[0]
+  assert.ok(row, '被覆盖的行必须渲染出来')
+  const follow = collectAll(row, (node) => node.type === 'button' && String(node.children?.[0] || '').startsWith('跟随'))[0]
+  follow.props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  await collectAll(tree, (node) => node.type === internals.Btn && node.props.cls === 'primary')[0].props.onClick()
+  assert.deepEqual(JSON.parse(JSON.stringify(sent[0][1].policy.tools)), {}, '「跟随」必须删键，三态才真的可逆')
+})
+
+test('工具加载面板：项目作用域读 workspaceToolLoading、保存走 setWorkspaceToolLoading', async () => {
+  const internals = loadInternals()
+  const calls = []
+  const call = async (method, payload) => {
+    calls.push([method, payload])
+    if (method === 'workspaceToolLoading') return SETTINGS
+    if (method === 'setWorkspaceToolLoading') return { ok: true, policy: SETTINGS.policy }
+    if (method === 'toolSearchSettings') throw new Error('项目作用域不应读取全局搜索参数')
+    return { ok: true }
+  }
+  const props = {
+    open: true, inline: true, scope: '/ws/a', onScope: () => {}, call, onClose: () => {}, onSaved: () => {},
+    scopes: [{ key: 'global', label: '全局' }, { key: '/ws/a', label: 'proj-a' }],
+  }
+  let tree = await openModal(internals, call, props)
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0])), ['workspaceToolLoading', { wsPath: '/ws/a' }], '读的是这个项目的策略')
+  assert.equal(calls.some(([method]) => method === 'toolSearchSettings'), false, '搜索参数是全局设置，项目页不请求')
+  assert.equal(collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-params').length, 0, '项目页不显示全局搜索设置')
+  assert.match(allText(tree), /搜索设置是全局配置/, '项目页要说明搜索设置去哪里改')
+  // 组头只读；项目的逐工具覆盖在行里改。
+  assert.match(allText(tree), /整台：按需/, '项目组头显示这个项目的整台默认')
+  tree = expandGroup(internals, props, '文件')
+  const rowPick = collectAll(tree, (node) => typeof node.props?.className === 'string' && node.props.className.includes('dsh-mcp-tool-pick'))
+    .find((node) => String(node.props['aria-label'] || '').includes(' · 加载方式'))
+  collectAll(rowPick, (node) => node.type === 'button' && node.children?.[0] === '按需')[0].props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  await collectAll(tree, (node) => node.type === internals.Btn && node.props.cls === 'primary')[0].props.onClick()
+  const write = calls.find(([method]) => method === 'setWorkspaceToolLoading')
+  assert.ok(write, '保存必须走项目接口')
+  assert.equal(write[1].wsPath, '/ws/a')
+  assert.deepEqual(JSON.parse(JSON.stringify(write[1].policy.tools)), { working_directory: 'deferred' })
+  assert.deepEqual(JSON.parse(JSON.stringify(write[1].policy.groups)), {}, '项目页不改整台默认（那在 MCP 页）')
+})
+
+test('工具加载面板：手写 mode=all-resident / 总开关时给横幅，但不提供 mode 控件', async () => {
+  const internals = loadInternals()
+  const resident = {
+    ...SETTINGS,
+    tools: SETTINGS.tools.map((row) => (row.protected ? row : { ...row, policy: 'resident', reason: 'mode-resident' })),
+  }
+  const call = async (method) => (method === 'toolSearchSettings' ? { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } } : resident)
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  const tree = await openModal(internals, call, props)
+  assert.match(allText(tree), /整体方案为「全部常驻」/, '被手写方案压住时必须说明本页为何不生效')
+  // mode 不是页面上的第三组设置：写入口只有配置文件；页面不提供“推荐/全部常驻”按钮。
+  assert.equal(collectAll(tree, (node) => node?.type === 'button' && node.children?.[0] === '推荐（MCP 按需）').length, 0)
+  assert.equal(collectAll(tree, (node) => node?.type === 'button' && node.children?.[0] === '全部常驻').length, 0)
+})
+
+test('内置分类表：每个已知内置都有且只有一个分类，MCP 工具名不在内置名单里', () => {
+  const internals = loadInternals()
+  const known = Object.keys(internals.BUILTIN_LABELS)
+  const missing = known.filter((name) => !internals.BUILTIN_CATEGORY[name])
+  assert.deepEqual(missing, [], '已知内置工具必须全部归类，否则会漏进“其他内置”')
+  assert.equal(Object.values(internals.BUILTIN_CATEGORY).length, known.length, '一个名字只能属于一个分类')
+  // 这些名字来自 MCP 服务器（chrome-devtools）或宿主源码里根本不存在；把它们当内置会
+  // 给同名第三方工具贴错身份——分类宁可不到，也不能错。
+  for (const name of ['navigate_page', 'take_screenshot', 'click', 'task', 'schedule_update', 'schedule_delete', 'tool_search']) {
+    assert.equal(Object.hasOwn(internals.BUILTIN_LABELS, name), false, `${name} 不是宿主内置工具，不能进内置名单`)
+  }
+  // 抽查验证过的归属：读文件归“文件”，子代理归“子代理与团队”，lsp 归“代码与工作区”。
+  assert.equal(internals.BUILTIN_CATEGORY.read, 'files')
+  assert.equal(internals.BUILTIN_CATEGORY.subagent, 'agents')
+  assert.equal(internals.BUILTIN_CATEGORY.lsp, 'code')
+  assert.equal(internals.BUILTIN_CATEGORY.schedule_view, 'schedule')
 })

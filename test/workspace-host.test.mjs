@@ -278,8 +278,10 @@ test('setDeferAll 在项目作用域改 .dsh/mcp.json，不动 profile patch', a
     const on = await McpManagerGateway.prototype.setDeferAll.call(gateway, { wsPath: fixture.wsRoot, defer: true })
     assert.equal(on.changed, 2)
     const parsed = JSON.parse(await readFile(configPath(fixture.wsRoot), 'utf8'))
-    assert.equal(parsed.mcpServers.db.defer, true)
-    assert.equal(parsed.mcpServers.web.defer, true)
+    // 新语义：项目级的组级默认写在同一个文件的 toolLoading.groups，不再改每台的 defer。
+    assert.equal(parsed.toolLoading.groups.db, 'deferred')
+    assert.equal(parsed.toolLoading.groups.web, 'deferred')
+    assert.equal(parsed.mcpServers.db.defer, undefined, '旧 defer 不应再由服务器级开关产生')
     // 原有字段与 exclude 都不能丢。
     assert.equal(parsed.mcpServers.db.command, 'psql')
     assert.equal(parsed.mcpServers.web.url, 'https://x.test/mcp')
@@ -288,8 +290,8 @@ test('setDeferAll 在项目作用域改 .dsh/mcp.json，不动 profile patch', a
     // 反向不留残影。
     await McpManagerGateway.prototype.setDeferAll.call(gateway, { wsPath: fixture.wsRoot, defer: false })
     const back = JSON.parse(await readFile(configPath(fixture.wsRoot), 'utf8'))
-    assert.equal(back.mcpServers.db.defer, false)
-    assert.equal(back.mcpServers.web.defer, false)
+    assert.equal(back.toolLoading.groups.db, 'resident')
+    assert.equal(back.toolLoading.groups.web, 'resident')
     assert.deepEqual(back.exclude, ['db'])
     assert.equal(back.mcpServers.db.command, 'psql', '关掉时同样不能丢字段')
 

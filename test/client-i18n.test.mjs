@@ -34,6 +34,7 @@ const testSurface = [
   // C2 的参数表单表：标签与提示存中文原文，渲染点 t(field.label) / t(field.hint)。
   // 和 MCP_PRESETS 一样，源码扫描看不见 `t(字段)`，所以必须显式登记进可达集。
   'SEARCH_PARAM_FIELDS',
+  'BUILTIN_CATEGORY_LABELS',
   'EN_DICT',
   't',
   'preservedView',
@@ -213,6 +214,7 @@ test('every t() call-site key has an English entry, and the dictionary has no de
     // 同样在渲染点过 t()）。表字段名从 hint 改成 about：它是给普通人的"这个数管什么"，
     // 不是给懂行的人看的实测记录（证据留在 TUNING-DECISIONS 里）。
     ...i18n.SEARCH_PARAM_FIELDS.flatMap((field) => [field.label, field.about]),
+    ...Object.values(i18n.BUILTIN_CATEGORY_LABELS),
   ]
   const reachable = new Set([
     ...calledTranslationKeys(),

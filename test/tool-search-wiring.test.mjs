@@ -154,19 +154,23 @@ test('setDeferAll 一次把本 profile 的所有 MCP 切到延迟，且不丢字
     assert.equal(on.changed, 2, '两个本 profile 条目都要被改')
 
     const written = await readFile(mounted.patchPath, 'utf8')
-    assert.equal((written.match(/defer: true/g) || []).length, 2)
-    // 注释、条目 id、非 defer 配置都不能丢（updateEntry 是重建 config 节点的）。
+    // 新语义：组级默认写在插件自己那行的 config.toolLoading.groups，不再改 MCP 条目的 defer。
+    assert.equal((written.match(/alpha: deferred/g) || []).length, 1)
+    assert.equal((written.match(/beta: deferred/g) || []).length, 1)
+    assert.doesNotMatch(written, /defer: true/, '旧 defer 不应再由服务器级开关产生')
+    // 注释、条目 id、非 defer 配置都不能丢（写 config 只动插件自己那一行）。
     assert.match(written, /# keep managed comment/)
     assert.match(written, /futureConfig: keep-config/)
     assert.match(written, /id: mcp-alpha/)
     assert.match(written, /id: mcp-beta/)
     assert.match(written, /command: node/)
 
-    // 反向后不留 true 残影。
+    // 反向：写 resident，不留 deferred 残影。
     const off = await manager.setDeferAll({ defer: false })
     assert.equal(off.changed, 2)
     const back = await readFile(mounted.patchPath, 'utf8')
-    assert.doesNotMatch(back, /defer: true/)
+    assert.doesNotMatch(back, /deferred/)
+    assert.equal((back.match(/resident/g) || []).length, 2)
     assert.match(back, /futureConfig: keep-config/, '关掉时同样不能丢字段')
   } finally {
     await mounted.dispose()
@@ -191,14 +195,16 @@ test('setDeferAll 只改本 profile 自己那条，同名的别层条目原样�
     assert.equal(result.changed, 2, 'alpha 与 beta 都是本 profile 的条目，都要改')
 
     const written = await readFile(mounted.patchPath, 'utf8')
-    assert.equal((written.match(/defer: true/g) || []).length, 2)
-    assert.match(written, /id: mcp-alpha[\s\S]*?defer: true/)
-    assert.match(written, /id: mcp-beta[\s\S]*?defer: true/)
+    // 组级表里恰好两条（alpha / beta），没有把别层那条同名条目算进来。
+    assert.equal((written.match(/: deferred/g) || []).length, 2)
+    assert.match(written, /alpha: deferred/)
+    assert.match(written, /beta: deferred/)
     assert.match(written, /command: node/, 'beta 的配置要留在原处')
     // 别层那条：同一个 serverName，但不是我们的条目。
     const other = mounted.entries.find((entry) => entry.options.id === 'mcp-alpha-external')
     assert.notEqual(other, undefined, '夹具里必须真的有那条外部条目')
     assert.equal(other.options.config.defer, undefined, '别层条目不得被改写')
+    assert.equal(other.options.config.toolLoading, undefined, '组级策略也不得写进别层条目')
   } finally {
     await mounted.dispose()
   }
@@ -273,7 +279,7 @@ test('装配：setDeferAll 同步内存 entry：运行中的会话立即生效�
     assert.equal(off.changed, 1)
     // 同一份装配、同一个 agent：必须立刻放行。
     assert.equal(guard({ name: 'mcp__deferme__tool_1', agent }), undefined, '关掉延迟后应立即放行')
-    assert.match(await readFile(mounted.patchPath, 'utf8'), /defer: false/, 'patch 也要落到盘上')
+    assert.match(await readFile(mounted.patchPath, 'utf8'), /deferme: resident/, 'patch 也要落到盘上')
 
     // 反方向同样要立即生效，否则只是"能关不能开"。
     const on = await mounted.ctx.get('mcpManager').setDeferAll({ defer: true })
@@ -479,11 +485,11 @@ test('徽标：延迟行只标记状态，不带 token 估算', async () => {
   // 而给了数用户就拿它做决定（"7.4K 好像不多，不用延迟"）——主动误导。
   // 现在钉的是反面：徽标与详情行**不得**再出现 token 估算。
   //
-  // 1.8.1 起这颗徽标同时是**行内开关**（两种状态都渲染、都可点）：所以源码形状从
-  // "开着才 `? h(Badge, {cls:'t-defer'})`" 改成"渲染 DeferChip，状态由 s.defer 决定"。
-  // 两条都钉：接线（状态从哪来）与样式（开着时哪个 class）。
+  // 1.10 起芯片是**组级默认**控件：真相在 `s.deferConfigured`（项目组 > 全局组 > 旧 defer > 模式），
+  // 逐工具例外由 `s.deferOverrides` 单独标出来。两条都钉：接线（状态从哪来）与样式（开着时哪个 class）。
   const client = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(client, /h\(DeferChip, \{ on: \(s\.deferEffective \?\? s\.defer\) === true, interactive: s\.managed === true && !busy/, '延迟行必须渲染状态芯片（统一策略优先，旧 defer 兜底），且只有本插件管理的条目可点')
+  assert.match(client, /h\(DeferChip, \{[\s\S]{0,300}?on: s\.deferLocked \? false : \(\(s\.deferConfigured/, '芯片必须读组级默认，锁定态显示全量')
+  assert.match(client, /overrides: s\.deferOverrides \?\? 0/, '芯片必须把逐工具例外传进去')
   // 芯片必须用「可点的药丸」原语（.dsh-mcp-chip），不是状态徽标（.dsh-mcp-badge）——
   // 用户在这块 UI 里已经学会"药丸 = 可点"（市场分类），沿用徽标会被当成只读状态。
   assert.match(client, /className: 'dsh-mcp-chip sm' \+ \(on \? ' sel' : ''\)/, '芯片必须复用 .dsh-mcp-chip 及其 .sel 选中态')
@@ -498,8 +504,9 @@ test('徽标：延迟行只标记状态，不带 token 估算', async () => {
   assert.doesNotMatch(client, /fmtTokens/, '不得再有 token 紧凑格式化')
   const host = await readFile(new URL('../lib/index.js', import.meta.url), 'utf8')
   assert.doesNotMatch(host, /toolEstTokens/, '行投影不得再算估算 token（全局与项目两路都不算）')
-  // 开启前预告仍要在，但只带真实数据（工具数）——门槛已经不存在了。
-  assert.match(client, /initial\.toolCount !== undefined/, '编辑表单必须带开启前预告')
+  // 加载方式不再由编辑表单拥有：它是组级/逐工具策略，写入口在列表芯片与「工具」页。
+  // 表单里留一句说明，而不是一个会写旧 defer 的勾选。
+  assert.match(client, /加载方式（延迟 \/ 全量）在服务器列表的芯片与「工具」页里改/, '编辑表单必须说明去哪改，不再重复开关')
 })
 
 test('「全部延迟」按钮在列表第一屏，不在底栏', async () => {
@@ -538,9 +545,9 @@ test('setDeferAll 不传 wsPath 时走全局分支（空串不得被解析成 cw
     const manager = mounted.ctx.get('mcpManager')
     const result = await manager.setDeferAll({ defer: true })
     assert.equal(result.changed, 2, '必须走全局分支，改 patch 里的两个条目')
-    assert.match(await readFile(mounted.patchPath, 'utf8'), /defer: true/)
-    // 空串与空白同样算"没传"。
-    assert.equal((await manager.setDeferAll({ defer: true, wsPath: '' })).changed, 2)
+    assert.match(await readFile(mounted.patchPath, 'utf8'), /alpha: deferred/)
+    // 空串与空白同样算"没传"（全局分支；目标值反过来，才能看出真的改了）。
+    assert.equal((await manager.setDeferAll({ defer: false, wsPath: '' })).changed, 2)
     assert.equal((await manager.setDeferAll({ defer: true, wsPath: '   ' })).changed, 2)
   } finally {
     await mounted.dispose()

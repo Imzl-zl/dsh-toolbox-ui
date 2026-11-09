@@ -512,3 +512,18 @@ test('MCP 详情：同名条目的另一条被点名，本行仍然可编辑', (
   const foreignEdit = collectAll(foreign, (node) => node?.props?.icon === 'edit')[0]
   assert.equal(foreignEdit.props.disabled, true, '别层的条目仍然只读')
 })
+test('MCP 详情：工具页签给出“在工具页管理”入口，交给上层切页并定位这台服务器', () => {
+  const internals = loadInternals()
+  const opened = []
+  const tree = internals.ServerDetail(serverProps({
+    tab: 'tools',
+    onOpenToolLoading: (value) => opened.push(value.serverName),
+  }))
+  const entry = collectAll(tree, (node) => node?.props?.children === '在工具页管理')[0]
+  assert.ok(entry, '工具页签必须有去工具页的入口（逐工具覆盖只在那里改）')
+  entry.props.onClick()
+  assert.deepEqual(opened, ['chrome-devtools'], '入口要把当前这台交给上层，而不是只切页')
+  // 页签里不再重复加载方式开关：它的写入口只有 MCP 芯片（组级）与工具页（逐工具）。
+  assert.equal(collectAll(tree, (node) => node?.props?.className === 'dsh-mcp-tool-pick').length, 0,
+    '详情页不得再出现第二个加载方式控件')
+})
