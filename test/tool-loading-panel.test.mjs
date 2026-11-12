@@ -14,7 +14,7 @@ const clientSource = await readFile(new URL('../lib/client.js', import.meta.url)
 const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
-  `${exportMarker}\nexports.__settingsPanel = { HintMarker, Toggle, Btn, ToolLoadingModal, BUILTIN_LABELS, BUILTIN_CATEGORY };`,
+  `${exportMarker}\nexports.__settingsPanel = { HintMarker, Toggle, Btn, ToolLoadingModal, BUILTIN_LABELS, BUILTIN_CATEGORY, recentSearchesText, catalogFactsText };`,
 )
 assert.notEqual(instrumentedClient, clientSource, 'client test export marker must stay current')
 
@@ -438,4 +438,119 @@ test('内置分类表：每个已知内置都有且只有一个分类，MCP 工�
   assert.equal(internals.BUILTIN_CATEGORY.subagent, 'agents')
   assert.equal(internals.BUILTIN_CATEGORY.lsp, 'code')
   assert.equal(internals.BUILTIN_CATEGORY.schedule_view, 'schedule')
+})
+
+// ── R13a：目录体检（面板侧）────────────────────────────────────────────────
+//
+// 为什么需要这一组：三个搜索参数改完之后**什么都看不到**。唯一已有的信号
+// （"目录因 maxCatalogChars 未列出 N 个工具名"）走 ctx.logger.warn，只落在宿主进程日志里。
+// 这一组钉住"面板真的把体检画出来了"，以及老宿主（没有 catalog 字段）的降级。
+test('工具加载面板：目录体检显示延迟服务器、工具池与上次组装的截断', async () => {
+  const internals = loadInternals()
+  const call = async (method) => (method === 'toolSearchSettings'
+    ? {
+      ok: true,
+      settings: { maxResults: 10, maxDiscovered: 20, maxCatalogChars: 12500 },
+      catalog: {
+        budget: 12500,
+        maxResults: 10,
+        maxDiscovered: 20,
+        deferredServers: ['alpha', 'beta'],
+        lastAssembly: { revision: 'abcdef1234567890', listed: 400, truncated: 56, total: 456, chars: 12881, budget: 12500 },
+      },
+    }
+    : SETTINGS)
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  const text = allText(await openModal(internals, call, props))
+  assert.ok(text.includes('目录体检'), `体检块必须渲染出来：${text.slice(0, 200)}`)
+  assert.ok(text.includes('延迟服务器 2 台（alpha、beta）'), '延迟服务器要列出名字（否则不知道该调哪台）')
+  assert.ok(text.includes('目录预算 12500 字符'), '预算要与设置同源')
+  // 上下文成本必须报**字符数**：这是 ToolSearch 场景的核心指标（每轮请求都要付）。
+  assert.ok(text.includes('12881 字符'), `目录段的字符数必须报出来：${text.slice(0, 300)}`)
+  assert.match(text, /待发现 456 个工具名/, 'total 是「待发现」集合，不是「全部延迟工具」——文案必须这么写')
+  assert.match(text, /目录列出 400 个/, '列出多少要说清')
+  assert.match(text, /被砍掉的 56 个工具/, '被预算砍掉的数量是本功能的核心读数')
+  // ⚠️ 截断的代价必须按**机制**说清：名字不在目录里 ⇒ 不能用 select: 精确取，只能靠关键词碰，
+  // 而关键词要命中就得描述里恰好有那个词。写成"仍能被搜到"会让人以为没有代价。
+  assert.match(text, /不能用 select: 精确取|cannot use select:/, '必须说出"名字不知道 ⇒ 精确取失效"')
+  assert.match(text, /关键词/, '必须说出兜底路径是关键词，而不是"仍能搜到"')
+  assert.doesNotMatch(text, /仍能被搜索命中/, '不得再用"仍能被搜索命中"这种轻描淡写的说法')
+})
+
+test('工具加载面板：还没组装过目录时如实说，不编 0（老宿主也不渲染体检块）', async () => {
+  const internals = loadInternals()
+  const withNullAssembly = async (method) => (method === 'toolSearchSettings'
+    ? { ok: true, settings: { maxResults: 10 }, catalog: { budget: null, deferredServers: [], lastAssembly: null } }
+    : SETTINGS)
+  const props = { open: true, inline: true, onClose: () => {}, call: withNullAssembly, onSaved: () => {} }
+  const pending = allText(await openModal(internals, withNullAssembly, props))
+  assert.ok(pending.includes('还没有组装过目录'), `lastAssembly 为 null 时必须说"还没跑过"：${pending.slice(0, 200)}`)
+  assert.ok(pending.includes('目录预算 不限制'), '未设预算时报"不限制"而不是 0')
+  assert.equal(pending.includes('列出 0'), false, '不得把"还没跑过"写成 0')
+
+  // 老宿主：返回里没有 catalog 字段 ⇒ 整块不渲染（降级，不报错）。
+  const legacy = async (method) => (method === 'toolSearchSettings' ? { ok: true, settings: { maxResults: 10 } } : SETTINGS)
+  const text = allText(await openModal(internals, legacy, { ...props, call: legacy }))
+  assert.equal(text.includes('目录体检'), false, '没有体检数据时不得渲染空壳')
+})
+
+// ── R13b：最近搜索的展示逻辑（纯函数，真跑）────────────────────────────────
+//
+// 核心不变量：**只按时间倒序**，且不把“无命中”当成缺陷信号。目录完整时，模型照目录抄名字用
+// select: 必然命中，所以“无命中”几乎只说明它抄错了名字。每条要带字符数——那是 maxResults 的单价。
+test('recentSearchesText：只按时间倒序，无命中给中性标记（不做缺陷判断）', () => {
+  const { recentSearchesText } = loadInternals()
+  const lines = recentSearchesText([
+    { query: 'old hit', limit: 10, returned: ['a', 'b'], missing: [], payloadChars: 900, at: 1 },
+    { query: 'asked for a name that does not exist', limit: 10, returned: [], missing: ['mcp__x__nope'], payloadChars: 0, at: 2 },
+    { query: 'new hit', limit: 10, returned: ['c'], missing: [], payloadChars: 420, at: 3 },
+  ])
+  assert.equal(lines.length, 3)
+  // ① **按时间倒序**，不把"无命中"提到最前：目录完整时，模型照目录抄名字用 select: 必然命中，
+  // "无命中"几乎只发生在它抄错名字——那不是插件的问题，把它标成缺陷会造成假警报。
+  assert.match(lines[0], /new hit/)
+  assert.match(lines[1], /asked for a name that does not exist/)
+  assert.match(lines[2], /old hit/)
+  // ② 「点名没找到」与「关键词没有命中」是两件事，措辞要分开，且都不带告警符号。
+  assert.match(lines[1], /not found by name|点名未找到/)
+  assert.doesNotMatch(lines.join('\n'), /❌/, '搜索记录不是缺陷清单，不挂告警符号')
+  // ③ 每条都带字符数（maxResults 的单价）。
+  assert.match(lines[0], /420/)
+  assert.match(lines[2], /900/)
+  // ④ 空输入不抛。
+  assert.equal(recentSearchesText(undefined).length, 0)
+  assert.equal(recentSearchesText([]).length, 0)
+})
+
+test('工具加载面板：最近的搜索显示出来，无命中给中性标；没有记录时如实说', async () => {
+  const internals = loadInternals()
+  const withSearches = async (method) => (method === 'toolSearchSettings'
+    ? {
+      ok: true,
+      settings: { maxResults: 10 },
+      catalog: {
+        budget: null,
+        deferredServers: ['alpha'],
+        lastAssembly: null,
+        recentSearches: [
+          { query: 'browser work', limit: 10, returned: ['mcp__alpha__open'], missing: [], payloadChars: 780, at: 1 },
+          { query: 'select:mcp__alpha__nope', limit: 10, returned: [], missing: ['mcp__alpha__nope'], payloadChars: 0, at: 2 },
+        ],
+      },
+    }
+    : SETTINGS)
+  const props = { open: true, inline: true, onClose: () => {}, call: withSearches, onSaved: () => {} }
+  const text = allText(await openModal(internals, withSearches, props))
+  assert.ok(text.includes('最近的搜索'), `记录块必须渲染：${text.slice(0, 200)}`)
+  assert.match(text, /browser work/, '模型真实问过的 query 要显示')
+  assert.match(text, /780/, '每次搜索的字符成本要显示（那是 maxResults 的单价）')
+  // 时间倒序：后发生的（点名未找到）在前。**不是**按"有没有命中"排序——那是假警报。
+  assert.ok(text.indexOf('select:mcp__alpha__nope') < text.indexOf('browser work'), '按时间倒序（最近的在前）')
+
+  // 没有记录时如实说"还没有"，不渲染空壳标题。
+  const noSearches = async (method) => (method === 'toolSearchSettings'
+    ? { ok: true, settings: { maxResults: 10 }, catalog: { budget: null, deferredServers: [], lastAssembly: null, recentSearches: [] } }
+    : SETTINGS)
+  const empty = allText(await openModal(internals, noSearches, { ...props, call: noSearches }))
+  assert.match(empty, /还没有搜索记录/, '没有记录时要说"还没有"，而不是空白')
 })

@@ -135,6 +135,13 @@ test('从上游 zip 安装：落到选定的根，且临时目录被清掉', asy
       assert.equal(result.kind, 'bundle')
       const body = await readFile(join(root, 'hub-demo', 'SKILL.md'), 'utf8')
       assert.match(body, /来自 skillhub 的演示技能/, '内容必须是上游那份 zip 里的')
+      // R14：来源记录必须落盘（bundle 在技能目录里，删目录时连带清）。
+      const hubRecord = await readFile(join(root, 'hub-demo', '.hub.json'), 'utf8')
+      const parsed = JSON.parse(hubRecord)
+      assert.equal(parsed.slug, 'hub-demo', 'slug 是追溯来源的唯一键')
+      assert.equal(typeof parsed.version, 'string', '版本要记下来（哪怕是空串，也不能没有这个字段）')
+      assert.match(parsed.installedAt, /^\d{4}-\d{2}-\d{2}T/, '装的时间要记')
+      assert.equal(result.hub.slug, 'hub-demo', '结果里也要带来源：面板据此在装完的提示里说出处')
       // 302 被跟随了
       assert.deepEqual(hub.hits.filter((u) => u.startsWith('/api/v1/download')), ['/api/v1/download?slug=hub-demo'])
       assert.ok(hub.hits.includes('/archive/hub-demo.zip'), '要跟随 302 取到 zip 本体')

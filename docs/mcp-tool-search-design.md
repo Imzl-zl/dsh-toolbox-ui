@@ -257,6 +257,7 @@ DSH 内置了一套完整的工具延迟加载**传输层**（0.2.0-rc.2，四�
 ## 9. 风险
 
 - **晚连服务器没有窗口期**：assembly 过滤**每次组装都跑**（agent-loop 每步 assemble），晚连/重连的服务器工具在它首次出现的那次组装里就被滤掉。视图按 revision 判失效，不需要 dirty 标志，也就不存在"忘了置标志导致静默不遮"这一类失配。
+- **revision 里最贵的一半按工具代次复用**（2026-11-12）：全量内容指纹（名字/描述/parameters/output，735 工具实测 ~11ms/次）与被它保护的目录文本（~11ms）同阶，而它每个请求都算一次。所以内容指纹按**工具代次**缓存：代次 = 每次 `tools/change` 派发时同步前进一次（`workspace-runtime` 的 `noteToolsChanged`），同一代次内工具内容不可能变；名字集合另行指纹一次（准入 `toolSet` 逐回合变、且不派发事件，代次盖不住这一半）。代次只在 MCP 运行时的监听器在场时**可信**：不在场时 `toolsGenerationOf` 返回 `undefined`，运行时退回每请求全量算——宁可慢，不可拿一个不动的数字当"没变化"。revision 仍然是**内容派生**的（不是代次号），所以一次无关的 `tools/change`（项目工具注册、restrict 对齐）不会把所有会话的视图与目录文本一起打穿。稳态实测 735 工具：0.05ms/次（未命中时 ~11ms）。注意它不改变另一个更大的常量成本：宿主 0.2.1 没有 `definitions()`（`probeHost.caps.definitions` 为假），组装期只能用 `schemas(agent)`，那是**每次组装一次全量深拷贝**（735 工具实测 ~92ms）——那是另一件事，与本条无关。
 - **静默全量不可观测**：视图算不出来时 fail-open 退回全量可见（§4），此时必须记账到日志——否则"没挂上"发生时用户无感知。当前记 `ctx.logger.error`；与 exclude 一样进面板错误账是后续可做项。
 - **`tool_search` 常驻的固定成本**：它全局注册、每个会话都在（无 defer 服务器的会话也付这份描述 token，约 350）。Claude Code 按阈值条件注入；DSH 无对应通道（工具描述静态），接受这笔固定税，描述保持精简，无延迟服务器时返回明示文案。
 - **complete-section 吞掉目录**：宿主 assemble 的规则是"存在 effective complete section 时，它成为唯一 prompt section"（`dsh-system-prompt:356-361`，**读码确认**：`completeSection === void 0 ? transformed.sections : [completeSection]`；全 test/ 没有覆盖这条的用例，早前写的"已实测"没有支撑）——若某部署/preset 注册了 complete section，我们的目录 section 会被静默丢弃，但**遮罩仍然生效**（`{...transformed, sections:[completeSection]}` 保留过滤后的 tools）。兜底：工具描述里的静态引导仍在，模型至少还能主动查。

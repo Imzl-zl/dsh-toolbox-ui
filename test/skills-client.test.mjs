@@ -19,7 +19,7 @@ const clientSource = await readFile(new URL('../lib/client.js', import.meta.url)
 const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
-  `${exportMarker}\nexports.__skills = { SCOPE_LABELS, projectLabelOf, skillScopeLabel, skillGroups, skillGroupRank, skillTwinCounts, skillScopeOptions, skillRows, shadowedSkills, skillDiagnostics, skillDetailRequest, SkillsPanel, SkillRow, SkillGroupHeader, SkillDetail, SkillDetailPane, SkillInstallModal, McpTab, McpOverlay, panelVisibility, Toggle };`,
+  `${exportMarker}\nexports.__skills = { SCOPE_LABELS, projectLabelOf, skillScopeLabel, skillGroups, skillGroupRank, skillTwinCounts, skillScopeOptions, skillRows, shadowedSkills, skillDiagnostics, skillDetailRequest, hubSourceLabel, SkillsPanel, SkillRow, SkillGroupHeader, SkillDetail, SkillDetailPane, SkillInstallModal, McpTab, McpOverlay, panelVisibility, Toggle };`,
 )
 
 assert.notEqual(instrumentedClient, clientSource, 'client test export marker must stay current')
@@ -1444,4 +1444,42 @@ test('到底之后不再发请求：没有更多时不给加载更多入口', as
   assert.equal(searches.length, 1, '没有更多时不得再发请求')
   assert.ok(textOf(tree).some((text) => text.includes('已显示 2 / 共 2 条')),
     `计数文案要与实物一致，实际：${JSON.stringify(textOf(tree).filter((t) => t.includes('条')))}`)
+})
+
+// ── R14：来源在详情里怎么显示 ────────────────────────────────────────────────
+//
+// `skillHubInstall` 现在会落 `.hub.json` 并由 `detail` 带出来源。这一组钉**显示判据**：
+// 有版本才显示版本（不编造），本机导入的（没有来源）不显示这一行。
+test('hubSourceLabel：有版本才显示版本，缺版本不编造', () => {
+  const { hubSourceLabel } = loadClientInternals()
+  assert.equal(hubSourceLabel({ slug: 'demo-skill', version: '1.2.3' }), 'demo-skill · v1.2.3')
+  // 上游不一定给版本：那时只显示 slug，**不编造 vunknown / v0**。
+  assert.equal(hubSourceLabel({ slug: 'demo-skill', version: '' }), 'demo-skill')
+  assert.equal(hubSourceLabel({ slug: 'demo-skill' }), 'demo-skill')
+  // 空输入不抛（详情可能在任何时刻渲染）。
+  assert.equal(hubSourceLabel(undefined), '')
+})
+
+test('技能详情：有来源就显示，没有来源不显示这一行（"没有"≠"读不出来"）', () => {
+  const internals = loadClientInternals()
+  const baseRow = { name: 'demo', source: 'user-agents', scope: 'global', root: '/r', kind: 'bundle', entry: 'demo', enabled: true, modelInvocable: true, userInvocable: true }
+  const render = (body) => internals.SkillDetail({
+    row: baseRow,
+    shadowedBy: null,
+    body,
+    busy: false,
+    onRetry() {}, onToggle() {}, onRemove() {}, onModelInvocable() {}, onUserInvocable() {}, onTab() {},
+  })
+
+  // ① 有来源：显示 slug 与版本。
+  const withHub = JSON.stringify(render({ status: 'ok', text: '正文', hub: { slug: 'demo-skill', version: '2.0.0' } }))
+  assert.match(withHub, /demo-skill · v2\.0\.0/, `来源必须显示：${withHub.slice(0, 200)}`)
+
+  // ② 本机导入（hub: null）：不显示"来源"这一行，也不显示"未知"。
+  const withoutHub = JSON.stringify(render({ status: 'ok', text: '正文', hub: null, hubError: '' }))
+  assert.equal(withoutHub.includes('来源'), false, '没有来源就不显示这一行（不要用"未知"占位）')
+
+  // ③ 来源记录损坏：把原因显示出来（红色），而不是当成"没有来源"。
+  const broken = JSON.stringify(render({ status: 'ok', text: '正文', hub: null, hubError: '来源记录损坏：Unexpected token' }))
+  assert.match(broken, /来源记录损坏/, '损坏要说出来——静默当成"没有来源"会让用户永远不去更新它')
 })

@@ -231,17 +231,23 @@ test('the reveal control only renders for masked values', () => {
   assert.match(client, /revealedNow \? h\('button'/)
 })
 
-test('reveal resolves !!js config nodes with the loader evaluator, never returns the raw node', () => {
+test('reveal resolves !!js config nodes with the loader evaluator, never returns the raw node', async () => {
+  // R6 第 2 步之后，投影规则（掩码 / 保留原值标记 / reveal 求值）住在 lib/mcp-projection.js，
+  // 而"详情页把求值结果端出去"这件事仍由 gateway 方法做。所以这条要查**两个**文件：
+  // 只查宿主会漏掉求值器，只查投影会漏掉调用点。
+  const projection = await readFile(new URL('../lib/mcp-projection.js', import.meta.url), 'utf8')
   // loader 把 `!!js` 表达式以 raw 节点留在 entry.options.config（官方为写回保留 `!!js` 形式），
   // apply 之前才用 interpolate 求值。直接把该节点当「有效运行值」返回，客户端会把它序列化成
   // "[object Object]"——用户点眼睛看到的就是这个，看不到 key。
   assert.match(hostIndex, /import \{ interpolate \} from "@deepseek-ai\/cordis-plugin-loader"/)
   // 必须用 entry 自己的 ctx：官方用例里表达式可以引用该行 inject 的服务。
-  assert.match(hostIndex, /interpolate\(entry\.ctx, value\)/)
+  assert.match(projection, /interpolate\(entry\.ctx, value\)/)
+  assert.match(hostIndex, /resolveLiveConfigValue\(entry, entry\.options\.config\[field\]/, '网关必须走那个求值器，不得直接返回 raw 节点')
   // 项目层用与会话建连同一个求值器（内部 spec 存的是 `!!js` 字符串），同样要运行值不要模板。
   assert.match(hostIndex, /resolveSpecValue\(current\[field\], process\.env\)/)
   // 旧的「返回文件模板」实现必须彻底消失：模板不是运行值。
   assert.doesNotMatch(hostIndex, /restoreTemplateDeep/)
+  assert.doesNotMatch(projection, /restoreTemplateDeep/)
   // 编辑表单仍只把运行值用于显示：保留原值标记不得因为求值而失效。
   assert.match(hostIndex, /containsRedactedValue/)
 })
@@ -354,6 +360,10 @@ test('list and detail use the same derived status and refresh tools after regist
 
 test('mount failures are attributed to the row and the detail pane, not only a banner', async () => {
   const host = await readFile(new URL('../lib/index.js', import.meta.url), 'utf8')
+  // R6 第 2 步之后，项目行的投影（含 mountFailed 的标记处）住在 lib/mcp-rows.js。
+  // 这条断言跟着**那个事实**走，不跟着文件名走：挂载失败与连接失败的区分一旦丢失，
+  // 症状是“顶部横幅说挂载失败、列表里那一条看着一切正常”。
+  const rows = await readFile(new URL('../lib/mcp-rows.js', import.meta.url), 'utf8')
   // 顶部横幅说 memory 挂载失败、而列表里 memory 看着一切正常，是最容易误导的状态。
   // 行与详情都只读 Host 标在行上的 mountFailed；客户端不再拿 mountErrors 列表反推一遍（第二真相源）。
   assert.doesNotMatch(client, /const mountErrorMap = useMemo/)
@@ -361,7 +371,8 @@ test('mount failures are attributed to the row and the detail pane, not only a b
   assert.match(client, /mountFailed\(s\) \? h\(Badge, \{ cls: 's-err' \}, t\('挂载失败'\)\) : null/)
   // 挂载失败（我们 setup 阶段挂不上）与连接失败（mcp-client 报错/重连耗尽）必须分开：
   // 用“lastError 存在”反推挂载失败会把连接失败误标成挂载失败，也是同一事实的第二个真相源。
-  assert.match(host, /row\.mountFailed = true;/)
+  assert.match(rows, /row\.mountFailed = true;/)
+  void host
   assert.match(client, /const mountFailed = isWorkspace && server\.mountFailed === true/)
   assert.doesNotMatch(client, /return failure \? \{ \.\.\.local, lastError: failure \} : local/)
   // 列表行标红而详情说「随会话挂载」，是同一条信息在两处自相矛盾。
@@ -441,6 +452,7 @@ test('client moves focus into dialogs so Escape handlers receive keyboard events
 
 test('the three contract faces list the same methods in the same order', async () => {
   const { TYPERT } = await import('../lib/typert.js')
+  const { MCP_METHODS, SKILL_METHODS } = await import('../lib/rpc-contract.js')
   // 三边契约（Host 实现 / lib/typert.js / lib/client.js）里，Host 与 typert.js 之间此前没有
   // 任何自动比对：加了 Remote 却忘了写契约（客户端永远调不到）、或删了实现却留着契约
   //（调用必失败），测试都还是绿的。这条把三边钉在一起，对每个未来方法都生效。
@@ -448,16 +460,24 @@ test('the three contract faces list the same methods in the same order', async (
   // 曾经这里排过序，于是 scanImportSources 一组在 index.js 里被追加到末尾而没人发现。
   // 新增方法时，请在同样的位置插入三份清单。
   // 本包有**两个** Remote 命名空间（mcpManager / skillsManager），所以三边清单都是
-  // 「MCP 段 + 技能段」的同序拼接：host 是两个 gateway 类各自的 @Remote，typert 是
-  // mv() / mvs() 两个工厂产出的 invocations，client 是字面 descriptor 加 sk() 调用。
+  // 「MCP 段 + 技能段」的同序拼接：host 是一个 `applyRemoteMethods(this, <表>)` 的装配点
+  // （R6.1 之前是 55 行手写 `Remote("…")`），typert 是 mv() / mvs() 两个工厂产出的
+  // invocations，client 是字面 descriptor 加 sk() 调用。
   // 拼接按**文件里的出现位置**排，不是按「先 MCP 再技能」硬写：这样两个面在文件里交错
   // 也会被抓到（交错本身没有意义，但静默通过比报错更糟）。
   const byPosition = (source, patterns) => patterns
     .flatMap((pattern) => [...source.matchAll(pattern)].map((match) => ({ at: match.index, method: match[1] })))
     .sort((left, right) => left.at - right.at)
     .map((entry) => entry.method)
-  const declared = [...hostIndex.matchAll(/Remote\("([A-Za-z0-9_]+)"\)/g)].map((match) => match[1])
+  // 宿主那面不再从源码里数名字（名字只有 lib/rpc-contract.js 一份），而是读**真的装配**：
+  // applyRemoteMethods 的实参就是契约表本身，两个 gateway 按文件出现顺序拼起来。
+  // ⚠️ 不能在源码里数 `[]` 就算完：装配点写错（传了别的表、少装配一个 gateway）在这里就红，
+  // 而"表里的名字在原型上有没有实现"由下面的第四面用例与装配处的加载期断言各自一道。
+  const declared = byPosition(hostIndex, [/applyRemoteMethods\(\s*this,\s*(MCP_METHODS|SKILL_METHODS)\b/g])
   const contract = TYPERT.invocations.map((entry) => entry.method)
+  assert.deepEqual(declared, ['MCP_METHODS', 'SKILL_METHODS'],
+    '宿主必须恰好两个表驱动装配点（MCP_METHODS + SKILL_METHODS），顺序与 NAMESPACES 一致')
+  const declaredMethods = [MCP_METHODS, SKILL_METHODS].flatMap((methods) => methods.map((entry) => entry.method))
   // 包名不写第二遍：从 package.json 推导。写死字面量时，改包名会让这条正则一条都匹配不到，
   // 于是 descriptors 变成空数组——它照样会红，但理由是「顺序不对」，指向完全错误的地方。
   const escapedName = packageJson.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -466,13 +486,13 @@ test('the three contract faces list the same methods in the same order', async (
   const mcpDescriptors = byPosition(client, [mcpPattern])
   const skillDescriptors = byPosition(client, [skillPattern])
   const descriptors = byPosition(client, [mcpPattern, skillPattern])
-  assert.ok(declared.length >= 30, `从 index.js 读到的 Remote 数量异常（${declared.length}）`)
+  assert.ok(declaredMethods.length >= 30, `契约表里的 wire 方法数量异常（${declaredMethods.length}）`)
   // 两个面分别先验「读到了」：只匹配到一个面时 deepEqual 会以「少一半」失败，
   // 而那句话读起来像顺序问题，所以这里先把「哪一面空了」说清楚。
   assert.ok(mcpDescriptors.length >= 30, `client 的 mcpManager descriptor 只读到 ${mcpDescriptors.length} 条`)
   assert.ok(skillDescriptors.length >= 9, `client 的 skillsManager descriptor 只读到 ${skillDescriptors.length} 条`)
-  assert.deepEqual(contract, declared, 'lib/typert.js 的 invocation 必须与 Host 的 Remote 同序')
-  assert.deepEqual(descriptors, declared, 'lib/client.js 的 descriptor 必须与它们同序')
+  assert.deepEqual(contract, declaredMethods, 'lib/typert.js 的 invocation 必须与契约表同序')
+  assert.deepEqual(descriptors, declaredMethods, 'lib/client.js 的 descriptor 必须与它们同序')
 })
 
 test('the gateway prototypes are the fourth contract face: no method falls off the wire', async () => {
@@ -481,11 +501,12 @@ test('the gateway prototypes are the fourth contract face: no method falls off t
   // 第四边就是为这个盲区存在的：Host 实现面本身（`McpManagerGateway.prototype` /
   // `SkillsManagerGateway.prototype`，纯导入即可枚举，不需要起 Context）。
   //
-  // 断言方向：原型上每个方法都必须出现在三份清单里（@Remote / TYPERT / client descriptor）。
+  // 断言方向：原型上每个方法都必须出现在三份清单里（契约表 / TYPERT / client descriptor）。
   // 均匀缺失时这一条直接红，而三边比对不会。
   const { McpManagerGateway, SkillsManagerGateway } = await import('../lib/index.js')
-  const declared = [...hostIndex.matchAll(/Remote\("([A-Za-z0-9_]+)"\)/g)].map((match) => match[1])
-  assert.ok(declared.length >= 40, `从 index.js 读到的 Remote 数量异常（${declared.length}）`)
+  const { MCP_METHODS: mcpMethods, SKILL_METHODS: skillMethods } = await import('../lib/rpc-contract.js')
+  const declared = [...mcpMethods, ...skillMethods].map((entry) => entry.method)
+  assert.ok(declared.length >= 40, `契约表里的 wire 方法数量异常（${declared.length}）`)
 
   // 仅内部使用、不上面 wire 的方法必须**显式登记**：漏登记一个，这条就红，而红说的正是
   // "有个方法没接上 wire"。登记表在 lib/rpc-contract.js（与 typert/client 生成物同一份定义），
@@ -537,7 +558,10 @@ test('importing from other MCP clients goes through the Host, with no client-sup
     assert.match(client, new RegExp(`call\\('${method}'`), `客户端没有调用 ${method}`)
   }
   // 扫描结果只带名称、传输与「哪些字段会被掩码」，条目本体（含 `!!js` 表达式与字面密钥）不出 Host。
-  assert.match(hostIndex, /maskedFields: entry\.spec \? maskedSourceFields\(entry\.spec\) : \[\]/)
+  // R6 第 2 步之后行投影住在 lib/mcp-import-plan.js（projectSourceRow）——这条断言跟着它走，
+  // 而不是跟着“哪个文件叫 index.js”：掩码一旦漏写，泄的是真凭据。
+  const importPlan = await readFile(new URL('../lib/mcp-import-plan.js', import.meta.url), 'utf8')
+  assert.match(importPlan, /maskedFields: entry\.spec \? maskedSourceFields\(entry\.spec\) : \[\]/)
   // 导入必须带上预览时的内容指纹，否则等于允许「预览的是 A、导入的是 B」。
   assert.match(client, /contentHash: sourcePreview\.contentHash/)
   // 路径只由 Host 的来源表拼出；客户端一旦开始传 path，接口面就退化成「读任意文件」。
@@ -693,6 +717,10 @@ test('project and shared-global sources use the same sidebar while keeping detai
 
 test('project MCP: what the README promises the panel shows, the panel actually shows', async () => {
   const host = await readFile(new URL('../lib/index.js', import.meta.url), 'utf8')
+  // R6 第 2 步之后，项目行的投影住在 lib/mcp-rows.js（下面有条断言要查它）。
+  const rows = await readFile(new URL('../lib/mcp-rows.js', import.meta.url), 'utf8')
+  // 写入路径（落盘与生效分开报、锁内的写与锁外的 reconcile）住在 lib/mcp-write-paths.js。
+  const writePaths = await readFile(new URL('../lib/mcp-write-paths.js', import.meta.url), 'utf8')
   // README 现在承诺三件事，都必须真的在面板上看得见：
   //   1. 写盘即生效（不需要重开会话）；2. 连接跟配置走、不跟会话走；3. 项目行把「连接在不在」与
   //   「几个会话在用」分开说，不再有「待会话挂载」这种把两者压成一句的合成状态。
@@ -711,7 +739,7 @@ test('project MCP: what the README promises the panel shows, the panel actually 
   // 对齐连接必须发生在**写锁之外**、并经一个吞错误的小助手：reconcile 会 await 整条 teardown，
   // 放在写锁里会让「移除一个卡住的 server」把该项目之后每次保存都卡住；而它的失败不该把一个
   // 已经落盘的写报成失败。所以 RPC 里不再直接调用它。
-  assert.match(host, /async function alignWorkspaceConnections\(ctx, wsPath\)/)
+  assert.match(writePaths, /async function alignWorkspaceConnections\(ctx, wsPath\)/)
   assert.doesNotMatch(host, /await reconcileWorkspaceConnections\(this\.ctx/)
   // 编辑表单是"重建 spec"：表单不渲染的字段必须原样带回，否则编辑一次就抹掉它们
   //（disabled 会让被禁用的 server 悄悄启用；项目级预算旋钮则会被静默清空）。
@@ -719,7 +747,7 @@ test('project MCP: what the README promises the panel shows, the panel actually 
   // 否则打开编辑框时复选框初始值是错的。
   assert.match(client, /if \(initial\.enabled === false\) spec\.disabled = true;/)
   assert.match(client, /for \(const key of \['idleTimeoutMs', 'readyTimeoutMs'\]\)/)
-  assert.match(host, /"idleTimeoutMs", "readyTimeoutMs", "defer"\]\) if \(server\[field\] !== undefined\)/)
+  assert.match(rows, /"idleTimeoutMs", "readyTimeoutMs", "defer"\]\) if \(server\[field\] !== undefined\)/)
   // 详情页空态不能承诺“刷新即可看到工具”：那要求 tools RPC 真能枚举共享作用域层，
   // 而 toolInventory 只认 loader 条目 + 全局视图。要么能枚举，要么别承诺。
   assert.doesNotMatch(client, /刷新即可看到工具/)

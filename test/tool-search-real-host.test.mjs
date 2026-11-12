@@ -45,7 +45,7 @@ const OWN_TOOLS = Array.from({ length: 12 }, (_, index) => ({
   parameters: { type: 'object', properties: { arg: { type: 'string' } } },
 }))
 
-async function createHost({ descriptionOf, hyphenated = false, deferNothing = false, globalToolCount = 16, presentation, limits } = {}) {
+async function createHost({ descriptionOf, hyphenated = false, deferNothing = false, globalToolCount = 16, presentation, limits, agentRuntime = false } = {}) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
@@ -73,11 +73,21 @@ async function createHost({ descriptionOf, hyphenated = false, deferNothing = fa
   systemPrompt.section({ name: `mcp:${server}`, order: 3100, interpolate: false, text: () => 'DEFERME SERVER INSTRUCTIONS (up to 32KB)' })
   systemPrompt.section({ name: 'mcp:proj', order: 3100, interpolate: false, text: () => 'PROJ SERVER INSTRUCTIONS' })
 
+  // agentRuntime: 装上**生产里的那一层**（它订阅 tools/change），于是 ToolSearch 拿到的
+  // 工具代次是可信的、内容指纹会按代次复用。不装时运行时拿不到代次 → 每次全量算内容，
+  // 与旧行为一致（下面"库存不变则目录字节稳定"那条走的也是这条安全退路）。
+  let toolsGeneration
+  if (agentRuntime) {
+    const { installAgentRuntime, toolsGenerationOf } = await import('../lib/workspace-runtime.js')
+    installAgentRuntime(ctx)
+    toolsGeneration = () => toolsGenerationOf(ctx)
+  }
   const dispose = installToolSearchRuntime(ctx, {
     // deferNothing 模拟"用户把所有服务器的延迟加载都关掉"：serverNames 仍是全集
     // （真实形状——serverNamesOf 恒返回全部已知服务器），只是 defer 集合为空。
     deferServers: () => (deferNothing ? [] : [server, 'proj']),
     serverNames: () => [server, 'proj'],
+    ...(toolsGeneration === undefined ? {} : { toolsGeneration }),
     ...limits,
   })
 
@@ -282,6 +292,39 @@ test('real host: 库存不变则目录字节稳定，工具增减后跟随变化
     const third = (await host.assemble()).sections.find((s) => s.name === 'tool-search:catalog').text
     assert.ok(third.includes('- late'), '新工具必须以裸名进入目录')
     assert.ok((await host.assemble()).tools.every((tool) => tool.name !== 'mcp__deferme__late'), '新工具在同一次组装里就被遮掉（无窗口）')
+  } finally {
+    await host.dispose()
+  }
+})
+
+test('real host: 内容指纹按代次复用后，同名工具的内容变化仍然立刻反映到搜索索引', LEGACY_TEST_OPTIONS, async () => {
+  // 生产形状：MCP 运行时在场 ⇒ 工具代次可信 ⇒ 组装期不再每次重算全量内容指纹（~13.5ms/735 工具）。
+  // 那条捷径只在「每次 register/dispose 都派发 tools/change」成立时才是对的。这里用真 ToolRuntime
+  // 走**名字不变、只有内容变**的路径——名字指纹盖不住它，只有代次能证明内容变了。
+  const host = await createHost({ agentRuntime: true })
+  try {
+    const registerLate = (description) => host.tools.register({
+      name: 'mcp__deferme__late',
+      description,
+      parameters: { type: 'object', properties: {} },
+      output: { schema: { type: 'object', additionalProperties: true }, render: (_a, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      async execute() { return { ok: true } },
+    })
+    const search = async (query) => {
+      const result = await host.call('tool_search', { query })
+      assert.equal(result.isError, false, result.content[0].text)
+      return JSON.parse(result.content[0].text).matches.map((match) => match.name)
+    }
+
+    const disposeV1 = registerLate('alpha marker tool for database work')
+    assert.ok((await search('alpha')).includes('mcp__deferme__late'), '前置：v1 的内容进了索引')
+
+    // mcp-client 重连 / tools/list 变化的形状：先撤一批、再以同名重新注册，只改描述。
+    // 名字集合（含顺序）不变 ⇒ 名字指纹不变，只有代次能说明"内容变了"。
+    disposeV1()
+    registerLate('omega marker tool for database work')
+    assert.ok((await search('omega')).includes('mcp__deferme__late'), '内容变了必须重建索引（代次缓存不能吞掉它）')
+    assert.equal((await search('alpha')).includes('mcp__deferme__late'), false, '旧描述必须退出索引')
   } finally {
     await host.dispose()
   }

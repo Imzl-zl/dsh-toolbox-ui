@@ -1,15 +1,15 @@
 id,batch,title,severity,reproduced,status,note
-R1,A,空 wsPath 在 Windows 解析成 cwd,缺陷,是,todo,13 个入口守卫失效
-R2,A,诊断记录无寿命（删除后仍点名）,缺陷,是,todo,mountErrors/scopeErrors/restrictError
-R3,B,客户端分片无依赖方向,结构,证据充足,todo,4 处代码级反向引用
-R4,C,工具清单两套实现且全局无缓存,性能,待量化复现,todo,14.3ms/次@735 工具
-R5,C,viewRevision 当缓存键成本同阶,性能,待量化复现,todo,每请求
-R6,D,index.js 职责混装 + 装饰器脚手架,结构,证据充足,todo,2778 行 / 154 行静态块
-R7,D,12 个模块级单例无 owner,结构,证据充足,todo,R2 的根因
-R8,E,McpTab 973 行 / 34 useState,结构,证据充足,todo,SkillsPanel 同类
-R9,F,全局 MCP 无法导出,功能,是,todo,
-R10,F,projectConnections 不接线,功能,是,todo,
-R11,F,本机导入技能无入口,功能,是,todo,后端已完整
-R12,F,日志只取最后一条,功能,是,todo,12 条已采集
-R13,F,ToolSearch 无法试搜,功能,是,todo,
-R14,F,技能市场无来源清单,功能,是,todo,
+R1,A,空 wsPath 在 Windows 解析成 cwd,缺陷,是,verified,唯一出口=canonicalWorkspacePath；51 组用例+真宿主前后对照（修复前真写进 cwd）
+R2,A,诊断记录无寿命（删除后仍点名）,缺陷,是,verified,读取端按当前启用条目过滤；真 mcp-client 失败路径前后对照
+R3,B,客户端分片无依赖方向,结构,证据充足,verified,前序规则+显式登记表；渲染产物逐字节对照
+R4,C,工具清单两套实现且全局无缓存,性能,是,verified,实测 220ms/次；list 286.9→8.4ms view 3286→10.8ms
+R5,C,viewRevision 当缓存键成本同阶,性能,是,verified,内容指纹按代次复用 11.0→0.05ms；含故障注入验证
+R6,D,index.js 职责混装 + 装饰器脚手架,结构,证据充足,fixed,两小步都已完成：56 条 __esDecorate→表驱动，再按职责拆出 8 个模块；2788→1590 行（78 个函数体逐字节不变）
+R7,D,12 个模块级单例无 owner,结构,证据充足,fixed,HostState + dispose 一处清；10 项进类/3 张诊断表按 owner 登记/agent 与文件锁留模块级（各有理由）；代次改 per-root
+R8,E,McpTab 973 行 / 34 useState,结构,证据充足,fixed,三批完成：McpTab 973→791(34→23 state)、SkillsPanel 493→308(16→3)、通知条抽成纯函数；抽出 5 个单元；渲染快照逐字节相同；子组件提取经论证不再带来可测性
+R9,F,全局 MCP 无法导出,功能,是,fixed,新增 exportGlobalJson（wire 56 方法）+ 全局页导出出口；明文警告与项目层分开；2 条宿主行为用例 + 1 条客户端出口断言
+R10,F,projectConnections 不接线,功能,是,fixed,只读入线：connectionAnomalyOf 纯函数 + 项目页折叠入口（展开才取数）；11 条 i18n；2 条真渲染/纯函数用例
+R11,F,本机导入技能无入口,功能,是,fixed,形态与原假设不同：宿主只收路径→扩展 payload 收内容（不新增方法）；base64 自实现；6 条用例（3 宿主+3 客户端真跑）
+R12,F,日志只取最后一条,功能,是,fixed,先量体积（12×2000=24KB/台→不放轮询）：status 带 recentLogs（零新增方法）+ 诊断页按需取；3 条用例（含 list 不带的反向断言）
+R13,F,ToolSearch 无法试搜,功能,是,fixed,R13a 目录体检 + R13b 旁路记录真实搜索；两项都零新增 wire（仍 56）、零上下文成本（不改 execute 返回/不进目录段）；试搜经论证不做
+R14,F,技能市场无来源清单,功能,是,fixed,.hub.json 跟技能文件走（bundle 随目录删/flat 用 .md.hub.json 后缀不进技能扫描）；skillHubInstall 落盘 + detail 带出；5 条用例；检查更新记为后续

@@ -7,7 +7,7 @@ const clientSource = await readFile(new URL('../lib/client.js', import.meta.url)
 const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
-  `${exportMarker}\nexports.__test = { MCP_CSS, MCP_PRESETS, ToolRow, WorkspaceCopyModal, clearRevealState, consumeRevision, copyText, copyPlanText, copyPlanKey, copyPlanReady, copyTargets, exportFileName, firstFailureReason, selectedSkillRow, skillIdentity, startVisibilityAwarePolling, wsSub };`,
+  `${exportMarker}\nexports.__test = { MCP_CSS, MCP_PRESETS, ToolRow, WorkspaceCopyModal, clearRevealState, consumeRevision, copyText, copyPlanText, copyPlanKey, copyPlanReady, copyTargets, exportFileName, buildNotices, firstFailureReason, selectedSkillRow, skillIdentity, startVisibilityAwarePolling, wsSub };`,
 )
 
 assert.notEqual(instrumentedClient, clientSource, 'client test export marker must stay current')
@@ -110,6 +110,79 @@ test('clearing reveal state invalidates pending loads and drops plaintext', () =
   assert.equal(updates.length, 1)
   assert.deepEqual(Object.keys(updates[0]), [])
   assert.deepEqual(busy, [''])
+})
+
+// ── 通知条：顺序与互斥规则（R8 第三批把这段计算从 500 行 JSX 里抽成了纯函数）──
+//
+// 抽出来的**唯一**收益就是这几条断言：在此之前，这四条的互斥与共存只能靠读 JSX 才知道，
+// 而现在它们是函数的输入输出。四个分支各自的"当且仅当"都钉住，避免以后加一条横幅时
+// 顺手把另一条的显示条件放宽（那类回归在视觉上只是"多出一条提示"，很难被注意到）。
+const noticeBase = {
+  skillsService: { state: 'ready', count: 3, error: '' },
+  flash: () => {},
+  error: '',
+  mountErrors: [],
+  scopeErrors: [],
+  restrictError: null,
+  scope: 'global',
+  updateHint: null,
+  upgradeState: { phase: 'idle' },
+  runUpgrade: () => {},
+  dismissUpdateHint: () => {},
+  liveAgents: 0,
+  refreshing: false,
+  load: () => {},
+}
+
+/** 只取通知条的 key，顺序就是渲染顺序。key 是渲染契约的一部分（源码里写死）。 */
+const noticeKeys = (overrides) => {
+  const { internals } = loadClientInternals(() => true)
+  // ⚠️ 必须用主 realm 的 Array 重建：buildNotices 跑在 vm 沙箱里，它的 map/filter 返回的是
+  // 沙箱的 Array 实例，而 assert/strict 的 deepEqual 是 deepStrictEqual —— 会比原型，于是
+  // "内容完全相同"的两个数组仍然失败（错误信息里 actual 与 expected 一模一样，极难看出原因）。
+  return Array.from(
+    internals.buildNotices({ ...noticeBase, ...overrides })
+      .map((node) => node.props.key)
+      .filter((key) => key !== undefined),
+  )
+}
+
+test('通知条顺序固定：降级 → 读取失败 → 项目级三种故障 → 更新', () => {
+  // 四条**同时成立**时的顺序就是契约：前几条是"现在有问题"，更新是纯增值信息。
+  // key 全部取自 lib/client/70-shell.js 的 buildNotices（它们是渲染契约，不是测试自造）。
+  const keys = noticeKeys({
+    skillsService: { state: 'down', count: null, error: 'no service' },
+    error: 'load failed',
+    scope: 'C:/ws/a',
+    mountErrors: [{ serverName: 'db', error: 'boom' }],
+    scopeErrors: [{ serverName: 'db', error: 'scope is gone' }],
+    restrictError: { deny: ['mcp__db__x'], error: 'restrict is gone' },
+    updateHint: { current: '1.0.0', latest: '2.0.0', updateAvailable: true, url: 'https://example.test' },
+  })
+  assert.deepEqual(keys, ['skills-down', 'load-failed', 'mount-failed', 'scope-failed', 'restrict', 'update'],
+    `四条同时成立时的顺序必须稳定（实际 ${JSON.stringify(keys)}）`)
+})
+
+test('项目级故障只在项目作用域下出现，且三种故障各成一条横幅', () => {
+  // 全局页没有"项目故障"这个概念：在那里显示它，用户会去找一个不存在的项目。
+  assert.deepEqual(noticeKeys({ mountErrors: [{ serverName: 'db', error: 'x' }] }), [],
+    '全局作用域下不得出现项目级故障条')
+  // 三种故障**各说各的原因**，不是合并成一条：挂载失败（连不上）、作用域失败（工具锁不住）、
+  // restrict 失败（屏蔽没写进作用域）—— 修法完全不同，合在一起用户不知道先修哪个。
+  assert.deepEqual(noticeKeys({ scope: 'C:/ws/a', mountErrors: [{ serverName: 'db', error: 'x' }] }), ['mount-failed'])
+  assert.deepEqual(noticeKeys({ scope: 'C:/ws/a', scopeErrors: [{ serverName: 'db', error: 'x' }] }), ['scope-failed'])
+  assert.deepEqual(noticeKeys({ scope: 'C:/ws/a', restrictError: { deny: ['mcp__db__x'], error: 'x' } }), ['restrict'])
+})
+
+test('升级提示的三个阶段都显示，且 done 阶段不依赖 updateHint', () => {
+  // done：updateHint 已被宿主刷成"已是最新"（null），此时仍必须显示这条——
+  // 否则"升级成功后提示消失"会让用户以为升级失败。
+  assert.deepEqual(noticeKeys({ scope: 'global', updateHint: null, upgradeState: { phase: 'done', version: '2.0.0' } }), ['update'],
+    'done 阶段即使 updateHint 为 null 也要显示（宿主已认不出旧版）')
+  assert.deepEqual(noticeKeys({ scope: 'global', updateHint: { latest: '2.0.0' }, upgradeState: { phase: 'running', version: '2.0.0' } }), ['update'])
+  assert.deepEqual(noticeKeys({ scope: 'global', updateHint: { latest: '2.0.0' }, upgradeState: { phase: 'failed', text: 'EACCES' } }), ['update'])
+  // 没有新版、也没在升级：一条都不该出现（idle + 无 hint = 什么都不说）。
+  assert.deepEqual(noticeKeys({ scope: 'global' }), [])
 })
 
 test('clipboard fallback reports a false execCommand result as failure', async () => {

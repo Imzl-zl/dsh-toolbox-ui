@@ -2,14 +2,16 @@
 // RPC 契约单源生成器。
 //
 // 一张表（lib/rpc-contract.js）生成两张脸（lib/typert.js、lib/client.js 的 descriptor 段），
-// 并校验第三张脸（lib/index.js 的 @Remote 顺序）——四张脸的定义与理由见 lib/rpc-contract.js。
+// 并校验第三张脸（lib/index.js 的宿主装配）——四张脸的定义与理由见 lib/rpc-contract.js。
 //
 //   node scripts/rpc-contract.mjs            # 打印差异（--check 的别名，退出码 1 表示不一致）
 //   node scripts/rpc-contract.mjs --write    # 重写生成产物
 //   node scripts/rpc-contract.mjs --check    # CI：不一致就非零退出
 //
-// 为什么 @Remote 只校验不生成：装饰器必须贴在各自的方法上（方法体是手写的），整段生成等于
-// 把实现也生成出来。校验顺序 + 名字已经足够堵住"加了 @Remote 忘了写契约"与"删了实现留着契约"。
+// 为什么 @Remote 不生成：装饰器必须贴在各自的方法上（方法体是手写的），整段生成等于把实现也生成
+// 出来。R6.1 起宿主那一面改由 `applyRemoteMethods` 按表装配，于是第 1 张脸的**名字与顺序不再有
+// 第二份清单**可校对（那正是重构的目的）——这里校验的变成「装配确实用的是那张表」，而"表里的每个
+// 名字在原型上都有实现"由装配处的加载期断言 + 第四面用例（运行时原型）各自先一道。
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -138,24 +140,34 @@ function replaceRegion(text, begin, end, body, label) {
   return `${head}\n${body}\n    ${tail}`
 }
 
-/** 从 index.js 读 @Remote 顺序。 */
+/** 从 index.js 读手写的 @Remote 名字清单（R6.1 之后应当为空：名字与顺序只在契约表里）。 */
 export function readHostRemoteOrder(source) {
   return [...source.matchAll(/Remote\("([A-Za-z0-9_]+)"\)/g)].map((match) => match[1])
 }
 
-/** 校验宿主那一面：@Remote 的顺序与名字必须与表一致。 */
+/** 校验宿主那一面：wire 方法的名字与顺序来自同一份定义。
+ *
+ * R6.1 起宿主的装饰器不再逐方法手写（`_x = [Remote("x")]` + `__esDecorate(...)`），而是由
+ * `lib/remote-wiring.js` 的 `applyRemoteMethods` 按表装配：于是"名字清单与表不一致"这类故障
+ * 在结构上不再存在（抄错一个字的机会没了），这里改成校验「确实走的是那张表」：
+ *
+ *   · 不得残留 `Remote("…")` 字面量——残留就是两处登记同一件事；`mark()` 会对同名标记静默
+ *     去重，两处不一致时谁生效取决于执行顺序，正是最难查的那种漂移；
+ *   · 两个 gateway 各装配一次，参数分别是 MCP_METHODS / SKILL_METHODS。
+ *
+ * 「表里的名字在原型上都有实现」由 `applyRemoteMethods` 的加载期断言（不是静默兜底）
+ * 与 test/package-contract.test.mjs 的第四面用例（运行时原型）分别先一道。 */
 export function checkHostFace(source) {
-  const declared = readHostRemoteOrder(source)
-  const expected = NAMESPACES.flatMap(({ methods }) => methods.map((method) => method.method))
   const problems = []
-  if (declared.length !== expected.length) {
-    problems.push(`@Remote 数量与契约不一致：宿主 ${declared.length} / 契约 ${expected.length}`)
+  const declared = readHostRemoteOrder(source)
+  if (declared.length) {
+    problems.push(`宿主仍有 ${declared.length} 处手写 Remote("…")：名字与顺序只在 lib/rpc-contract.js 里，请用 applyRemoteMethods 按表装配`)
+    return problems
   }
-  for (const [index, name] of expected.entries()) {
-    if (declared[index] !== name) {
-      problems.push(`第 ${index + 1} 个 @Remote 应为 ${name}，实际 ${declared[index] ?? '（缺失）'}`)
-      break
-    }
+  const wired = [...source.matchAll(/applyRemoteMethods\(\s*this,\s*(MCP_METHODS|SKILL_METHODS)\b/g)].map((match) => match[1])
+  const want = ['MCP_METHODS', 'SKILL_METHODS']
+  if (wired.length !== want.length || wired.some((table, index) => table !== want[index])) {
+    problems.push(`applyRemoteMethods 的装配点应为 [${want.join(', ')}]，实际 ${wired.length ? `[${wired.join(', ')}]` : '（一处也没有）'}`)
   }
   return problems
 }

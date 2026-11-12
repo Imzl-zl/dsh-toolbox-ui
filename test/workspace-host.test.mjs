@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, stat, utimes, writeFile, mkdir } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
+import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -69,6 +70,63 @@ async function createHostFixture(patchContent = '[]\n', registryWorkspaces = [],
 }
 
 const configPath = (wsRoot) => join(wsRoot, '.dsh', 'mcp.json')
+
+// 空 / 空白 / 相对 wsPath 必须在**每个**入口显式报错。根因是 canonicalWorkspacePath 只做
+// realpathSync：Windows 上 realpathSync("") 返回宿主进程 cwd 而不抛错，于是"没传参"会静默
+// 变成"对宿主当前目录操作"（写盘入口会真的写出 .dsh/mcp.json）。
+//
+// 这里用 chdir 把宿主 cwd 换成一个空目录，并把它登记进工作区注册表——两件事缺一不可：
+// 不 chdir 就会往仓库里写；不登记就只会撞上"目标未注册"，红的样子对了、但测到的不是这处守卫。
+// 顶层 test 在同一文件内顺序执行，chdir 不会与同文件其它用例并发。
+test('empty, blank and relative wsPath are rejected by every workspace entry point', async () => {
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const hostDir = await mkdtemp(join(tmpdir(), 'dsh-mcp-ws-host-'))
+  const previousCwd = process.cwd()
+  process.chdir(hostDir)
+  // 建 fixture 也在 try 里：它抛错时 cwd 不能留在临时目录（否则同文件后续用例全跟着跑偏）。
+  let fixture
+  try {
+    fixture = await createHostFixture('[]\n', [{ title: 'proj-a' }, { title: 'host-cwd', path: realpathSync(process.cwd()) }])
+    const gateway = { ctx: fixture.ctx }
+    const call = (method, payload) => McpManagerGateway.prototype[method].call(gateway, payload)
+    // 每个入口都要能走到"校验 wsPath"那一步：payload 的其余字段一律给足，否则报错可能来自
+    // 别的校验（例如 ids 不是数组），把"没拦住空路径"掩盖成"拦住了"。
+    const entries = [
+      ['addWorkspaceServer', (wsPath) => call('addWorkspaceServer', { wsPath, spec: { name: 'probe', transport: 'stdio', command: 'node' } })],
+      ['updateWorkspaceServer', (wsPath) => call('updateWorkspaceServer', { wsPath, spec: { name: 'probe', transport: 'stdio', command: 'node' } })],
+      ['removeWorkspaceServer', (wsPath) => call('removeWorkspaceServer', { wsPath, name: 'probe' })],
+      ['reconnectWorkspaceServer', (wsPath) => call('reconnectWorkspaceServer', { wsPath, name: 'probe' })],
+      ['setWorkspaceExclude', (wsPath) => call('setWorkspaceExclude', { wsPath, serverName: 'probe', hidden: true })],
+      ['installWorkspaceBuiltins', (wsPath) => call('installWorkspaceBuiltins', { wsPath, ids: ['exa'] })],
+      ['copyWorkspaceServers (target)', (wsPath) => call('copyWorkspaceServers', { from: fixture.wsRoot, to: wsPath })],
+      ['copyWorkspaceServers (source)', (wsPath) => call('copyWorkspaceServers', { from: wsPath, to: fixture.wsRoot })],
+      ['previewWorkspaceCopy (target)', (wsPath) => call('previewWorkspaceCopy', { from: fixture.wsRoot, to: wsPath })],
+      ['previewWorkspaceCopy (source)', (wsPath) => call('previewWorkspaceCopy', { from: wsPath, to: fixture.wsRoot })],
+      ['previewWorkspaceImport', (wsPath) => call('previewWorkspaceImport', { wsPath, json: { mcpServers: {} } })],
+      ['importWorkspaceJson', (wsPath) => call('importWorkspaceJson', { wsPath, json: { mcpServers: { probe: { command: 'node' } } } })],
+      ['exportWorkspaceJson', (wsPath) => call('exportWorkspaceJson', { wsPath })],
+      ['revealWorkspaceServer', (wsPath) => call('revealWorkspaceServer', { wsPath, name: 'probe', field: 'args' })],
+      ['getWorkspaceView', (wsPath) => call('getWorkspaceView', { wsPath })],
+      ['workspaceToolLoading', (wsPath) => call('workspaceToolLoading', { wsPath })],
+      ['setWorkspaceToolLoading', (wsPath) => call('setWorkspaceToolLoading', { wsPath, policy: null })],
+    ]
+    for (const [label, invoke] of entries) {
+      for (const wsPath of ['', '   ', 'relative/proj']) {
+        await assert.rejects(
+          invoke(wsPath),
+          /缺少 workspace 路径|必须是绝对路径/,
+          `${label} 必须拒绝 wsPath=${JSON.stringify(wsPath)}`,
+        )
+        // 拒绝必须发生在落盘之前：宿主 cwd 里连 .dsh/ 都不该出现。
+        assert.deepEqual(await readdir(hostDir), [], `${label} 不得在宿主 cwd 落盘（wsPath=${JSON.stringify(wsPath)}）`)
+      }
+    }
+  } finally {
+    process.chdir(previousCwd)
+    if (fixture) await fixture.cleanup()
+    await rm(hostDir, { recursive: true, force: true })
+  }
+})
 
 test('listWorkspaces enumerates registered workspaces with server counts', async () => {
   const { McpManagerGateway } = await import('../lib/index.js')
@@ -584,6 +642,86 @@ test('previewWorkspaceCopy reports the plan without writing anything', async () 
     const virgin = fixture.extraWorkspaces['proj-c']
     await McpManagerGateway.prototype.previewWorkspaceCopy.call(gateway, { from: fixture.wsRoot, to: virgin })
     await assert.rejects(readFile(configPath(virgin), 'utf8'), /ENOENT/)
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('exportGlobalJson exports every managed profile entry in the same shape as a project export', async () => {
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const fixture = await createHostFixture('[]\n', [{ title: 'proj-a' }])
+  try {
+    const gateway = { ctx: fixture.ctx }
+    // 用**生产写路径**造条目，不手写 YAML：patch 的行格式由 makeEntry 决定，手写等于猜格式，
+    // 而猜错时用例会红在解析而不是红在被测行为上。
+    await McpManagerGateway.prototype.add.call(gateway, {
+      name: 'alpha', transport: 'stdio', command: 'node', args: ['-y', 'alpha-mcp'],
+      env: { TOKEN: 'literal-secret' }, toolCallTimeoutMs: 30000,
+    })
+    await McpManagerGateway.prototype.add.call(gateway, {
+      name: 'beta', transport: 'streamable-http', url: 'https://example.com/mcp',
+      headers: { Authorization: 'Bearer literal-token' }, failOnStartupError: true,
+    })
+
+    const exported = await McpManagerGateway.prototype.exportGlobalJson.call(gateway)
+    assert.equal(exported.count, 2, '两条 managed 条目都要导出')
+    assert.deepEqual(exported.excluded, [], '全局层没有 exclude 这个概念（exclude 是项目屏蔽全局 MCP）')
+    assert.ok(!exported.json.includes('!!js'), '导出的必须是文件形态，不是内部 !!js 表达式')
+
+    const doc = JSON.parse(exported.json)
+    // 键集合单独钉：下面的"同形状"比较是生产 vs 生产，某一类条目整体蒸发时两边会一起少。
+    assert.deepEqual(Object.keys(doc.mcpServers).sort(), ['alpha', 'beta'])
+    // stdio 分支：字段与 .dsh/mcp.json 逐字一致（同一 specToMcpEntry）。
+    assert.deepEqual(doc.mcpServers.alpha, {
+      command: 'node',
+      args: ['-y', 'alpha-mcp'],
+      env: { TOKEN: 'literal-secret' },
+      toolCallTimeoutMs: 30000,
+    })
+    // http 分支：type 显式标注 + headers。
+    assert.deepEqual(doc.mcpServers.beta, {
+      type: 'http',
+      url: 'https://example.com/mcp',
+      headers: { Authorization: 'Bearer literal-token' },
+      failOnStartupError: true,
+    })
+
+    // **已知代价，必须钉住而不是假装没有**：profile patch 里存的是**求值后**的实际值
+    // （toMcpClientConfig 用 evaluateEnvExpression），所以全局导出会含字面凭据——
+    // 而项目导出保留 \`${VAR}\` 模板。两者不可同日而语，界面上的警告文案也必须不同。
+    // 这条断言的作用是：将来若有人把 patch 改成存表达式，这里会红，提醒同步改文案。
+    assert.ok(exported.json.includes('literal-secret'), '面板添加的条目在 patch 里已是实际值，导出因此是明文')
+
+    // 同形状：把同样的两条写进一个项目文件再导出，键集合必须一致（全局没有 path 字段）。
+    const projectExport = await McpManagerGateway.prototype.exportWorkspaceJson.call(gateway, { wsPath: fixture.wsRoot })
+    const globalKeys = Object.keys(exported).filter((key) => key !== 'path').sort()
+    const projectKeys = Object.keys(projectExport).filter((key) => key !== 'path').sort()
+    assert.deepEqual(globalKeys, projectKeys, '两个导出的返回形状必须对称，只差"有没有项目路径"')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('exportGlobalJson is empty-safe and round-trips through the paste import preview', async () => {
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const fixture = await createHostFixture('[]\n', [{ title: 'proj-a' }])
+  try {
+    const gateway = { ctx: fixture.ctx }
+    // 空 profile：不是错误，就是"零条"。界面据此显示"共 0 个 MCP"，不该抛。
+    const empty = await McpManagerGateway.prototype.exportGlobalJson.call(gateway)
+    assert.equal(empty.count, 0)
+    assert.deepEqual(JSON.parse(empty.json), { mcpServers: {} })
+
+    await McpManagerGateway.prototype.add.call(gateway, { name: 'alpha', transport: 'stdio', command: 'node' })
+    const exported = await McpManagerGateway.prototype.exportGlobalJson.call(gateway)
+    // 能被**粘贴导入**吃回去：这是"格式与 .dsh/mcp.json 一致"的唯一可执行证据
+    //（文案说一致没有意义，往返一致才有意义）。
+    const preview = await McpManagerGateway.prototype.previewImport.call(gateway, { json: exported.json })
+    // 导出再导入回来应当是**同名更新**，不是"新增"——那恰好说明导出的条目与现有配置同名同义
+    // （名字、传输、字段都对得上）。判成 added 反而是导出内容与原来不一致的信号。
+    assert.deepEqual(preview.updated, ['alpha'], `往返必须识别为同名更新：${JSON.stringify(preview)}`)
+    assert.deepEqual(preview.added, [], '同一条 roundtrip 不该被当成新条目')
+    assert.deepEqual(preview.conflicts || [], [], '自己导出的条目不会与别人撞名')
   } finally {
     await fixture.cleanup()
   }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { installAgentRuntime } from '../lib/workspace-runtime.js'
 import { projectMcpServers } from '../lib/workspace-runtime.js'
@@ -215,7 +216,7 @@ async function createRuntimeFixture({ deferTools = true, extraServers = {}, idle
   const globalSchemas = [{ name: 'mcp__github__a' }, { name: 'mcp__exa__b' }]
   // 读面调用账本：宿主里 `get(name, scope)` 就是 `view(scope).visible.get(name)`，所以逐工具
   // get() 等于把整张表重建 N 次。替身必须把这几种重建暴露出来，否则这类 N+1 在测试里不可见。
-  const toolReads = { views: [], schemas: 0, gets: 0 }
+  const toolReads = { views: [], schemas: 0, globalSchemas: 0, gets: 0 }
   let failToolReads = false
   // 真宿主的 register() 会同步派发 tools/change；替身默认关掉（否则每个用例都要处理重入），
   // 需要验证这条时序的用例显式打开。
@@ -255,6 +256,8 @@ async function createRuntimeFixture({ deferTools = true, extraServers = {}, idle
       },
       schemas(scope) {
         toolReads.schemas += 1
+        // 全局视图（scope 缺省）单独计数：R4 要区分「枚举全局清单一次」与「按作用域读」。
+        if (scope === undefined) toolReads.globalSchemas += 1
         if (failToolReads) throw new Error('host tool view unavailable')
         return [...this.view(scope).visible.values()].map((definition) => this.schemaOf(definition, true))
       },
@@ -297,7 +300,7 @@ async function createRuntimeFixture({ deferTools = true, extraServers = {}, idle
     resetRegisterCalls() { registerCalls.length = 0 },
     setGlobalTools(names) { globalSchemas.splice(0, globalSchemas.length, ...names.map((name) => ({ name }))) },
     failToolReads(on) { failToolReads = on === true },
-    resetToolReads() { toolReads.views.length = 0; toolReads.schemas = 0; toolReads.gets = 0 },
+    resetToolReads() { toolReads.views.length = 0; toolReads.schemas = 0; toolReads.globalSchemas = 0; toolReads.gets = 0 },
     scopedViewReads() { return toolReads.views.filter((scope) => scope !== undefined) },
     globalViewReads() { return toolReads.views.filter((scope) => scope === undefined) },
     sessionDisposers,
@@ -1849,3 +1852,309 @@ test('a workspace registry failure is reported once instead of silently showing 
   }
 })
 
+
+// R2：诊断记录没有寿命——删除 / 禁用某条目后，横幅仍点名它，用户无法消除。
+// 修法只在**读取端**按当前配置过滤：记录与清除逻辑一行不动（清者仍然只有「同一条目再次挂载
+// 成功」），所以这里既要断言视图不再点名，也要断言记录本身还在——后者证明这不是第二真相源。
+test('R2: stale diagnostics are filtered by the current config at read time, not cleared on write', async () => {
+  const rt = await import('../lib/workspace-runtime.js')
+  const { McpManagerGateway } = await import('../lib/index.js')
+  // 默认 exclude=['github'] 是 restrict 路径的前置：deny 为空时 applyWorkspaceRestrict 直接返回，
+  // 根本不会走到抛错分支（第一版写成 exclude: []，于是这条断言测的是空气）。
+  const fixture = await createRuntimeFixture()
+  try {
+    // mutationResult 要定位 profile（include 条目），删/改的 RPC 才会正常返回；
+    // entries() 每次返回新数组，换成稳定数组后推入的条目才可见。
+    const rootConfig = join(fixture.wsRoot, 'cordis.yml')
+    await writeFile(rootConfig, '[]\n')
+    await writeFile(join(fixture.wsRoot, 'cordis.patch.yml'), '[]')
+    const entries = fixture.ctx.loader.entries()
+    entries.push({ options: { id: 'include', name: 'cordis:include', config: { path: pathToFileURL(rootConfig).href } } })
+    fixture.ctx.loader.entries = () => entries
+    // 真实失败路径：宿主拿不到 mcp-client。不是手工往表里塞一条记录。
+    const originalImport = fixture.ctx.loader.import
+    fixture.ctx.loader.import = async (name) => {
+      if (name === '@deepseek-ai/dsh-mcp-client') throw new Error('模拟：宿主未提供 mcp-client')
+      return originalImport(name)
+    }
+    // 同类：restrict 对齐失败。exclude 默认含 github，所以 deny 非空、走真实抛错分支。
+    fixture.agentCtx.tools.restrict = () => { throw new Error('模拟：restrict 不可用') }
+
+    rt.installAgentRuntime(fixture.ctx)
+    const created = await fixture.agentsService.create({ setup: undefined })
+    await created.setup(fixture.agentCtx, fixture.agentCtx.sessionAgent)
+
+    const view = () => McpManagerGateway.prototype.getWorkspaceView.call({ ctx: fixture.ctx }, { wsPath: fixture.wsRoot })
+    const names = (rows) => rows.map((row) => row.serverName)
+
+    // 前置：两条真实故障都被记录下来，并且**出现在视图里**。
+    assert.ok(rt.workspaceMountErrorsView(fixture.wsRoot).length === 1)
+    assert.ok(rt.workspaceRestrictErrorView(fixture.wsRoot))
+    assert.deepEqual(names((await view()).mountErrors), ['db'])
+    assert.ok((await view()).restrictError)
+    // 这个夹具里挂载已经失败，连接不可能是 ACTIVE，因此造不出真实的作用域故障；
+    // scopeErrors 与 mountErrors 共用同一个「当前启用的条目」集合，规则相同。
+    assert.deepEqual((await view()).scopeErrors, [])
+
+    // 禁用 db：配置里还在，但已经不会被挂载，点名它就是撒谎。
+    await McpManagerGateway.prototype.updateWorkspaceServer.call({ ctx: fixture.ctx }, {
+      wsPath: fixture.wsRoot, spec: { name: 'db', transport: 'stdio', command: 'psql', disabled: true },
+    })
+    assert.deepEqual((await view()).mountErrors, [], '禁用后不得再点名')
+    assert.ok((await view()).restrictError, '只过滤失效的那一类，不许一刀切掉所有诊断')
+    assert.equal(rt.workspaceMountErrorsView(fixture.wsRoot).length, 1, '记录端不变：禁用不清表')
+
+    // 重新启用 → 真实挂载再次失败 → 诊断必须回来（过滤器不是单向隐藏）。
+    await McpManagerGateway.prototype.updateWorkspaceServer.call({ ctx: fixture.ctx }, {
+      wsPath: fixture.wsRoot, spec: { name: 'db', transport: 'stdio', command: 'psql' },
+    })
+    assert.deepEqual(names((await view()).mountErrors), ['db'])
+
+    // 删除 → 视图不再点名，记录仍在（证明是读取端过滤）。
+    const removed = await McpManagerGateway.prototype.removeWorkspaceServer.call({ ctx: fixture.ctx }, { wsPath: fixture.wsRoot, name: 'db' })
+    assert.equal(removed.persisted, 'applied')
+    assert.deepEqual((await view()).mountErrors, [], '删除后不得再点名')
+    assert.equal(rt.workspaceMountErrorsView(fixture.wsRoot).length, 1, '删除不清表：清除者仍然只有「再次挂载成功」')
+
+    // restrictError：deny 指向的全局条目都不在了 ⇒ 这条告警已经没有可作用的对象。
+    // 只留 include 条目：profile 定位仍需要一个锚点，否则 readPatch 先抛，测到的就不是过滤。
+    fixture.ctx.loader.entries = () => entries.filter((entry) => entry.options.id === 'include')
+    assert.equal((await view()).restrictError, null, 'deny 涉及的条目全消失后不得再报')
+    assert.ok(rt.workspaceRestrictErrorView(fixture.wsRoot), '记录仍在：读取端过滤，不是第二真相源')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+// R4：全局工具清单每次面板轮询都被整份重算——`ctx.tools.schemas()` 对每个工具的 parameters
+// 深拷贝一遍（宿主 schemaOf(detach=true)），再逐台 server 做 JSON.stringify + SHA-256。
+// 项目侧早有代次缓存（连接哨兵），全局侧没有；项目页每 5s 还要再付一份。
+// 代次由 `tools/change` 定义：宿主在每次 register/dispose/restrict 时**同步**派发它
+// （dsh-scope 的 ScopedLayers.effect），所以「代次变了」就是这个清单可能变了的唯一信号。
+// list() 要走 profile 组合（managedState → readPatch），夹具补一个 include 条目当锚点。
+async function makeProfileReadable(fixture) {
+  const rootConfig = join(fixture.wsRoot, 'cordis.yml')
+  await writeFile(rootConfig, '[]\n')
+  await writeFile(join(fixture.wsRoot, 'cordis.patch.yml'), '[]')
+  const entries = fixture.ctx.loader.entries()
+  entries.push({ options: { id: 'include', name: 'cordis:include', config: { path: pathToFileURL(rootConfig).href } } })
+  fixture.ctx.loader.entries = () => entries
+}
+
+test('R4: 同一代次内工具清单只枚举一次，tools/change 之后必须重新枚举', async () => {
+  const rt = await import('../lib/workspace-runtime.js')
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const fixture = await createRuntimeFixture()
+  try {
+    await makeProfileReadable(fixture)
+
+    rt.installAgentRuntime(fixture.ctx)
+    const created = await fixture.agentsService.create({ setup: undefined })
+    await created.setup(fixture.agentCtx, fixture.agentCtx.sessionAgent)
+
+    const gateway = { ctx: fixture.ctx }
+    const list = () => McpManagerGateway.prototype.list.call(gateway)
+    const view = () => McpManagerGateway.prototype.getWorkspaceView.call(gateway, { wsPath: fixture.wsRoot })
+
+    // 预热一轮：连接、作用域判定这些一次性读取不属于稳态轮询。
+    await list()
+    await view()
+
+    // 冷读：一次真实工具变更之后的第一轮必须重算，且同一代次里的第二次直接复用那一份。
+    // （这正是面板的真实形状：事件 → 下一次轮询重算 → 之后每 5s 都命中。）
+    fixture.setGlobalTools(['mcp__github__only'])
+    await fixture.handlers['tools/change']()
+    fixture.resetToolReads()
+    const cold = await list()
+    await list()
+    assert.equal(fixture.toolReads.globalSchemas, 1, '同一代次里连续两次 list 只该枚举一次全局清单')
+    assert.equal(fixture.toolReads.schemas, 1, '这条路径上不该有别的 schemas 读')
+    assert.equal(cold.servers.find((server) => server.serverName === 'github').toolCount, 1, '必须是新数据')
+    assert.equal(cold.servers.find((server) => server.serverName === 'exa').toolCount, 0, '旧条目必须归零')
+
+    // 稳态：代次没变，面板每 5s 的两次调用都不该再枚举全局清单。
+    fixture.resetToolReads()
+    await list()
+    await view()
+    assert.equal(fixture.toolReads.globalSchemas, 0, '稳态轮询不该重算全局清单（项目页那份也一样）')
+
+    // 反向：代次必须真的前进。同一次变更如果不派发事件，缓存就会一直返旧值——
+    // 这条断言钉住「失效信号来自 tools/change，而不是某种自愈」。
+    fixture.setGlobalTools(['mcp__github__a', 'mcp__github__b'])
+    fixture.resetToolReads()
+    const byEvent = await list()
+    assert.equal(fixture.toolReads.globalSchemas, 0, '没有事件时代次不变（这是宿主的契约，不是我们的兜底）')
+    assert.equal(byEvent.servers.find((server) => server.serverName === 'github').toolCount, 1, '缓存仍在服务旧值')
+    await fixture.handlers['tools/change']()
+    const afterEvent = await list()
+    assert.equal(afterEvent.servers.find((server) => server.serverName === 'github').toolCount, 2, '事件之后必须看到新工具集')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+// R4 的另一半：`getWorkspaceView` 曾经给**每台全局服务器**各传一个
+// `(name) => this.deferStateOf(name)`，而 deferStateOf 的默认路径会重新收集一次可见工具
+// （`collectAvailableTools` → `ctx.tools.schemas()` 全量深拷贝）。735 工具 × 20 台 ≈ 2s/轮询，
+// 而 list 早就按「一次枚举、每行复用」写了——同一个需求两套实现，其中一套在 5s 路径上。
+test('R4: getWorkspaceView 与 list 共用同一次可见工具收集', async () => {
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const fixture = await createRuntimeFixture()
+  try {
+    await makeProfileReadable(fixture)
+    // 用真方法 + 只对 collectAvailableTools 计数：真正「每行各收一次」的位置就在那里。
+    const gateway = { ctx: fixture.ctx }
+    for (const method of ['collectAvailableTools', 'deferStateOf', 'loadingPolicy']) {
+      gateway[method] = McpManagerGateway.prototype[method].bind(gateway)
+    }
+    const realCollect = gateway.collectAvailableTools
+    let collected = 0
+    gateway.collectAvailableTools = () => { collected += 1; return realCollect() }
+
+    await McpManagerGateway.prototype.list.call(gateway)
+    assert.equal(collected, 1, 'list 必须一次枚举、每行复用')
+    collected = 0
+    await McpManagerGateway.prototype.getWorkspaceView.call(gateway, { wsPath: fixture.wsRoot })
+    assert.equal(collected, 1, '项目页也必须只收集一次（夹具里有 2 台全局服务器，逐行重收会是 2）')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+// ---------- R7：模块级可变单例的 owner ----------
+//
+// 这一组只问一个问题：**插件卸载之后，本 app root 留下的东西还在不在？**
+// 现状（未修）的证据：诊断表是模块级 Map、键是项目路径，而 `cleanup()` 只清连接与会话记录，
+// 于是"谁记录"与"谁清除"不是同一个 owner。后果 R2 已经量化过一次：删除/禁用之后面板继续
+// 点名一个已经不存在的失败。这里把同一件事钉在**卸载**这条路径上。
+//
+// 为什么用 `fixture.effects` 触发卸载：cordis 卸载插件 fiber 时执行的就是这些 effect 的
+// disposer（`installAgentRuntime` 把 cleanup 登记在那里）。夹具的 ctx 是纯对象、没有 fiber，
+// 所以跑 disposer 是这条路径上**等价**的动作——不是模拟内部实现，而是执行它真正注册的回调。
+async function unloadFixture(fixture) {
+  for (const dispose of [...fixture.effects].reverse()) {
+    try { await dispose() } catch { /* 卸载路径允许个别 disposer 抛错，不掩盖主断言 */ }
+  }
+}
+
+test('卸载插件后，挂载失败记录必须消失（记录者与清除者是同一个 owner）', async () => {
+  const rt = await import('../lib/workspace-runtime.js')
+  const fixture = await createRuntimeFixture()
+  try {
+    await writeFile(join(fixture.wsRoot, '.dsh', 'mcp.json'), JSON.stringify({
+      mcpServers: { db: { command: 'psql', failOnStartupError: true } },
+      exclude: [],
+    }, null, 2))
+    fixture.ctx.loader.import = async () => { throw new Error('模拟：宿主未提供 mcp-client') }
+    rt.installAgentRuntime(fixture.ctx)
+    const created = await fixture.agentsService.create({ setup: undefined })
+    await created.setup(fixture.agentCtx, fixture.agentCtx.sessionAgent)
+
+    const before = rt.workspaceMountErrorsView(fixture.wsRoot)
+    assert.equal(before.length, 1, `前置：必须真的记下一笔挂载失败，否则下面的断言是空转（实际 ${JSON.stringify(before)}）`)
+
+    await unloadFixture(fixture)
+
+    assert.deepEqual(rt.workspaceMountErrorsView(fixture.wsRoot), [],
+      '插件已卸载，这条挂载失败没有 owner 了：留着它的后果是 HMR 重装后面板继续点名一个"历史上失败过、现在不属于任何实例"的服务器')
+    // 更强的一条：不只是诊断表，本实例的**全部**可变状态都回到空白（代次、容器、owner 登记）。
+    // 少了这一条，"只清了诊断、连接表与缓存还留着"会一直绿——而那正是 HMR 后旧连接被新会话
+    // 复用的形态（已死 fiber、零工具、永不回收）。
+    const facts = rt.hostStateFacts(fixture.ctx)
+    for (const [field, value] of Object.entries(facts)) {
+      if (field === "epoch") { assert.equal(value, 0, "工具代次必须回到起点"); continue }
+      assert.ok(value === 0 || value === false, `卸载后 ${field} 必须归零/为空，实际 ${JSON.stringify(value)}：${JSON.stringify(facts)}`)
+    }
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('卸载插件后，作用域故障与 restrict 记录同样不留（诊断表只有一个 owner）', async () => {
+  const rt = await import('../lib/workspace-runtime.js')
+  // 宿主工具视图读失败 → 记 scopeError（这一类失败原本只能表现为"0 工具"）。
+  // 触发方式照抄上面那条既有用例：先让投射就位，再关掉读面，然后推一次 tools/change。
+  const fixture = await createRuntimeFixture()
+  try {
+    rt.installAgentRuntime(fixture.ctx)
+    const created = await fixture.agentsService.create({ setup: undefined })
+    await created.setup(fixture.agentCtx, fixture.agentCtx.sessionAgent)
+    await fixture.connectAll()
+    fixture.failToolReads(true)
+    await fixture.handlers['tools/change']()
+
+    const before = rt.workspaceScopeErrorsView(fixture.wsRoot)
+    assert.ok(before.length > 0, `前置：必须真的记下一笔作用域故障（实际 ${JSON.stringify(before)}）`)
+
+    await unloadFixture(fixture)
+
+    assert.deepEqual(rt.workspaceScopeErrorsView(fixture.wsRoot), [],
+      '卸载后作用域故障记录仍是脏的，同样会在重装后误导面板')
+    assert.equal(rt.workspaceRestrictErrorView(fixture.wsRoot), null,
+      'restrict 失败记录也必须随 owner 一起清')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('工具代次是 per app root 的：两个实例各自的代次互不推进', async () => {
+  const rt = await import('../lib/workspace-runtime.js')
+  // 代次是"本实例的 tools/change 计数"，它是 R4/R5 两个缓存的键。若它是模块级 let，
+  // 两个 app 同进程（桌面端多窗口 / 测试并行）会互相把对方的缓存打穿——症状是"明明没变，
+  // 每次轮询都全量重算"，只在多实例下出现，单实例测试永远看不见。
+  const a = await createRuntimeFixture()
+  const b = await createRuntimeFixture()
+  try {
+    rt.installAgentRuntime(a.ctx)
+    rt.installAgentRuntime(b.ctx)
+    const generationA = rt.toolsGenerationOf(a.ctx)
+    const generationB = rt.toolsGenerationOf(b.ctx)
+    assert.equal(typeof generationA, 'number', '前置：装了挂载器之后代次必须可信')
+    assert.equal(generationA, generationB, '两个实例刚装好时应当从各自的起点开始（同值不代表共享，只看下面）')
+
+    a.handlers['tools/change']?.()
+    // noteToolsChanged 是合并/防抖的，直接观察它带来的代次变化；若实现是全局计数器，
+    // B 的代次会跟着 A 一起前进。
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    const afterA = rt.toolsGenerationOf(a.ctx)
+    const afterB = rt.toolsGenerationOf(b.ctx)
+    assert.ok(afterA > generationA, `A 的 tools/change 必须推进 A 自己的代次（${generationA} → ${afterA}）`)
+    assert.equal(afterB, generationB, `B 没有被任何变更碰过，代次不得前进（${generationB} → ${afterB}）：模块级计数器会把两个实例的缓存一起打穿`)
+  } finally {
+    await a.cleanup()
+    await b.cleanup()
+  }
+})
+
+
+test("per-root 的可变状态只住在 HostState 里，不得再长出模块级容器", async () => {
+  // R7 的防回退闸：这十份状态以前是模块级 WeakMap/WeakMap-of-Map，键是 app root。
+  // 它们能"看起来没问题"很久——因为单实例测试里模块级与 per-instance 完全等价。
+  // 一旦有人为了省事把其中任何一个改回模块级，代价不会立刻显形：
+  //   · 代次回到全局 → 同进程另一个实例的每次变更都打穿本实例的缓存（第 3 条用例已量化）；
+  //   · 容器回到模块级 → 卸载后不清，HMR 重装会复用上一代留下的条目。
+  const source = await readFile(new URL("../lib/workspace-runtime.js", import.meta.url), "utf8")
+  // 解析出所有**模块级声明名**（不拼动态正则：模板字符串里的反斜杠转义易错，
+  // 实测把 \\b 写成退格字符后整套用例直接 SyntaxError，而错误信息指向 flags）。
+  const declaredAtModuleScope = new Set(
+    [...source.matchAll(/^(?:const|let|var) ([A-Za-z_$][\w$]*)/gm)].map((match) => match[1]),
+  )
+  for (const name of [
+    "sharedConnections",
+    "agentProjectSlotsByRoot",
+    "activeGenerationByRoot",
+    "globalSchemasCache",
+    "toolInventoryCache",
+    "denyCacheByRoot",
+    "scopeModulePromises",
+    "toolsChangeFlushByRoot",
+    "warnedDiagnostics",
+    "toolsEpoch",
+  ]) {
+    assert.equal(declaredAtModuleScope.has(name), false,
+      `${name} 不得再是模块级状态：它是 per app root 的，住在 lib/host-state.js 的 HostState 里`)
+  }
+  // 反向：HostState 必须真的被用起来（少了这一半，“删掉所有状态”也能让上面几条变绿）。
+  assert.ok(source.includes('import { HostState } from "./host-state.js"'), 'workspace-runtime 必须从 host-state.js 引入 HostState')
+  assert.ok(source.includes("hostStateOf(ctx).dispose()"), "cleanup 必须调用 HostState.dispose（一处清）")
+})

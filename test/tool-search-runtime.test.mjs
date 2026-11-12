@@ -150,6 +150,43 @@ test('viewRevision: 内容不变 revision 不变，内容或配置变则变', ()
   assert.notEqual(viewRevision(schemas, config), viewRevision(schemas, moreServers), 'serverNames 变了必须换 revision')
 })
 
+test('viewRevision: 同一代次复用内容指纹，代次前进后才重读工具内容', () => {
+  // 组装期**每个请求**都会算一次 revision，而内容指纹是其中唯一贵的一项（735 工具 ~13.5ms），
+  // 它保护的目录文本才 ~11ms。所以内容指纹按代次复用；反向要求同样重要：代次前进之后必须
+  // 重读，否则内容变了还延用旧 revision——那是静默失配。
+  // 用 Proxy 观察"有没有真的序列化工具内容"，不靠计时（计时在 CI 上只会变成 flaky）。
+  let generation = 1
+  const config = resolveRuntimeConfig({
+    deferServers: ['jshook'], serverNames: ['jshook'],
+    toolsGeneration: () => generation,
+  })
+  const touches = { count: 0 }
+  const parameters = new Proxy({ type: 'object', properties: { q: { type: 'string' } } }, {
+    get(target, key, receiver) { touches.count += 1; return Reflect.get(target, key, receiver) },
+    ownKeys(target) { touches.count += 1; return Reflect.ownKeys(target) },
+    getOwnPropertyDescriptor(target, key) { touches.count += 1; return Reflect.getOwnPropertyDescriptor(target, key) },
+  })
+  const schemas = [{ name: 'mcp__jshook__a', description: 'a', parameters }]
+  const agent = {}
+
+  const first = viewRevision(schemas, config, agent)
+  assert.ok(touches.count > 0, '第一次必须真的序列化工具内容')
+  touches.count = 0
+  assert.equal(viewRevision(schemas, config, agent), first, '同一代次必须得到同一个 revision')
+  assert.equal(touches.count, 0, '同一代次内不得再碰工具内容（内容指纹必须命中缓存）')
+
+  generation += 1
+  touches.count = 0
+  viewRevision(schemas, config, agent)
+  assert.ok(touches.count > 0, '代次前进后必须重读（否则内容变了仍返回旧 revision）')
+
+  // 名字集合是另一半：准入 toolSet 逐回合变、且不派发 tools/change，代次盖不住它。
+  touches.count = 0
+  const renamed = [...schemas, { name: 'mcp__jshook__b', description: 'b', parameters: { type: 'object' } }]
+  assert.notEqual(viewRevision(renamed, config, agent), first, '名字集合变了 revision 必须变')
+  assert.ok(touches.count > 0, '名字集合变了必须重算内容指纹')
+})
+
 test('buildToolSearchView: 纯函数；per-server 与聚合门槛都不存在（3 工具服务器也启用）', () => {
   // B1/C3：两道门槛整个删掉了。视图里的 `managed` 就是"列入 defer 的服务器全部工具"，
   // 不再有"低于阈值时清空"这一步——用户勾了就生效。
@@ -212,6 +249,11 @@ test('catalogSectionText: 只列工具名、按 code-unit 名序、字符预算�
   const nameChars = fullLines.reduce((sum, line) => sum + line.length + 1, 0)
   const tight = catalogSectionText(catalog, resolveRuntimeConfig({ maxCatalogChars: Math.floor(nameChars * 0.5) }))
   assert.ok(tight.truncated > 0, '预算收紧后必须真的少列')
+  // R13a：体检读数必须自洽（列出 + 被砍 = 总数）。三个数来自同一次分配，不许各自算。
+  assert.equal(full.listed, full.total, '不截断时列出的就是全部')
+  assert.equal(tight.listed + tight.truncated, tight.total, '列出 + 被砍必须等于总数')
+  assert.ok(tight.listed < full.listed, '预算收紧后列出的名字必须变少')
+  assert.equal(tight.total, full.total, '总数不随预算变：池子大小是事实，不是预算的函数')
   assert.ok(tight.text.includes('more deferred tools are not listed here'), '截断必须提示还有多少')
   const shown = tight.text.split('\n').filter((line) => line.startsWith('- '))
   assert.deepEqual(shown, fullLines.slice(0, shown.length), '少列是从尾部整行减少，不是打散')
@@ -226,8 +268,10 @@ test('目录预算：不设 maxCatalogChars 就**不截断**（默认行为，�
   const config = resolveRuntimeConfig({})
   assert.equal(config.maxCatalogChars, undefined, '缺省必须是"不设"，不是某个数字')
 
-  const { text, truncated } = catalogSectionText(catalog, config)
+  const { text, truncated, listed, total } = catalogSectionText(catalog, config)
   assert.equal(truncated, 0, '没设上限就一个名字都不许砍')
+  assert.equal(listed, 600, 'listed 必须等于池子里的数量')
+  assert.equal(total, 600, 'total 必须等于池子里的数量')
   assert.equal(text.split('\n').filter((line) => line.startsWith('- ')).length, 600, '600 个名字全部在目录里')
   assert.ok(text.length > 12500, '这个夹具必须真的超过旧默认预算')
 })
@@ -310,6 +354,10 @@ test('catalogSectionText: 分组形态 = 组头 + 裸名，名字行比全名形
   const flat = catalogSectionText(view.catalog, config) // 退化形态：没有归属信息
 
   assert.equal(grouped.truncated, 0)
+  // R13a 的三个数必须同源。这里刻意走**分组形态**：生产调用点（catalogTextFor）总带 ownerOf，
+  // 只在无归属的退化路径上断言 total，等于放过了真实那条路（曾经就是 catalog.length ⇒ undefined）。
+  assert.equal(grouped.total, 6, 'total 必须等于池子里的数量（分组形态同样要算）')
+  assert.equal(grouped.listed, 6, 'listed 必须等于池子里被列出的数量')
   assert.ok(grouped.text.includes('### srv · 6 tools'), grouped.text)
   assert.equal(grouped.text.includes('mcp__srv__t0'), false, '分组形态不得再写全名')
   for (let i = 0; i < 6; i++) assert.ok(grouped.text.includes(`- t${i}`), `裸名 t${i} 必须在`)
@@ -351,9 +399,10 @@ test('catalogSectionText: 预算不足时每组都露头，且未列出的总数
   const full = catalogSectionText(view.catalog, resolveRuntimeConfig({ maxCatalogChars: 100000 }), { ownerOf: view.ownerOf })
   const fullNameChars = full.text.split('\n').filter((line) => line.startsWith('- ')).reduce((sum, line) => sum + line.length + 1, 0)
   const budget = Math.floor(fullNameChars * 0.5)
-  const { text, truncated } = catalogSectionText(view.catalog, resolveRuntimeConfig({ maxCatalogChars: budget }), { ownerOf: view.ownerOf })
+  const { text, truncated, listed, total } = catalogSectionText(view.catalog, resolveRuntimeConfig({ maxCatalogChars: budget }), { ownerOf: view.ownerOf })
 
   assert.equal(text.split('\n').filter((line) => line.startsWith('### ')).length, 3, '每台服务器都要露头（不许整台消失）')
+  assert.equal(listed + truncated, total, '分组形态：列出 + 被砍必须等于待发现总数')
   assert.ok(truncated > 0, '预算砍半必须真的少列')
   const nameUsed = text.split('\n').filter((line) => line.startsWith('- ')).reduce((sum, line) => sum + line.length + 1, 0)
   assert.ok(nameUsed <= budget, `名字行不得超预算：${nameUsed} > ${budget}`)
@@ -1403,6 +1452,10 @@ test('目录被预算截断时记一次日志，同一 revision 不刷屏', asyn
     assert.ok(text.includes('not listed'), '前提自检：这一版真的被截断了')
     assert.equal(truncationWarns().length, 1, '截断必须记账')
     assert.ok(String(truncationWarns()[0]).includes('maxCatalogChars'), '日志要带上当前预算，用户才知道调哪个')
+    // 被砍掉的名字**不在目录里** ⇒ 模型不知道它，`select:` 无从写起。日志不得声称"仍能用 select: 搜到"
+    // （同一条错误说法在界面文案里已经纠正过，这里曾经漏改）。
+    assert.doesNotMatch(String(truncationWarns()[0]), /仍可[^；]*select:/, '不得声称被砍掉的名字仍能用 select: 取到')
+    assert.match(String(truncationWarns()[0]), /不能用 select: 精确取/, '要说出真实代价：名字不在目录里就不知道')
 
     // 同一份库存再组装：按 revision 去重，不许每条装配都记一次。
     await assemble(fixture, assembly)
@@ -1425,4 +1478,91 @@ test('目录没被截断时不留截断日志', async () => {
   } finally {
     fixture.cleanup()
   }
+})
+
+// ── R13b：旁路记录模型的真实搜索 ─────────────────────────────────────────────
+//
+// 为什么不是"试搜"：试搜复现的是**人输入的 query**，而模型发的是它自己生成的 query。
+// `execute` 里 query 只出现在返回结果里（模型能读到自己的问题），**不落任何记录**——
+// 于是"模型到底问了什么、拿到几条、哪些 query 空手而归"全是空白。
+//
+// 两条硬约束（ToolSearch 场景的核心）：
+//   ① **零上下文成本**：记录只能旁路，**绝不改 `execute` 的返回形状**（那是进上下文的）；
+//   ② 记录里必须带 **payloadChars**（这次返回那批 schema 的字符数 = 本次搜索的实际成本），
+//      否则"maxResults 调大一档值不值"还是没有数字。
+test('旁路记录真实搜索：query / 返回 / 空手而归 / 每次的字符成本（R13b）', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const handle = fixture.cleanup
+  try {
+    assert.deepEqual(Array.from(handle.searches()), [], '初始必须是空数组（未修时 searches 不存在）')
+
+    const before = await fixture.registered.get('tool_search').execute({ query: 'tool number 3' }, { agent: fixture.agent })
+    const records = handle.searches()
+    assert.equal(records.length, 1, '一次搜索一条记录')
+    const record = records[0]
+    assert.equal(record.query, 'tool number 3', '记录的是模型真实问的那句')
+    assert.equal(typeof record.payloadChars, 'number', '必须记本次返回的字符数（本次搜索的上下文成本）')
+    assert.ok(record.payloadChars > 0, '命中了就一定大于 0')
+    assert.equal(record.limit, 10, '记录本次生效的 maxResults（默认 10）')
+    // ⚠️ found:true 的条目在返回里**不带** found 字段（只有 !found 才写 found:false），
+    // 所以「返回了」的判据是 `!== false` 而不是 truthy。
+    assert.deepEqual(Array.from(record.returned), before.matches.filter((match) => match.found !== false).map((match) => match.name),
+      'returned 必须与本次真的返回的名字一致')
+    assert.deepEqual(Array.from(record.missing), [], '这次没有点名找不到的东西')
+    assert.equal(typeof record.at, 'number')
+
+    // ① 零上下文成本的结构证据：记录**不得**出现在 execute 的返回里。
+    // 刻意不硬编码整个键集合（那会随无关改动而红，也会把「返回里本来有什么」变成测试自己说了算）：
+    // 要防的是**把诊断塞进返回**这个具体错误，所以只钉这一件事。
+    for (const key of ['searches', 'recentSearches', 'searchLog', 'recent', 'searchHistory']) {
+      assert.equal(key in before, false, `execute 的返回里不得出现 ${key}：那是进模型上下文的`)
+    }
+    assert.equal(typeof before.query, 'string', 'query 仍在返回里（模型看得到自己问的），记录没有替代它')
+
+    // ② 空手而归：`select:` 点名一个不存在的名字 ⇒ missing 非空（这就是"搜不到"的直接证据）。
+    await fixture.registered.get('tool_search').execute({ query: 'select:mcp__jshook__nope' }, { agent: fixture.agent })
+    const second = handle.searches()[1]
+    assert.equal(second.limit, 10)
+    assert.deepEqual(Array.from(second.missing), ['mcp__jshook__nope'], '点名但没找到的名字必须记下来')
+    assert.deepEqual(Array.from(second.returned), [])
+  } finally {
+    fixture.cleanup instanceof Function ? undefined : undefined
+  }
+})
+
+test('搜索记录：环形上限与脱敏（R13b）', async () => {
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const handle = fixture.cleanup
+  // 环形上限：超过上限后只留最近的。内存有界，不随会话长度增长。
+  for (let index = 0; index < 25; index += 1) {
+    await fixture.registered.get('tool_search').execute({ query: `probe ${index}` }, { agent: fixture.agent })
+  }
+  const records = handle.searches()
+  assert.equal(records.length, 20, '上限 20 条')
+  assert.equal(records.at(-1).query, 'probe 24', '保留最近的（最旧的被挤掉）')
+  assert.equal(records[0].query, 'probe 5')
+
+  // 脱敏：query 是模型生成的自由文本，可能夹带用户贴进来的凭据 ⇒ 复用日志那条脱敏规则。
+  await fixture.registered.get('tool_search').execute({ query: 'call https://x.test/mcp?token=supersecret' }, { agent: fixture.agent })
+  const latest = handle.searches().at(-1)
+  assert.equal(latest.query.includes('supersecret'), false, '记录里不得出现明文凭据')
+  assert.match(latest.query, /REDACTED/)
+})
+
+test('搜索记录只走旁路：目录段里不出现 query 文本（R13b）', async () => {
+  // ⚠️ 目录段只列**还没被发现**的工具（filterCatalog），所以这条必须「只搜一两次」才验得到——
+  // 搜满 20 次之后目录段是空的，那时断言「不含 query」就是空转。
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG })
+  const assembly = {
+    tools: [{ name: 'Read' }, ...BIG_SCHEMAS.map((schema) => ({ name: schema.name })), { name: 'tool_search' }],
+    sections: [{ name: 'persona', text: 'x' }],
+  }
+  const probe = 'browser work for issue 42'
+  await fixture.registered.get('tool_search').execute({ query: probe }, { agent: fixture.agent })
+  assert.equal(fixture.cleanup.searches().length, 1, '前置：确实记下了一条')
+  const assembled = await assemble(fixture, assembly)
+  const catalog = assembled.sections.find((section) => section.name === 'tool-search:catalog')
+  assert.ok(catalog, '前置：还有未发现的工具，目录段必须存在（否则这条是空转）')
+  assert.equal(catalog.text.includes(probe), false, 'query 绝不能出现在目录段——那是每轮请求都要付的')
+  assert.doesNotMatch(catalog.text, /recent search|probe/i, '记录不得以任何形式进目录段')
 })

@@ -614,6 +614,7 @@ test('opaque reveal revision follows effective runtime secrets without exposing 
 
 test('tool revision changes when only the parameter schema changes', async () => {
   const { McpManagerGateway } = await import('../lib/index.js')
+  const { noteToolsChanged } = await import('../lib/workspace-runtime.js')
   const content = `- insert:\n    - id: mcp-demo\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: demo\n        transport: stdio\n        command: node\n`
   const entry = {
     options: { id: 'mcp-demo', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'demo', transport: 'stdio', command: 'node' } },
@@ -627,6 +628,10 @@ test('tool revision changes when only the parameter schema changes', async () =>
   try {
     const before = await McpManagerGateway.prototype.list.call({ ctx: fixture.ctx })
     parameters = { type: 'object', properties: { after: { type: 'number' } } }
+    // 真宿主在每次 register/dispose 时**同步**派发 tools/change，全局清单的代次因此前进；
+    // 这个桩 ctx 没有事件总线，所以直接调那个唯一入口。不派发就等于「换了工具却告诉面板没变」，
+    // 那时缓存给旧 revision 反而是正确行为（下面那条反向断言在 workspace-runtime.test.mjs 里）。
+    noteToolsChanged(fixture.ctx)
     const after = await McpManagerGateway.prototype.list.call({ ctx: fixture.ctx })
     const tools = await McpManagerGateway.prototype.tools.call({ ctx: fixture.ctx }, { name: 'demo' })
 
@@ -705,6 +710,61 @@ test('reveal returns the stored value for managed servers only', async () => {
       /不能读取配置/,
     )
   } finally {
+    await fixture.cleanup()
+  }
+})
+
+// R12：12 条日志只取最后一条 —— 采集早就在做（MAX_LOG_RECORDS=12），但只有 lastError 被用。
+//
+// 为什么不能把 recentLogs 放进**行投影**：单条已经被 sanitizeMcpLog 截断到 2000 字符，
+// 12 条 × 2000 = 24KB/服务器；列 20 台就是 480KB/轮询（5s 一次）。所以放 `status`（单台详情、
+// 点击才取）而**不是** `list`。这两条断言成对，正好一读就懂为什么这么分。
+test('status carries the recent log records; list does not (R12: 12 records, only lastError was used)', async () => {
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const content = `- insert:\n    - id: mcp-broken\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: broken\n        transport: streamable-http\n        url: http://127.0.0.1:8787/mcp\n`
+  const logSecret = 'recent-log-secret-token'
+  const brokenFiber = { state: 2 }
+  const broken = { options: { id: 'mcp-broken', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'broken', transport: 'streamable-http', url: 'http://127.0.0.1:8787/mcp' } }, disabled: false, fiber: brokenFiber }
+  const fixture = await createProfileFixture(content, [broken])
+  let cleanupCapture
+  // 20 条（超过 MAX_LOG_RECORDS=12）：既验证内容，也验证上限。
+  const buffer = Array.from({ length: 20 }, (_, index) => ({
+    name: 'mcp-broken',
+    type: index % 2 === 0 ? 'warn' : 'error',
+    ts: 1_000 + index,
+    args: [`attempt ${index + 1} failed: ECONNREFUSED 127.0.0.1:8787 https://example.test/mcp?token=${logSecret}`],
+    fiber: { deref: () => brokenFiber },
+  }))
+  const logger = { buffer, exporters: new Map(), _snExporter: 0 }
+  fixture.ctx.root = fixture.ctx
+  fixture.ctx.logger = logger
+  fixture.ctx.effect = (factory, label) => {
+    assert.equal(label, 'mcpManager.logCapture')
+    cleanupCapture = factory()
+    return cleanupCapture
+  }
+  fixture.ctx.tools.schemas = () => []
+  try {
+    const detail = await McpManagerGateway.prototype.status.call({ ctx: fixture.ctx }, 'broken')
+    const logs = detail.server.recentLogs
+    assert.equal(Array.isArray(logs), true, 'status 必须带上 recentLogs（未修时这里是 undefined）')
+    assert.equal(logs.length, 12, '上限就是 MAX_LOG_RECORDS：12 条')
+    // 顺序：**最新在最后**，与 lastError 取 `.at(-1)` 同一个方向（客户端据此倒序显示）。
+    assert.match(logs.at(-1).text, /attempt 20 failed/, '最后一条必须是最新的那条')
+    assert.match(logs[0].text, /attempt 9 failed/, '旧的被截掉：留下的应该是第 9..20 条')
+    // 采集期就脱敏了：这里再钉一遍，因为 recentLogs 把"更多日志"送出了 Host，面变大了。
+    assert.doesNotMatch(JSON.stringify(detail), new RegExp(logSecret))
+    // lastError 的语义**不许变**（它仍是"挑出来的那条诊断"）。
+    assert.match(detail.server.lastError, /attempt 20 failed/)
+
+    // 反方向：列表投影**不得**带上这 12 条（否则轮询体积最多 24KB/服务器）。
+    const listed = await McpManagerGateway.prototype.list.call({ ctx: fixture.ctx })
+    const row = listed.servers.find((server) => server.serverName === 'broken')
+    assert.ok(row, '前置：列表里必须有这台')
+    assert.equal(row.recentLogs, undefined, 'list 不得带 recentLogs：那是详情按需取的东西')
+    assert.match(row.lastError, /attempt 20 failed/, 'lastError 在 list 里照旧')
+  } finally {
+    cleanupCapture?.()
     await fixture.cleanup()
   }
 })

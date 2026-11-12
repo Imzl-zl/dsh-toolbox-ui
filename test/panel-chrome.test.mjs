@@ -1,3 +1,13 @@
+
+// ⚠️ 写这一组用例时必须记住两条（都踩过不止一次）：
+//   1. **client 跑在 vm 里**：它返回的数组/对象与主 realm 的原型不同，`assert.deepEqual` 是
+//      `deepStrictEqual`（会**比原型**），于是"内容完全相同"的两个数组会以
+//      "same structure but are not reference-equal" 失败，而错误信息里 actual 与 expected
+//      长得一模一样，极难看出原因。比较数组用 `.length` / 逐项断言，或先用 `Array.from` 重建。
+//   2. **hook-renderer 只渲染 root**：子组件留成元素节点，所以子组件的**渲染结果**拿不到，
+//      但它的 **props** 拿得到（`ofType(tree, Component)[0].props`）。要验子组件的输出，
+//      直接调用子组件（它们大多是纯函数，见 ServerDetail / SkillDetail 的注释）。
+
 // 面板「外壳」（标题栏 / 第二行 / 通知条 / 详情操作栏 / 列表底栏）的不变量。
 //
 // 这一组的存在理由，全部来自**真机上看得见、而测试网里空着**的那几处：
@@ -31,7 +41,7 @@ const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
   `${exportMarker}
-exports.__chrome = { McpTab, McpMarketView, SkillInstallModal, Btn, ServerList, ServerDetailPane, SkillsPanel, ServerDetail, SkillDetail, Notice, DropMenu, ICONS, mcpStatsText, skillStatsText, sortServers, sortSkills, skillScopeTabs, skillGroups, skillGroupKey, skillScopeOptions, skillTargetOptions, classifyHubError, catalogForScope, SORT_KEYS, deferAllState };`,
+exports.__chrome = { McpTab, McpMarketView, SkillInstallModal, Btn, ServerList, ServerDetailPane, SkillsPanel, ServerDetail, SkillDetail, Notice, DropMenu, ICONS, connectionAnomalyOf, connectionDiagText, base64FromBytes, skillImportPayloadOf, importSkillFile, recentLogLines, mcpStatsText, skillStatsText, sortServers, sortSkills, skillScopeTabs, skillGroups, skillGroupKey, skillScopeOptions, skillTargetOptions, classifyHubError, catalogForScope, SORT_KEYS, deferAllState };`,
 )
 assert.notEqual(instrumentedClient, clientSource, 'client test export marker must stay current')
 
@@ -195,6 +205,38 @@ test('能力层按 MCP、技能、工具顺序渲染，工具页独立承载加�
   assert.match(clientSource, /ability === 'tool-loading'/, '工具标签必须切换到独立工具页')
   assert.match(clientSource, /onToggleDefer: toggleDeferOne/, 'MCP 页必须继续持有服务器延迟开关')
   assert.match(clientSource, /deferAllAction/, 'MCP 页必须继续提供全部延迟动作')
+})
+
+// ═══ ③b 导出出口：项目层与全局层都要有，且合成一句警告 ═════════════════════
+//
+// 为什么钉这一段：R9 之前**没有任何测试覆盖导出界面**（`exportOpen` / `WorkspaceExportModal`
+// 在 test/ 下 0 次出现），而缺陷恰好就长在这个空档里——全局标签页没有导出按钮，用户只能
+// 在"项目页 → 全局共享"那个只读子标签里看见它们，却导不出来。
+test('导出出口在项目层与全局层都存在，且全局层走自己的方法', () => {
+  // ① 全局标签页（scope === 'global' 的分支）必须有导出按钮。
+  const globalBranch = clientSource.slice(
+    clientSource.indexOf("    : (scope === 'global'"),
+    clientSource.indexOf("      : h(\n        'div',\n        { className: 'dsh-mcp-ws-body'"),
+  )
+  assert.ok(globalBranch.length > 100, '找不到全局标签页的分支（选择器可能已随重构改变）')
+  assert.match(globalBranch, /onClick: \(\) => setExportOpen\(true\)/, '全局标签页必须有导出出口')
+  assert.match(globalBranch, /children: t\('导出全局'\)/, '按钮文案要与项目页区分（用户要能分清导的是哪一层）')
+
+  // ② 弹窗不再排除全局：以前是 `exportOpen && scope !== 'global'`，于是全局页即使
+  // setExportOpen(true) 也永远不显示——这正是"点了没反应"的形态。
+  assert.match(clientSource, /h\(WorkspaceExportModal, \{ open: exportOpen, onClose/)
+  assert.doesNotMatch(clientSource, /open: exportOpen && scope !== 'global'/)
+
+  // ③ 弹窗按作用域调不同方法：数据源不同（项目文件 vs profile patch），形状相同。
+  assert.match(clientSource, /scope === 'global'\s*\n\s*\? await call\('exportGlobalJson'\)/)
+  assert.match(clientSource, /: await call\('exportWorkspaceJson', \{ wsPath: scope \}\)/)
+
+  // ④ 全局层的警告**必须**与项目层不同：patch 里存的是求值后的实际值，所以导出是明文；
+  // 项目文件里存 ${VAR} 模板，导出保留引用。照抄项目文案就是对用户撒谎。
+  assert.match(clientSource, /这是全局层的完整配置/)
+  assert.match(clientSource, /求值后的实际值/, '全局导出的警告必须说出"实际值"这件事')
+  // 全局层没有 exclude，文案不能承诺它。
+  assert.match(clientSource, /全局层没有 exclude/)
 })
 
 // ═══ ④ 详情操作栏是槽位 ═════════════════════════════════════════════════════
@@ -1038,3 +1080,239 @@ test('市场的搜索是「提交才打上游」：草稿与已提交关键字�
     'searchHub 的直接调用点只应有挂载/依赖变化那一处（重试按钮用 onClick 传函数）')
 })
 
+
+// ═══ ⑥b 连接诊断：refs 卡住不归零是唯一的泄漏信号（R10）═════════════════════
+//
+// 为什么需要这一组：宿主侧的 `projectConnections` 早就实现并上了 wire，`projectConnectionsView`
+// 也有真宿主用例（refs / sessions / 空闲回收），但**面板没有入口**——`docs/design.md` 自己
+// 写着"面板暂未接线"。于是一个只读的排障面存在了很久却没人能用，而它回答的正是单行视图
+// 回答不了的问题：`refs > sessions` 说明某条共享连接的引用卡住不归还。
+//
+// 判定必须是**纯函数**：客户端在本仓库跑不了 hook 行为，但纯函数能真跑。
+test('连接诊断：refs 大于会话数是泄漏信号，正常连接不报异常', () => {
+  const { connectionAnomalyOf } = loadClientInternals()
+  assert.equal(typeof connectionAnomalyOf, 'function', 'connectionAnomalyOf 必须存在（纯函数，可单测）')
+  const base = {
+    wsPath: '/w', serverName: 's', sessions: 1, refs: 1, state: 'ready',
+    toolCount: 2, idle: false, duplicateOwners: [], configStale: false, configError: '', scopeError: '',
+  }
+  // ① 健康：引用数与会话数相等，无其它异常 → 不报。
+  assert.equal(connectionAnomalyOf(base), null)
+  // ② 空闲待回收是**正常**状态（最后一个会话结束后连接留着待用），不是异常。
+  assert.equal(connectionAnomalyOf({ ...base, sessions: 0, refs: 0, idle: true }), null)
+  // ③ 泄漏：引用比会话多。这是本视图存在的理由。
+  assert.match(connectionAnomalyOf({ ...base, refs: 3 }).text, /引用/)
+  // ④ 配置已变：连接是旧配置建的（写盘路径会立刻重载，正常情况下恒为 false）。
+  assert.match(connectionAnomalyOf({ ...base, configStale: true }).text, /配置/)
+  // ⑤ 配置读不出来 / 作用域故障：都如实报，不伪装成健康。
+  assert.match(connectionAnomalyOf({ ...base, configError: 'ENOENT' }).text, /配置/)
+  assert.match(connectionAnomalyOf({ ...base, scopeError: 'scope gone' }).text, /作用域/)
+  // ⑥ 同名多条目：身份冲突会让其中一条静默连不上。
+  assert.match(connectionAnomalyOf({ ...base, duplicateOwners: ['mcp-exa'] }).text, /同名/)
+})
+
+test('项目页有连接诊断入口；展开后才取数，异常连接被标出', async (t) => {
+  const renderer = createHookRenderer()
+  const internals = loadClientInternals(renderer)
+  const wsPath = '/tmp/ws-diag'
+  const polls = new Set()
+  const calls = []
+  const props = {
+    call: async (method, args) => {
+      calls.push({ method, args })
+      if (method === 'list') return { ok: true, servers: [], workspaces: [] }
+      if (method === 'listWorkspaces') return { ok: true, workspaces: [{ path: wsPath, name: 'diag' }] }
+      if (method === 'getWorkspaceView') return { ok: true, servers: [], global: [], exclude: [], revision: 'rev-1', revealRevision: '' }
+      if (method === 'projectConnections') {
+        return {
+          ok: true,
+          connections: [
+            { wsPath, serverName: 'leaky', sessions: 1, refs: 3, state: 'ready', toolCount: 2, idle: false, duplicateOwners: [], configStale: false, configError: '', scopeError: '' },
+            { wsPath, serverName: 'healthy', sessions: 2, refs: 2, state: 'ready', toolCount: 2, idle: false, duplicateOwners: [], configStale: false, configError: '', scopeError: '' },
+          ],
+        }
+      }
+      return { ok: true }
+    },
+    callSkills: async () => ({ ok: true, skills: [] }),
+    timer: { interval(run) { const poll = { run }; polls.add(poll); return () => polls.delete(poll) }, timeout() {} },
+    pluginManager: null, floating: true, onClose() {},
+  }
+  t.after(() => {
+    renderer.__unmount(internals.McpTab)
+  })
+
+  let tree = internals.__render(internals.McpTab, props)
+  await internals.__settle()
+  // ⚠️ 假 React 的 __render 才产出新树：settle 只推进 effect 与 state，不重绘图。
+  // 少了这一行，下面读到的是 settle **之前**的树（workspaces 还是空，药丸不存在）。
+  tree = internals.__render(internals.McpTab, props)
+  // 切到项目作用域（诊断只对项目连接有意义）
+  const tabs = collectAll(tree, (node) => Array.isArray(node?.props?.tabs) && node.props.tabs.some((tab) => tab.key === wsPath))[0]
+  assert.ok(tabs, '必须从实际渲染的作用域药丸切换')
+  tabs.props.onSelect(wsPath)
+  await internals.__settle()
+  tree = internals.__render(internals.McpTab, props)
+
+  // ① 入口存在，且**默认不取数**（排障视图不该在每次打开项目页时多打一个 RPC）。
+  const toggle = collectAll(tree, (node) => typeof node?.props?.onClick === 'function'
+    && typeof node?.props?.children === 'string' && node.props.children.includes('连接诊断'))[0]
+  assert.ok(toggle, '项目页必须有「连接诊断」入口')
+  assert.equal(calls.filter((entry) => entry.method === 'projectConnections').length, 0,
+    '折叠状态下不得调用 projectConnections（零轮询开销）')
+
+  // ② 展开后取数并渲染：异常连接被标出，健康的不标。
+  toggle.props.onClick()
+  await internals.__settle()
+  tree = internals.__render(internals.McpTab, props)
+  const diagCalls = calls.filter((entry) => entry.method === 'projectConnections')
+  assert.equal(diagCalls.length, 1, `展开时取一次：${JSON.stringify(diagCalls)}`)
+  const flat = JSON.stringify(tree)
+  assert.match(flat, /leaky/, '每条连接都要出现（serverName 是排障的定位键）')
+  assert.match(flat, /healthy/)
+  assert.match(flat, /refs 3 \/ 会话 1|引用/, `泄漏那一条必须被标出：${flat.slice(0, 400)}`)
+})
+
+// ── R11：本机导入的两个纯函数 + 一条真跑的接线用例 ─────────────────────────
+//
+// 为什么这些能"真跑"：客户端在本仓库跑不了真实文件选择器，但 `base64FromBytes` /
+// `skillImportPayloadOf` / `importSkillFile` 的输入都能从外部给——传一个带 `text()` /
+// `arrayBuffer()` 的假 file 就能跑完整条链路。这比"读源码正则"强得多。
+test('base64FromBytes 与 Buffer 逐字节一致（含填充与各长度余数）', () => {
+  const { base64FromBytes } = loadClientInternals()
+  for (const length of [0, 1, 2, 3, 4, 5, 17, 256]) {
+    const bytes = Uint8Array.from({ length }, (_, index) => (index * 37 + 11) % 256)
+    assert.equal(base64FromBytes(bytes), Buffer.from(bytes).toString('base64'),
+      `长度 ${length} 的编码必须与标准实现一致`)
+  }
+})
+
+test('skillImportPayloadOf 按扩展名决定传内容还是传字节，落点原样带上', () => {
+  const { skillImportPayloadOf } = loadClientInternals()
+  const target = { source: 'user-agents', root: '/root', projectPath: undefined }
+  // ① 文本技能：走 content（不需要字节）。
+  const text = skillImportPayloadOf({ name: 'my-skill.MD', text: '---\nname: x\n---\n', target })
+  assert.equal(text.content, '---\nname: x\n---\n')
+  assert.equal(text.archiveBase64, undefined)
+  assert.deepEqual([text.source, text.root], ['user-agents', '/root'])
+  // ② 归档：走 archiveBase64，且编码正确。
+  const bytes = Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0x00])
+  const archive = skillImportPayloadOf({ name: 'pack.zip', bytes, target })
+  assert.equal(archive.content, undefined)
+  assert.equal(archive.archiveBase64, Buffer.from(bytes).toString('base64'))
+  // ③ 没有扩展名 / 未知扩展名 → 当归档（宿主会按魔数判并给出明确报错，不在这里猜）。
+  assert.ok(skillImportPayloadOf({ name: 'noext', bytes, target }).archiveBase64)
+  // ④ 落点参数是**引用**，不当场解析成路径（解析只有一个真相源，在宿主侧）。
+  assert.equal(skillImportPayloadOf({ name: 'a.md', text: '', target }).root, '/root')
+})
+
+test('importSkillFile 把文件的文本/字节转成 payload 并交给 act；失败时如实报', async () => {
+  const { importSkillFile } = loadClientInternals()
+  const target = { source: 'user-agents', root: '/root' }
+  const calls = []
+  const flashes = []
+  const act = async (method, payload) => { calls.push({ method, payload }); return true }
+
+  // ① 文本文件：只调用 text()，不碰 arrayBuffer()（后者对大文件是多余的拷贝）。
+  const textFile = {
+    name: 'flat.md',
+    text: async () => '---\nname: flat\n---\n',
+    arrayBuffer: async () => { throw new Error('文本文件不该读字节') },
+  }
+  assert.equal(await importSkillFile({ file: textFile, target, act, flash: (m) => flashes.push(m) }), true)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].method, 'importSkill')
+  assert.equal(calls[0].payload.content, '---\nname: flat\n---\n')
+  assert.equal(calls[0].payload.root, '/root')
+
+  // ② 归档：读字节并 base64。
+  const archiveFile = {
+    name: 'pack.zip',
+    text: async () => { throw new Error('归档不该当文本读') },
+    arrayBuffer: async () => Uint8Array.from([0x50, 0x4b, 0x03, 0x04]).buffer,
+  }
+  assert.equal(await importSkillFile({ file: archiveFile, target, act, flash: () => {} }), true)
+  assert.equal(calls[1].payload.archiveBase64, Buffer.from([0x50, 0x4b, 0x03, 0x04]).toString('base64'))
+
+  // ③ 没有落点：不发请求，只说清楚为什么。
+  flashes.length = 0
+  assert.equal(await importSkillFile({ file: textFile, target: null, act, flash: (m) => flashes.push(m) }), false)
+  assert.equal(calls.length, 2, '没有落点时不得发 RPC')
+  assert.match(flashes[0], /写入/)
+
+  // ④ 读文件失败：说原因，不静默。
+  flashes.length = 0
+  const broken = { name: 'x.md', text: async () => { throw new Error('EPERM') } }
+  assert.equal(await importSkillFile({ file: broken, target, act, flash: (m) => flashes.push(m) }), false)
+  assert.match(flashes[0], /EPERM/)
+})
+
+// ── R12：最近日志（纯函数 + 抽屉真渲染）─────────────────────────────────────
+//
+// 为什么这里是纯函数而不是只读源码：时间格式与"最新在最前"这两件事都能真跑，
+// 而它们恰好是最容易写反的地方（宿主给的数组是升序，人读日志习惯是降序）。
+test('recentLogLines 把升序数组倒过来，时间用固定宽度时钟', () => {
+  const { recentLogLines } = loadClientInternals()
+  const stamp = (h, m, s) => new Date(2026, 0, 1, h, m, s).getTime()
+  const lines = recentLogLines([
+    { type: 'warn', text: 'first', ts: stamp(10, 0, 5) },
+    { type: 'error', text: 'second', ts: stamp(10, 0, 9) },
+  ])
+  // 最新在最前。
+  assert.match(lines[0], /^10:00:09 ERROR second$/)
+  assert.match(lines[1], /^10:00:05 WARN first$/)
+  // 缺失时间戳给固定占位符，不吐 "Invalid Date"。
+  assert.match(recentLogLines([{ type: 'log', text: 'x' }])[0], /^--:--:-- LOG x$/)
+  // 空/非法输入不抛。⚠️ 用 .length 而不是 deepEqual([])：client 跑在 vm 里，
+  // 它返回的数组原型与主 realm 不同，deepStrictEqual 会以 "same structure but are not
+  // reference-equal" 失败（R8/R10 都踩过）。
+  assert.equal(recentLogLines(undefined).length, 0)
+  assert.equal(recentLogLines(null).length, 0)
+  assert.equal(recentLogLines([]).length, 0)
+})
+
+test('详情诊断页按需取最近日志：不取时零 RPC，取到后交给详情渲染', async (t) => {
+  const renderer = createHookRenderer()
+  const internals = loadClientInternals(renderer)
+  const calls = []
+  const logs = [
+    { type: 'warn', text: 'attempt 1 failed: ECONNREFUSED', ts: new Date(2026, 0, 1, 10, 0, 1).getTime() },
+    { type: 'error', text: 'giving up after 10 attempts', ts: new Date(2026, 0, 1, 10, 0, 2).getTime() },
+  ]
+  const server = { serverName: 'leaky', scope: 'global', managed: true, enabled: true, transport: 'stdio', phase: 'connected', status: 'connected', toolCount: 1, lastError: 'ECONNREFUSED' }
+  const props = {
+    call: async (method) => {
+      calls.push({ method })
+      return method === 'status' ? { ok: true, server: { ...server, recentLogs: logs } } : { ok: true }
+    },
+    server, tools: [], busy: false,
+    onToggle() {}, onReconnect() {}, onEdit() {}, onRemove() {}, onReveal() {},
+    revealed: {}, onCopy() {}, excluded: false, onToggleExclude() {},
+  }
+  t.after(() => renderer.__unmount(internals.ServerDetailPane))
+
+  // hook-renderer **只渲染 root**，子组件留成元素节点——所以这里通过 ofType 读
+  // ServerDetailPane 传给 ServerDetail 的 props（这正是被测的接线）。
+  const detailProps = () => ofType(internals.__render(internals.ServerDetailPane, props), internals.ServerDetail)[0]?.props
+  const before = detailProps()
+  assert.ok(before, '详情组件必须被渲染出来')
+  assert.equal(before.recentLogs, null, '未点击前 recentLogs 必须是 null（不预取）')
+  assert.equal(calls.filter((entry) => entry.method === 'status').length, 0, '打开详情不该发 status')
+
+  // 点击「查看最近日志」→ 取一次 → 交给详情。
+  assert.equal(typeof before.onLoadRecentLogs, 'function')
+  before.onLoadRecentLogs()
+  await internals.__settle()
+  const after = detailProps()
+  assert.equal(calls.filter((entry) => entry.method === 'status').length, 1, '点一次取一次')
+  assert.equal(after.recentLogs.logs.length, 2, '两条都要带上（以前只显示最后一条）')
+
+  // 渲染侧：ServerDetail 是**纯函数**（没有 hooks），可以直接调用验证它真的把两条都画出来、
+  // 且最新的在前。这一半不需要 renderer。
+  const tree = internals.ServerDetail({ ...props, tab: 'diag', onTab() {}, recentLogs: after.recentLogs, onLoadRecentLogs: before.onLoadRecentLogs })
+  const flat = JSON.stringify(tree)
+  assert.match(flat, /ECONNREFUSED/, '第一条日志要出现')
+  assert.match(flat, /giving up after 10 attempts/, '第二条日志也要出现——这正是 R12 修的那件事')
+  assert.ok(flat.indexOf('giving up after 10 attempts') < flat.indexOf('attempt 1 failed'),
+    '最新的必须显示在最前面（宿主给的是升序）')
+})

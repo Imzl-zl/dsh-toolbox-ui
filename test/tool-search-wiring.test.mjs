@@ -554,3 +554,40 @@ test('setDeferAll 不传 wsPath 时走全局分支（空串不得被解析成 cw
   }
 })
 
+
+// ── R13a：目录体检（零新增 wire）─────────────────────────────────────────────
+//
+// 为什么需要它：三个 ToolSearch 参数（maxResults / maxCatalogChars / maxDiscovered）改完之后
+// **什么都看不到**。唯一已有的信号是"目录因预算未列出 N 个工具名"——而它走 ctx.logger.warn，
+// 只落在宿主进程日志里，面板完全不可见。于是"参数该调多大"只能靠猜。
+//
+// 这一条只做**能立刻算出来的部分**（延迟服务器、工具池大小、预算值），不假装知道
+// "这次搜索会返回什么"——那是 R13b 试搜的事。
+test('toolSearchSettings 带目录体检：预算、延迟服务器、工具池大小（R13a）', async () => {
+  const { deferServersOf } = await import('../lib/tool-search-config.js')
+  const mounted = await mountPlugin(
+    [{ serverName: 'deferme', transport: 'stdio', command: 'node', defer: true }],
+    { patchBody: ONE_DEFERME_PATCH },
+  )
+  try {
+    const manager = mounted.ctx.get('mcpManager')
+    const detail = await manager.toolSearchSettings()
+    assert.ok(detail.catalog, '必须带 catalog 体检字段（未修时是 undefined）')
+    // ① 预算与 settings **同源**：体检里的值不许是第二个真相源。
+    assert.equal(detail.catalog.budget, detail.settings.maxCatalogChars ?? null)
+    // ② 延迟服务器与 deferServersOf 一致（同一个函数，不是重新实现一遍判断）。
+    assert.deepEqual(Array.from(detail.catalog.deferredServers).sort(), Array.from(deferServersOf(mounted.ctx)).sort())
+    assert.deepEqual(Array.from(detail.catalog.deferredServers), ['deferme'], '前置：这台必须是延迟的')
+    // ③ **体检不得碰工具清单**：`globalToolSchemas` 在缓存未命中时是宿主的全量 schema 深拷贝
+    // （实测 735 工具 ≈ 92ms / 1.6–2MB），拿它算"可见工具数"等于让"打开设置页"付一次全量枚举。
+    // ToolSearch 存在的意义就是省上下文，体检自己触发全量枚举完全反过来了。
+    assert.equal('globalToolCount' in detail.catalog, false,
+      '体检不得报"可见工具数"：那需要 enumerating 全部 schema，副作用大于信息价值')
+    // 该报的是**上下文成本**：目录段的字符数（每轮请求都要付）。
+    assert.equal('chars' in (detail.catalog.lastAssembly ?? {}), false, '未组装时 lastAssembly 是 null，不编 chars')
+    // ④ 还没组装过目录时如实报 null——不编一个 0 出来。
+    assert.equal(detail.catalog.lastAssembly, null, '未组装时必须 null（"还没跑过" ≠ "跑了但没截断"）')
+  } finally {
+    await mounted.dispose()
+  }
+})

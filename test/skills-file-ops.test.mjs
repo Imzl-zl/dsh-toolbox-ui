@@ -17,19 +17,22 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import {
+  hubSourcePath,
   importSkill,
+  readHubSource,
   readSkillDocument,
   scanDisabledSkills,
   setSkillInvocationFace,
   setSkillModelInvocable,
   setSkillUserInvocable,
+  writeHubSource,
   SkillNotFoundError,
   removeSkill,
   resolveSkillTarget,
   setSkillEnabled,
 } from '../lib/skills-file-ops.js'
 import { diagnoseSkill } from '../lib/skills-frontmatter.js'
-import { MAX_ARCHIVE_BYTES } from '../lib/skills-archive.js'
+import { MAX_ARCHIVE_BYTES, MAX_FILE_BYTES } from '../lib/skills-archive.js'
 import { makeTar, makeZip } from '../scripts/archive-fixtures.mjs'
 
 /**
@@ -1130,3 +1133,168 @@ test('a refused rewrite leaves the file byte-identical, because half a write is 
   }
 })
 
+
+// ── 浏览器上传的来源（R11）：浏览器拿不到宿主路径，只能给内容 ──────────────
+//
+// 现状与约束（写清楚，免得下轮又去试"传个路径就行"）：
+//   · `importSkill` 原本只接受 `{ type, path }` 且**从宿主磁盘读**——浏览器给不了路径，
+//     所以"加个 <input type=file> 就完事"这条路走不通；
+//   · 技能名来自 **frontmatter**（`requireImportableName` 只看 text），所以传内容不影响命名；
+//   · 唯一既安全又不新增 wire 方法的做法：payload 里传**内容**，宿主落到 system tmp 后
+//     走**同一条**导入路径（zip-slip / 符号链接检查 / 文件锁 / 原子提交全部复用）。
+//   · 这比"让客户端传路径"**更窄**：客户端拿不到"读宿主任意文件"的能力。
+const uploadStaging = async () => (await readdir(tmpdir())).filter((name) => name.startsWith('dsh-skill-upload-')).sort()
+
+test('imports a flat skill from uploaded text (browser cannot supply a host path)', async () => {
+  const root = await makeDestRoot()
+  const stagingBefore = await uploadStaging()
+  try {
+    const result = await importSkill({
+      root,
+      scope: 'global',
+      source: { type: 'file', content: '---\nname: uploaded-flat\ndescription: 上传来的\n---\n\n正文\n' },
+    })
+    assert.equal(result.name, 'uploaded-flat', '名字取自 frontmatter，不来自任何文件名')
+    assert.equal(existsSync(join(root, 'uploaded-flat.md')), true)
+    assert.match((await readFile(join(root, 'uploaded-flat.md'), 'utf8')), /上传来的/)
+    // 临时目录必须清掉：里面是用户的技能原文，不该留在 tmp。
+    assert.deepEqual(await uploadStaging(), stagingBefore, '上传暂存目录必须在 finally 里清掉')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('imports a bundle from an uploaded zip (base64), reusing the same archive checks', async () => {
+  const root = await makeDestRoot()
+  const stagingBefore = await uploadStaging()
+  try {
+    // makeZip 收的是**数组**（{ name, data }），不是对象映射。
+    const zip = makeZip([
+      { name: 'uploaded-bundle/SKILL.md', data: '---\nname: uploaded-bundle\ndescription: 上传的压缩包\n---\n\n正文\n' },
+      { name: 'uploaded-bundle/scripts/run.sh', data: 'echo hi\n' },
+    ])
+    const result = await importSkill({
+      root,
+      scope: 'global',
+      source: { type: 'archive', archiveBase64: zip.toString('base64') },
+    })
+    assert.equal(result.name, 'uploaded-bundle')
+    assert.equal(existsSync(join(root, 'uploaded-bundle', 'SKILL.md')), true)
+    assert.equal(existsSync(join(root, 'uploaded-bundle', 'scripts', 'run.sh')), true)
+    assert.deepEqual(await uploadStaging(), stagingBefore, '上传暂存目录必须清掉')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('uploaded content is size-capped and bad input is rejected before any write', async () => {
+  const root = await makeDestRoot()
+  const stagingBefore = await uploadStaging()
+  try {
+    // 文本没有"输入路径"可查大小，所以必须在写盘前按 MAX_FILE_BYTES 拒。
+    await assert.rejects(
+      importSkill({
+        root,
+        scope: 'global',
+        source: { type: 'file', content: 'x'.repeat(MAX_FILE_BYTES + 1) },
+      }),
+      /过大|超过|上限/,
+    )
+    // 非法 base64 不得写出半个压缩包。
+    await assert.rejects(
+      importSkill({ root, scope: 'global', source: { type: 'archive', archiveBase64: 'not-base64!!!' } }),
+      /压缩包|archive|非法/,
+    )
+    assert.deepEqual(await readdir(root), [], '被拒的导入不得在技能根留下任何东西')
+    assert.deepEqual(await uploadStaging(), stagingBefore, '被拒时暂存目录同样必须清掉')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// ── R14：外部源技能的来源记录 ────────────────────────────────────────────────
+//
+// 现状缺陷：`skillHubInstall` 装完**什么都不留**——用户看不到"这个技能从哪个上游、哪个版本装的"，
+// 也就无从检查更新。这一组钉三件事：来源真的落了盘 / 它不会被当成技能条目 / 删技能时跟着清。
+const HUB_SKILL_MD = (name) => `---\nname: ${name}\ndescription: hub demo\n---\n\n正文\n`
+
+test('R14：外部源技能装完留下来源记录（slug / version / pageUrl / installedAt）', async () => {
+  const root = await makeRoot()
+  const staging = await mkdtemp(join(tmpdir(), 'dsh-r14-'))
+  try {
+    // 直接调 importSkill（skillHubInstall 的落盘就是它）+ 写来源：这条钉的是**落盘形态**，
+    // 不依赖网络（skillhub 下载在 skillhub-install.test.mjs 里另有真夹具覆盖）。
+    const zip = makeZip([{ name: 'hubdemo/SKILL.md', data: HUB_SKILL_MD('hubdemo') }])
+    const archive = join(staging, 'hubdemo.zip')
+    await writeFile(archive, zip)
+    const result = await importSkill({ root, scope: 'global', source: { type: 'archive', path: archive } })
+    assert.equal(result.name, 'hubdemo')
+
+    const written = await writeHubSource(result, { slug: 'demo-skill', version: '1.2.3', pageUrl: 'https://skillhub.cn/s/demo-skill' })
+    assert.deepEqual([written.slug, written.version], ['demo-skill', '1.2.3'])
+    assert.equal(hubSourcePath(result), join(root, 'hubdemo', '.hub.json'), 'bundle 的来源记录在技能目录里（删目录时连带删）')
+
+    const read = await readHubSource(result)
+    assert.deepEqual([read.slug, read.version, read.pageUrl], ['demo-skill', '1.2.3', 'https://skillhub.cn/s/demo-skill'])
+    assert.match(read.installedAt, /^\d{4}-\d{2}-\d{2}T/, '装的时间要记（判断"多久没更新"用得上）')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(staging, { recursive: true, force: true })
+  }
+})
+
+test('R14：来源记录不会被当成技能条目（bundle 与 flat 两种形态）', async () => {
+  const root = await makeRoot()
+  try {
+    // ① bundle：.hub.json 在技能目录里 —— 宿主的目录识别只认 SKILL.md，不受影响。
+    const bundleZip = makeZip([{ name: 'hubdemo/SKILL.md', data: HUB_SKILL_MD('hubdemo') }])
+    const staging = await mkdtemp(join(tmpdir(), 'dsh-r14b-'))
+    try {
+      const archive = join(staging, 'hubdemo.zip')
+      await writeFile(archive, bundleZip)
+      const bundle = await importSkill({ root, scope: 'global', source: { type: 'archive', path: archive } })
+      await writeHubSource(bundle, { slug: 'demo', version: '1' })
+      // ② flat：来源记录挂在 <name>.md 后面 —— 名字不再以 .md 结尾，所以不会被 *.md 匹配。
+      const flat = await importSkill({ root, scope: 'global', source: { type: 'file', content: HUB_SKILL_MD('flat-hub') } })
+      await writeHubSource(flat, { slug: 'flat-demo', version: '2' })
+      assert.equal(hubSourcePath(flat), join(root, 'flat-hub.md.hub.json'))
+      assert.equal(existsSync(join(root, 'flat-hub.md.hub.json')), true)
+      // 反方向：这个名字**不是**一个技能条目（`.md` 结尾才算扁平技能）。
+      assert.equal(existsSync(join(root, 'flat-hub.md.hub.json').replace('.hub.json', '')), true, '技能文件本身还在')
+      // scanDisabledSkills 只认 `.disabled` 变体；.hub.json 不该出现在它返回的条目里。
+      const disabled = await scanDisabledSkills({ root, scope: 'global' })
+      assert.equal(disabled.some((row) => String(row.entry).includes('.hub.json')), false, '来源记录不得被扫成技能')
+    } finally {
+      await rm(staging, { recursive: true, force: true })
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('R14：删技能时来源记录跟着清（flat 显式删，bundle 随目录连带）', async () => {
+  const root = await makeRoot()
+  try {
+    const flat = await importSkill({ root, scope: 'global', source: { type: 'file', content: HUB_SKILL_MD('flat-del') } })
+    await writeHubSource(flat, { slug: 'flat-del', version: '3' })
+    const record = join(root, 'flat-del.md.hub.json')
+    assert.equal(existsSync(record), true, '前置：记录已落盘')
+    await removeSkill(await resolveSkillTarget({ entry: 'flat-del.md', kind: 'flat', scope: 'global', root }))
+    assert.equal(existsSync(record), false, '删除技能必须连带清掉来源记录——否则它会指向一个不存在的技能')
+
+    const zip = makeZip([{ name: 'bundle-del/SKILL.md', data: HUB_SKILL_MD('bundle-del') }])
+    const staging = await mkdtemp(join(tmpdir(), 'dsh-r14d-'))
+    try {
+      const archive = join(staging, 'bundle-del.zip')
+      await writeFile(archive, zip)
+      const bundle = await importSkill({ root, scope: 'global', source: { type: 'archive', path: archive } })
+      await writeHubSource(bundle, { slug: 'bundle-del', version: '4' })
+      await removeSkill(await resolveSkillTarget({ entry: 'bundle-del', kind: 'bundle', scope: 'global', root }))
+      assert.equal(existsSync(join(root, 'bundle-del')), false, 'bundle 目录整个删掉')
+    } finally {
+      await rm(staging, { recursive: true, force: true })
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

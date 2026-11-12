@@ -14,7 +14,8 @@
 // 分片契约：
 //   · PARTS 是**唯一**的顺序来源（文件名上的数字前缀只是给人看的）；
 //   · 每个分片必须以换行结尾、且自成完整行——否则拼回的产物会在分片交界处丢/多一个换行；
-//   · 分片之间可以自由互相引用符号：拼回单文件后它们都在同一个工厂函数作用域里。
+//   · 依赖方向：分片只能引用**前序**分片。要引用后置分片必须在 `PART_FORWARD_REFS` 里登记
+//     并写清为什么安全（只允许「渲染/调用期读」）。这条由 test/client-parts-deps.test.mjs 守。
 //
 // 与 scripts/rpc-contract.mjs 的分工：descriptor 生成段的**唯一来源**是 lib/rpc-contract.js，
 // 而那个脚本只认识产物路径 lib/client.js。所以 --write 在重写产物之前，会先把产物里的生成段
@@ -39,15 +40,36 @@ export const CLIENT_PATH = join(ROOT, 'lib', 'client.js')
 export const PARTS = [
   '00-boot.js',            // 模块壳 + __injectCss + React hooks
   '10-theme-css.js',       // 主题令牌 + MCP_CSS + SKILLS_CSS + h()
-  '20-locale.js',          // 中英词典 + t() / localized()
-  '30-skill-model.js',     // 技能面的纯逻辑（作用域、分组、诊断）
-  '40-shared-ui.js',       // 共享工具与 UI 原子（含 MCP 预设、Schema 可读化）
+  '20-locale.js',          // 中英词典 + t() / localized() + 语言版本 store + locale 接线
+  '30-skill-model.js',     // 技能面的纯逻辑（作用域、分组、诊断、安装目标身份）
+  '40-shared-ui.js',       // 共享工具与 UI 原子（含 MCP 预设、Schema 可读化、排序键、能力层枚举）
   '50-mcp-panels.js',      // MCP 面：列表 / 详情 / 编辑 / 导入 / 市场 / 导出
   '60-tool-loading.js',    // 工具页：加载策略与工具表
   '70-shell.js',           // 面板外壳与入口（McpTab、悬浮按钮、更新提示）
   '80-skills-face.js',     // 技能面：列表 / 详情 / 市场
-  '90-contribution.js',    // contribution 描述符 + locale 接线 + apply
+  '90-contribution.js',    // contribution 描述符 + apply
 ]
+
+/**
+ * 后置引用的**显式登记表**（唯一允许的方向例外）。
+ *
+ * 默认规则：每个分片只能引用 PARTS 里排在它**前面**的分片——拼回单文件后它们已经求值完，
+ * 不存在 TDZ。需要引用后置分片时必须登记在这里，并写清为什么安全：只允许「渲染/调用期读」，
+ * 绝不允许模块求值期读。
+ *
+ * 为什么需要这张表：分片曾经「可以自由互相引用」，于是依赖方向靠的是「反正都在渲染期调用」
+ * 这个巧合。真出现模块求值期的后置引用时，产物在浏览器里直接 TDZ 白屏——而 client:check
+ * 比的是产物与分片的**一致性**，对顺序错误一言不发。闸门在 test/client-parts-deps.test.mjs，
+ * 它会同时报「没登记的新越界」与「登记了却已不再引用的陈旧项」。
+ */
+export const PART_FORWARD_REFS = {
+  '70-shell.js': {
+    '80-skills-face.js': {
+      names: ['SkillsPanel'],
+      why: 'McpTab 在渲染期渲染技能面组件（h(SkillsPanel, …) 在函数体内），模块求值期不碰它。',
+    },
+  },
+}
 
 /** rpc-contract 生成段的边界（与 scripts/rpc-contract.mjs 同一对标记）。 */
 const RPC_BEGIN = '// <rpc-contract:begin> 由 scripts/rpc-contract.mjs 生成，勿手改'

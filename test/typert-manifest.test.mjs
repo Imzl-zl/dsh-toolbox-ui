@@ -92,7 +92,8 @@ test('every skills invocation is namespaced, correctly identified and self-consi
   const mcp = TYPERT.invocations.filter((invocation) => invocation.namespace === 'mcpManager')
   // 37 → 38（1.8.1）：新增 setDefer（行内单台的延迟开关）。
   // 38 → 42（1.10.0）：统一工具加载策略的全局/项目读写四个方法。
-  assert.equal(mcp.length, 42, `MCP 的方法数应保持 42，实际 ${mcp.length}`)
+  // 42 → 43（1.11.1）：新增 exportGlobalJson（全局层导出，R9）。
+  assert.equal(mcp.length, 43, `MCP 的方法数应保持 43，实际 ${mcp.length}`)
 
   for (const invocation of skills) {
     const where = `skills 调用 ${invocation.method}`
