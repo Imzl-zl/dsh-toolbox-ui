@@ -992,3 +992,63 @@ Anthropic `advanced-tool-use` 页面的 Tool Search Tool：
 
 - Electron 壳特有的两件事：`document.visibilityState` 在桌面窗口最小化时是否真的变 `hidden`（web 下成立），以及打包后的 desktop profile 路径（真机验证用的是 web 入口 + 同一套 harness）。
 - 0.2.1 开发宿主下的行为仍只有单测证据（真机只跑了 0.2.2-rc.1）。
+
+<h3>0.2.2-rc.2 适配（issue #11 的真根因）</h3>
+
+`NEW-SESSION-PROMPT-AUDIT.md` 的审查轮之后，用户报了 issue #11“插件入口没有挂载”。
+第一个修复（让位检测要求对手“在跑”，`fb30488`）**只修掉了症状**：真机跑 rc.2 才看到根因。
+
+#### 根因：服务名撞车，不是让位判据
+
+rc.2 的 `@deepseek-ai/dsh-web-app` **内置** `@deepseek-ai/dsh-mcp-manager`，它和我们一样
+`super(ctx, "mcpManager")`。谁先注册谁赢，另一个直接抛：
+
+```
+mcp-manager (@deepseek-ai/dsh-mcp-manager): Error: service "mcpManager" has been registered at <McpManagerGateway>
+```
+
+用户看到的就是官方那个“启动失败”；旧版让位检测又据此把我们的入口整体让掉 ⇒ “入口没了”。
+
+它只有 `watch/restart/probe`（只读 + 重启，不写配置），且没有 `dsh.client`（没有面板），
+所以做法是**让开名字**，不是让位：
+
+- `lib/rpc-contract.js` 新增 `MCP_SERVICE = 'toolboxMcp'`（一处定义），契约表 / 生成器 /
+  `lib/typert.js` / 客户端描述符 / `lib/index.js` 的 `super(ctx, …)` 全跟着它
+- ⚠️ 这会改 wire 路径：`/api/mcpManager/*` → `/api/toolboxMcp/*`（只有本插件的客户端用）
+- 让位检测（D15）**不再向宿主自带的那个让位**（`@deepseek-ai/` scope 下的一律不算对手面板）；
+  第三方 MCP 管理面板在跑时照旧让位
+
+#### 怎么在“最新版”上验（可复用）
+
+npm 上 `latest` 是 0.2.2-rc.1，**rc.2 在 `next`** —— 所以 `npx @deepseek-ai/dsh` 默认是旧的：
+
+```bash
+# 1) 隔离 home + profile：装 rc.2 的 base/web-app + 本工作树
+mkdir -p $DSH_HOME/profiles/rc2
+#    package.json: dependencies { @deepseek-ai/dsh-base: 0.2.2-rc.2, @deepseek-ai/dsh-web-app: 0.2.2-rc.2,
+#                                 dsh-toolbox-ui: file:<worktree> }
+#                   dsh.profile.bundles: [base, web-app, dsh-toolbox-ui]
+CI=true npm install --ignore-scripts --omit=optional   # koffi 原生件拿不到，只能看 UI/RPC，跑不了模型回合
+# 2) rc.2 的 launcher（不能用桌面壳的：它会按版本禁用 rc.2 插件）
+npm i @deepseek-ai/dsh@0.2.2-rc.2 --ignore-scripts --omit=optional
+node node_modules/@deepseek-ai/dsh/lib/bin.js --profile rc2 --no-open --port 1981x
+```
+
+#### 实测矩阵（两版，各自一次）
+
+| | rc.1（出货桌面壳） | rc.2（npm `next`） |
+|---|---|---|
+| 启动告警 | 0 | 0（修复前：官方 manager 抛 `service "mcpManager" has been registered`） |
+| 侧栏「工具箱」入口 | 有 | 有 |
+| `/api/toolboxMcp/list` | 正常（exa connected、3 工具、按需） | 正常 |
+| `conflictingManager` | null | null |
+| 官方 `mcpManager` 服务 | 不存在 | **能应答**（`/api/mcpManager/probe` 返回业务错误 “unknown server” 而非“服务不存在”） |
+| 模型回合 / `tool_search` | 跑过（1 轮 3 步，`select:web_search_exa` 命中 1402 字符） | **未跑**：npm 安装缺 `koffi` 原生件（`dsh-fs-local` / `dsh-subprocess-local` 的硬依赖），CMake 也不在；要跑得等桌面版升到 rc.2 或补工具链 |
+
+#### 两版兼容怎么守
+
+- 代码里**不写版本号分支**：能力探测（`typeof tools.definitions === 'function'`、slot `inject`）
+  已经覆盖差异；这次踩的坑是**名字独占**，也不是版本 API。
+- 要守的其实是“两个真宿主各跑一次”：把上面那段做成 `.tasks/` 下的脚本 + 一个“对手条目”夹具，
+  每版更新跑一次（约 2–3 分钟）。devDependency 目前仍钉 0.2.1-rc.5，应推进到最新、
+  把“上一版”留成 legacy 夹具。
