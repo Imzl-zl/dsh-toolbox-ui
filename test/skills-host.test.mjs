@@ -134,8 +134,8 @@ test('the handover probe sees the OLD package even though it shares our patch id
   const ctx = {
     loader: {
       entries: () => [
-        { options: { id: 'mcp-manager-ui', name: 'dsh-toolbox-ui' } },
-        { options: { id: 'mcp-manager-ui', name: 'dsh-mcp-manager-ui' } },
+        { options: { id: 'mcp-manager-ui', name: 'dsh-toolbox-ui' }, fiber: { state: 2 } },
+        { options: { id: 'mcp-manager-ui', name: 'dsh-mcp-manager-ui' }, fiber: { state: 2 } },
       ],
     },
   }
@@ -148,8 +148,8 @@ test('the handover probe reports a genuinely different manager plugin', async ()
   const ctx = {
     loader: {
       entries: () => [
-        { options: { id: 'mcp-manager-ui', name: 'dsh-toolbox-ui' } },
-        { options: { id: 'some-other-manager', name: 'dsh-mcp-manager-ui-legacy' } },
+        { options: { id: 'mcp-manager-ui', name: 'dsh-toolbox-ui' }, fiber: { state: 2 } },
+        { options: { id: 'some-other-manager', name: 'dsh-mcp-manager-ui-legacy' }, fiber: { state: 2 } },
       ],
     },
   }
@@ -169,6 +169,32 @@ test('the handover probe fails open, so a broken loader never hides the panel', 
   ]) {
     const conflict = await SkillsManagerGateway.prototype.conflictingManager.call({ ctx: broken })
     assert.equal(conflict, null, '检测失败必须返回「无冲突」（fail-open），而不是抛错')
+  }
+})
+
+test('the handover probe ignores a manager that exists in the config but is NOT running', async () => {
+  // 真机回归（issue #11，DSH 0.2.2-rc.2）：`@deepseek-ai/dsh-web-app` 内置了
+  // `@deepseek-ai/dsh-mcp-manager`，它在宿主里**启动失败**（state=FAILED）。
+  // 旧判据只看“条目存在”就整个让掉入口 ⇒ 用户看到“插件入口没有挂载”，而那个“对手”
+  // 根本一行代码都没跑。让位的语义是“不要跟另一个**能改写同一份配置**的面板打架”，
+  // 一个启动失败的插件不可能改写任何东西。
+  const cases = [
+    { label: 'apply 失败', entry: { fiber: { state: 3 } } },
+    { label: 'import 失败 / 没有 fiber', entry: {} },
+    { label: '还在等注入（pending）', entry: { fiber: { state: 0 } } },
+    { label: '已停用（stopped）', entry: { fiber: { state: 4 } }, disabled: true },
+  ]
+  for (const { label, entry, disabled } of cases) {
+    const ctx = {
+      loader: {
+        entries: () => [
+          { options: { id: 'mcp-manager-ui', name: 'dsh-toolbox-ui' }, fiber: { state: 2 } },
+          { ...entry, ...(disabled === undefined ? {} : { disabled }), options: { id: 'mcp-manager', name: '@deepseek-ai/dsh-mcp-manager' } },
+        ],
+      },
+    }
+    assert.equal(await SkillsManagerGateway.prototype.conflictingManager.call({ ctx }), null,
+      `${label}的对手不得让入口消失（它没在跑，不可能改写配置）`)
   }
 })
 
