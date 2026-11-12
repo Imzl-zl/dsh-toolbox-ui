@@ -89,7 +89,7 @@ test('every skills invocation is namespaced, correctly identified and self-consi
   // 已由 package-contract.test.mjs 的「the three contract faces list the same methods
   // in the same order」逐项比对（含顺序）。这里保留精确计数，作为第三道闸：
   // 它回答的是"manifest 里到底有几条"，与那道比对互为冗余。
-  const mcp = TYPERT.invocations.filter((invocation) => invocation.namespace === 'mcpManager')
+  const mcp = TYPERT.invocations.filter((invocation) => invocation.namespace === 'toolboxMcp')
   // 37 → 38（1.8.1）：新增 setDefer（行内单台的延迟开关）。
   // 38 → 42（1.10.0）：统一工具加载策略的全局/项目读写四个方法。
   // 42 → 43（1.11.1）：新增 exportGlobalJson（全局层导出，R9）。
@@ -121,7 +121,7 @@ test('the skills namespace is separate from the MCP namespace in the wire contra
   for (const invocation of TYPERT.invocations) {
     byNamespace.set(invocation.namespace, (byNamespace.get(invocation.namespace) ?? 0) + 1)
   }
-  assert.deepEqual([...byNamespace.keys()].sort(), ['mcpManager', 'skillsManager'],
+  assert.deepEqual([...byNamespace.keys()].sort(), ['skillsManager', 'toolboxMcp'],
     `manifest 应恰好含两个 namespace，实际：${JSON.stringify([...byNamespace.keys()])}`)
   // 每个 endpoint（namespace/method）唯一。
   const endpoints = TYPERT.invocations.map((invocation) => `${invocation.namespace}/${invocation.method}`)

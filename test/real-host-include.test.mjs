@@ -108,7 +108,7 @@ test('real include host: add and removeServer survive a restart without duplicat
     assert.ok([...includeTree.entries()].some((entry) => entry.options.id === 'mcp-a'), 'patch 行必须由 include 组合持有')
 
     // add(b)：组合应用之后工具立刻活。
-    const added = await ctx.get('mcpManager').add({ name: 'b', transport: 'stdio', command: process.execPath, args: [server, sentinelB] })
+    const added = await ctx.get('toolboxMcp').add({ name: 'b', transport: 'stdio', command: process.execPath, args: [server, sentinelB] })
     assert.equal(added.live, 'applied')
     assert.match(added.note, /开始连接/)
     assert.ok(await waitFor(() => ctx.get('tools').schemas().some((s) => s.name === 'mcp__b__echo')), '新服务器的工具必须立刻可见')
@@ -133,7 +133,7 @@ test('real include host: add and removeServer survive a restart without duplicat
     assert.equal(await readFile(base, 'utf8'), BASE_CONFIG, '重启后 base 配置仍然原样')
 
     // removeServer(a)：条目停掉、子进程退出、patch 行删掉，base 不动。
-    const removed = await ctx.get('mcpManager').removeServer('a')
+    const removed = await ctx.get('toolboxMcp').removeServer('a')
     assert.equal(removed.live, 'applied')
     assert.match(removed.note, /停止运行中的连接/)
     assert.ok(await waitFor(() => !ctx.get('tools').schemas().some((s) => s.name === 'mcp__a__echo')), '工具必须消失')

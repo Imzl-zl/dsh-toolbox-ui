@@ -60,7 +60,7 @@ test('MCP panel still activates on a real cordis Context when skills is absent',
     await ctx.plugin(McpManagerGateway, {})
     await ctx.plugin(SkillsManagerGateway, {})
 
-    assert.notEqual(ctx.get('mcpManager'), undefined, '缺 skills 时 MCP 面板必须照常可用（否则是静默回归）')
+    assert.notEqual(ctx.get('toolboxMcp'), undefined, '缺 skills 时 MCP 面板必须照常可用（否则是静默回归）')
     // 技能侧只是等待依赖，不抛错、也不激活——这正是「只影响技能这一块」。
     assert.equal(ctx.get('skillsManager'), undefined, '依赖未满足时技能服务应保持未激活')
   } finally {
@@ -101,7 +101,7 @@ test('mounting the plugin exposes the skills service without a second patch entr
     // 只装载插件本身——不手工挂任何子服务。
     await ctx.plugin(pluginDefault, {})
 
-    assert.notEqual(ctx.get('mcpManager'), undefined, 'MCP 服务应已激活')
+    assert.notEqual(ctx.get('toolboxMcp'), undefined, 'MCP 服务应已激活')
     assert.notEqual(ctx.get('skillsManager'), undefined,
       '装载插件本身就必须带出 skills 服务（由现有插件内部 ctx.plugin 挂载，而不是靠外部再挂一次）')
   } finally {
@@ -196,6 +196,36 @@ test('the handover probe ignores a manager that exists in the config but is NOT 
     assert.equal(await SkillsManagerGateway.prototype.conflictingManager.call({ ctx }), null,
       `${label}的对手不得让入口消失（它没在跑，不可能改写配置）`)
   }
+})
+
+test('the handover probe never yields to the host\'s own bundled mcp-manager', async () => {
+  // 0.2.2-rc.2 起 `@deepseek-ai/dsh-web-app` 自带 `@deepseek-ai/dsh-mcp-manager`：它**没有**
+  // dsh.client（没有任何面板），只暴露 watch/restart/probe，且不可卸载。向它让位 = 用户
+  // 永久失去唯一的面板入口（issue #11 的真机形态）。所以即便它在跑，也不让。
+  const ctx = {
+    loader: {
+      entries: () => [
+        { options: { id: 'mcp-manager-ui', name: 'dsh-toolbox-ui' }, fiber: { state: 2 } },
+        { options: { id: 'mcp-manager', name: '@deepseek-ai/dsh-mcp-manager' }, fiber: { state: 2 } },
+      ],
+    },
+  }
+  assert.equal(await SkillsManagerGateway.prototype.conflictingManager.call({ ctx }), null,
+    '宿主自带的 manager 在跑也不得让位（它没有面板，让了就什么都没了）')
+})
+
+test('the handover probe still yields to a running third-party manager', async () => {
+  // 反例保险：第三方（含旧包）在跑时必须照旧让位，否则“两个面板并存”会回来。
+  const ctx = {
+    loader: {
+      entries: () => [
+        { options: { id: 'mcp-manager-ui', name: 'dsh-toolbox-ui' }, fiber: { state: 2 } },
+        { options: { id: 'other-manager', name: '@someone/dsh-mcp-manager-pro' }, fiber: { state: 2 } },
+      ],
+    },
+  }
+  const conflict = await SkillsManagerGateway.prototype.conflictingManager.call({ ctx })
+  assert.equal(conflict?.name, '@someone/dsh-mcp-manager-pro', '第三方面板在跑时必须让位')
 })
 
 test('the handover probe ignores unrelated loader entries', async () => {

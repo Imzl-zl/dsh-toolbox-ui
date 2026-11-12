@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { INTERNAL_ONLY, NAMESPACES, splitParam } from '../lib/rpc-contract.js'
+import { INTERNAL_ONLY, MCP_SERVICE, NAMESPACES, splitParam } from '../lib/rpc-contract.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const TYPERT_PATH = join(ROOT, 'lib', 'typert.js')
@@ -28,7 +28,7 @@ const CLIENT_END = '// <rpc-contract:end>'
 export function renderTypert() {
   const invocations = []
   for (const { service, methods } of NAMESPACES) {
-    const factory = service === 'mcpManager' ? 'mv' : 'mvs'
+    const factory = service === MCP_SERVICE ? 'mv' : 'mvs'
     for (const method of methods) {
       const params = method.params.map((param) => {
         const { name, symbol } = splitParam(param)
@@ -70,17 +70,17 @@ const param = (name, symbol) => ({
 })
 
 /**
- * mcpManager 的 invocation 工厂。
+ * MCP 服务的 invocation 工厂（服务名见 lib/rpc-contract.js 的 MCP_SERVICE）。
  *
- * 为什么不复用 mvs()：mv() 把 id/service/namespace 三处都写死成 mcpManager（三处必须一致，
+ * 为什么不复用 mvs()：mv() 把 id/service/namespace 三处都写死成同一个服务名（三处必须一致，
  * 所以留一个工厂一种形态是刻意的）。两个服务的 serviceKey 与 wire namespace 都不同
- * （mcpManager / skillsManager），硬套 mv() 只会得到 id 与实际 endpoint 不符的条目——
+ * （MCP_SERVICE / skillsManager），硬套 mv() 只会得到 id 与实际 endpoint 不符的条目——
  * 那种错误在结构上完全合法，只在调用时静默打到错的服务上。故参数化 service/namespace。
  */
 const mv = (method, params, resultSym) => ({
-  id: \`dsh-toolbox-ui#mcpManager/\${method}\`,
-  service: 'mcpManager',
-  namespace: 'mcpManager',
+  id: \`dsh-toolbox-ui#${MCP_SERVICE}/\${method}\`,
+  service: '${MCP_SERVICE}',
+  namespace: '${MCP_SERVICE}',
   method,
   invocation: { kind: 'direct' },
   parameters: params,
@@ -119,10 +119,10 @@ export function renderClientRegion() {
     for (const method of methods) {
       const params = method.params.map((param) => {
         const { name, symbol } = splitParam(param)
-        return service === 'mcpManager' ? `mcpParam('${name}', '${symbol}')` : `skParam('${name}', '${symbol}')`
+        return service === MCP_SERVICE ? `mcpParam('${name}', '${symbol}')` : `skParam('${name}', '${symbol}')`
       })
-      if (service === 'mcpManager') {
-        lines.push(`    { id: 'dsh-toolbox-ui#mcpManager/${method.method}', service: 'mcpManager', namespace: 'mcpManager', method: '${method.method}', invocation: { kind: 'direct' }, parameters: [${params.join(', ')}], result: mcpCodec('${method.result}') },`)
+      if (service === MCP_SERVICE) {
+        lines.push(`    { id: 'dsh-toolbox-ui#${MCP_SERVICE}/${method.method}', service: '${MCP_SERVICE}', namespace: '${MCP_SERVICE}', method: '${method.method}', invocation: { kind: 'direct' }, parameters: [${params.join(', ')}], result: mcpCodec('${method.result}') },`)
       } else {
         lines.push(`    sk('${method.method}', [${params.join(', ')}], '${method.result}'),`)
       }

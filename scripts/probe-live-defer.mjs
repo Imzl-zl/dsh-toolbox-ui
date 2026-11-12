@@ -78,14 +78,14 @@ const toolNames = async () => {
 console.log('serena 已连接（真 mcp-client）。开始同进程翻转 defer：\n')
 console.log('初始(defer:true)        ->', JSON.stringify(await countMcp()))
 
-const off = await ctx.get('mcpManager').setDeferAll({ defer: false })
+const off = await ctx.get('toolboxMcp').setDeferAll({ defer: false })
 console.log('setDeferAll({defer:false}) ->', JSON.stringify(off))
 const afterOff = await countMcp()
 console.log('  同进程 assemble        ->', JSON.stringify(afterOff))
 const names = await toolNames()
 console.log('  mcp__ 工具样例:', names.slice(0, 4).join(', '), '...')
 
-const on = await ctx.get('mcpManager').setDeferAll({ defer: true })
+const on = await ctx.get('toolboxMcp').setDeferAll({ defer: true })
 console.log('\nsetDeferAll({defer:true})  ->', JSON.stringify(on))
 const afterOn = await countMcp()
 console.log('  同进程 assemble        ->', JSON.stringify(afterOn))

@@ -76,7 +76,7 @@ test('真宿主里装配出的 Remote 标记与契约表逐方法同序（wire �
     // 技能网关是本服务的**子插件**（lib/index.js 的构造函数里 `ctx.plugin(SkillsManagerGateway)`）：
     // 提供了 skills 之后它自己就会激活，这里再挂一次只会撞 "service has been registered"。
     const markers = [
-      ...remoteMethods(ctx.get('mcpManager')),
+      ...remoteMethods(ctx.get('toolboxMcp')),
       ...remoteMethods(ctx.get('skillsManager')),
     ]
     const expected = NAMESPACES.flatMap(({ methods }) => methods.map((method) => method.method))
@@ -169,7 +169,7 @@ test('两个命名空间的方法数与 TYPERT 的 invocation 段逐段对得上
   for (const invocation of TYPERT.invocations) {
     byNamespace.set(invocation.namespace, (byNamespace.get(invocation.namespace) ?? 0) + 1)
   }
-  assert.equal(byNamespace.get('mcpManager'), MCP_METHODS.length)
+  assert.equal(byNamespace.get('toolboxMcp'), MCP_METHODS.length)
   assert.equal(byNamespace.get('skillsManager'), SKILL_METHODS.length)
 })
 

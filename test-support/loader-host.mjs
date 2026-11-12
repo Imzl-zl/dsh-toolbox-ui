@@ -137,7 +137,7 @@ export async function createLoaderHost(patchBody) {
   return {
     ctx,
     tools,
-    manager: ctx.get('mcpManager'),
+    manager: ctx.get('toolboxMcp'),
     patch,
     baseConfig,
     root,

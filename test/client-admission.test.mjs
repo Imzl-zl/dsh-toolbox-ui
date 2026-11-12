@@ -152,7 +152,7 @@ test('the real client gateway admits every descriptor our client bundle mounts',
     assert.equal(typeof dispose, 'function', 'apply() 应返回清理函数')
 
     // 反向下限：真 $mount 确实把两个 namespace 装上了，否则「没抛错」可能只是空跑。
-    assert.notEqual(ctx.get('remote.mcpManager'), undefined, 'mcpManager 命名空间应已挂载')
+    assert.notEqual(ctx.get('remote.toolboxMcp'), undefined, 'mcpManager 命名空间应已挂载')
     assert.notEqual(ctx.get('remote.skillsManager'), undefined, 'skillsManager 命名空间应已挂载')
     await dispose()
   } finally {

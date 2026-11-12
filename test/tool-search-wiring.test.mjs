@@ -149,7 +149,7 @@ test('setDeferAll 一次把本 profile 的所有 MCP 切到延迟，且不丢字
     { patchBody: TWO_ENTRY_PATCH },
   )
   try {
-    const manager = mounted.ctx.get('mcpManager')
+    const manager = mounted.ctx.get('toolboxMcp')
     const on = await manager.setDeferAll({ defer: true })
     assert.equal(on.changed, 2, '两个本 profile 条目都要被改')
 
@@ -190,7 +190,7 @@ test('setDeferAll 只改本 profile 自己那条，同名的别层条目原样�
     { patchBody: TWO_ENTRY_PATCH },
   )
   try {
-    const manager = mounted.ctx.get('mcpManager')
+    const manager = mounted.ctx.get('toolboxMcp')
     const result = await manager.setDeferAll({ defer: true })
     assert.equal(result.changed, 2, 'alpha 与 beta 都是本 profile 的条目，都要改')
 
@@ -213,7 +213,7 @@ test('setDeferAll 只改本 profile 自己那条，同名的别层条目原样�
 test('setDeferAll 在没有可改条目时返回 0 且不动 patch', async () => {
   const mounted = await mountPlugin([], { patchBody: TWO_ENTRY_PATCH })
   try {
-    const manager = mounted.ctx.get('mcpManager')
+    const manager = mounted.ctx.get('toolboxMcp')
     const before = await readFile(mounted.patchPath, 'utf8')
     const result = await manager.setDeferAll({ defer: true })
     assert.equal(result.changed, 0)
@@ -275,14 +275,14 @@ test('装配：setDeferAll 同步内存 entry：运行中的会话立即生效�
     // 16 个工具 ≥ 阈值 15：延迟生效，未发现的直调被拒。
     assert.equal(typeof guard({ name: 'mcp__deferme__tool_1', agent }), 'string', '初始应拒绝直调')
 
-    const off = await mounted.ctx.get('mcpManager').setDeferAll({ defer: false })
+    const off = await mounted.ctx.get('toolboxMcp').setDeferAll({ defer: false })
     assert.equal(off.changed, 1)
     // 同一份装配、同一个 agent：必须立刻放行。
     assert.equal(guard({ name: 'mcp__deferme__tool_1', agent }), undefined, '关掉延迟后应立即放行')
     assert.match(await readFile(mounted.patchPath, 'utf8'), /deferme: resident/, 'patch 也要落到盘上')
 
     // 反方向同样要立即生效，否则只是"能关不能开"。
-    const on = await mounted.ctx.get('mcpManager').setDeferAll({ defer: true })
+    const on = await mounted.ctx.get('toolboxMcp').setDeferAll({ defer: true })
     assert.equal(on.changed, 1)
     assert.equal(typeof guard({ name: 'mcp__deferme__tool_1', agent }), 'string', '重新开启后应立即拒绝')
 
@@ -306,12 +306,12 @@ test('update(spec) 只翻 defer 时同步内存：同进程立即生效，不重
     const agent = createAgent()
     assert.equal(typeof guard({ name: 'mcp__deferme__tool_1', agent }), 'string', '初始应拒绝直调')
 
-    const off = await mounted.ctx.get('mcpManager').update({ name: 'deferme', transport: 'stdio', command: 'node', defer: false })
+    const off = await mounted.ctx.get('toolboxMcp').update({ name: 'deferme', transport: 'stdio', command: 'node', defer: false })
     assert.match(off.note, /立即生效/)
     assert.equal(guard({ name: 'mcp__deferme__tool_1', agent }), undefined, '关掉延迟后应立即放行')
     assert.match(await readFile(mounted.patchPath, 'utf8'), /defer: false/)
 
-    const on = await mounted.ctx.get('mcpManager').update({ name: 'deferme', transport: 'stdio', command: 'node', defer: true })
+    const on = await mounted.ctx.get('toolboxMcp').update({ name: 'deferme', transport: 'stdio', command: 'node', defer: true })
     assert.equal(typeof guard({ name: 'mcp__deferme__tool_1', agent }), 'string', '重新开启后应立即拒绝')
     assert.match(on.note, /立即生效/)
   } finally {
@@ -330,7 +330,7 @@ test('update(spec) 动了连接字段时写明"本部署没有热应用入口"�
     { patchBody: ONE_DEFERME_PATCH },
   )
   try {
-    const r = await mounted.ctx.get('mcpManager').update({ name: 'deferme', transport: 'stdio', command: 'other-cmd', args: ['--x'] })
+    const r = await mounted.ctx.get('toolboxMcp').update({ name: 'deferme', transport: 'stdio', command: 'other-cmd', args: ['--x'] })
     assert.equal(r.persisted, 'applied', '盘上必须已经写成新配置')
     assert.equal(r.live, 'skipped', '没有 profile 启动器时不得宣称生效')
     assert.match(r.liveReason, /profileContext/, '必须说清为什么没生效，而不是一句"已更新"')
@@ -349,7 +349,7 @@ test('add(spec) 写入 profile patch，并在没有 profile 启动器时如实�
   // 连上了，也不许把行留在半套状态。
   const mounted = await mountPlugin([], { patchBody: ONE_DEFERME_PATCH })
   try {
-    const r = await mounted.ctx.get('mcpManager').add({ name: 'fresh', transport: 'stdio', command: 'node' })
+    const r = await mounted.ctx.get('toolboxMcp').add({ name: 'fresh', transport: 'stdio', command: 'node' })
     assert.equal(r.persisted, 'applied')
     assert.equal(r.live, 'skipped')
     assert.match(r.note, /重启宿主后生效/)
@@ -363,7 +363,7 @@ test('add(spec) 写入 profile patch，并在没有 profile 启动器时如实�
 test('removeServer 删掉 patch 行，并在没有 profile 启动器时如实报"重启后连接才停"', async () => {
   const mounted = await mountPlugin([{ serverName: 'deferme', transport: 'stdio', command: 'node' }], { patchBody: ONE_DEFERME_PATCH })
   try {
-    const r = await mounted.ctx.get('mcpManager').removeServer('deferme')
+    const r = await mounted.ctx.get('toolboxMcp').removeServer('deferme')
     assert.equal(r.persisted, 'applied')
     assert.equal(r.live, 'skipped')
     assert.match(r.note, /重启宿主后这条连接才会停/)
@@ -377,7 +377,7 @@ test('removeServer 删掉 patch 行，并在没有 profile 启动器时如实报
 test('installBuiltins 追加的条目写进 patch，并在没有 profile 启动器时如实报"重启后生效"', async () => {
   const mounted = await mountPlugin([], { patchBody: '[]\n' })
   try {
-    const r = await mounted.ctx.get('mcpManager').installBuiltins({ ids: ['firecrawl'] })
+    const r = await mounted.ctx.get('toolboxMcp').installBuiltins({ ids: ['firecrawl'] })
     assert.deepEqual(r.added, ['firecrawl'])
     assert.equal(r.persisted, 'applied')
     assert.equal(r.live, 'skipped')
@@ -410,7 +410,7 @@ test('装配：ToolSearch 初始化失败不撤回 MCP manager', async () => {
     { occupied: ['tool_search', 'deferred_tool_search', 'mcp_tool_search'] },
   )
   try {
-    assert.ok(mounted.ctx.get('mcpManager'), 'ToolSearch 失败不能撤回 MCP manager')
+    assert.ok(mounted.ctx.get('toolboxMcp'), 'ToolSearch 失败不能撤回 MCP manager')
     assert.equal(mounted.registered.some((name) => name.includes('tool_search')), false)
     assert.ok(mounted.ctx.logger, '失败必须保留可观察日志通道')
   } finally {
@@ -542,7 +542,7 @@ test('setDeferAll 不传 wsPath 时走全局分支（空串不得被解析成 cw
     { patchBody: TWO_ENTRY_PATCH },
   )
   try {
-    const manager = mounted.ctx.get('mcpManager')
+    const manager = mounted.ctx.get('toolboxMcp')
     const result = await manager.setDeferAll({ defer: true })
     assert.equal(result.changed, 2, '必须走全局分支，改 patch 里的两个条目')
     assert.match(await readFile(mounted.patchPath, 'utf8'), /alpha: deferred/)
@@ -570,7 +570,7 @@ test('toolSearchSettings 带目录体检：预算、延迟服务器、工具池�
     { patchBody: ONE_DEFERME_PATCH },
   )
   try {
-    const manager = mounted.ctx.get('mcpManager')
+    const manager = mounted.ctx.get('toolboxMcp')
     const detail = await manager.toolSearchSettings()
     assert.ok(detail.catalog, '必须带 catalog 体检字段（未修时是 undefined）')
     // ① 预算与 settings **同源**：体检里的值不许是第二个真相源。

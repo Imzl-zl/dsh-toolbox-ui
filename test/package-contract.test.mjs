@@ -459,7 +459,7 @@ test('the three contract faces list the same methods in the same order', async (
   // **顺序也是契约**，所以比较不排序：三份清单是同一件事的三面，位置一致才可能一眼对照。
   // 曾经这里排过序，于是 scanImportSources 一组在 index.js 里被追加到末尾而没人发现。
   // 新增方法时，请在同样的位置插入三份清单。
-  // 本包有**两个** Remote 命名空间（mcpManager / skillsManager），所以三边清单都是
+  // 本包有**两个** Remote 命名空间（toolboxMcp / skillsManager），所以三边清单都是
   // 「MCP 段 + 技能段」的同序拼接：host 是一个 `applyRemoteMethods(this, <表>)` 的装配点
   // （R6.1 之前是 55 行手写 `Remote("…")`），typert 是 mv() / mvs() 两个工厂产出的
   // invocations，client 是字面 descriptor 加 sk() 调用。
@@ -481,7 +481,7 @@ test('the three contract faces list the same methods in the same order', async (
   // 包名不写第二遍：从 package.json 推导。写死字面量时，改包名会让这条正则一条都匹配不到，
   // 于是 descriptors 变成空数组——它照样会红，但理由是「顺序不对」，指向完全错误的地方。
   const escapedName = packageJson.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const mcpPattern = new RegExp(`id: '${escapedName}#mcpManager/([A-Za-z0-9_]+)'`, 'g')
+  const mcpPattern = new RegExp(`id: '${escapedName}#toolboxMcp/([A-Za-z0-9_]+)'`, 'g')
   const skillPattern = /^\s+sk\('([A-Za-z0-9_]+)'/gm
   const mcpDescriptors = byPosition(client, [mcpPattern])
   const skillDescriptors = byPosition(client, [skillPattern])
@@ -489,7 +489,7 @@ test('the three contract faces list the same methods in the same order', async (
   assert.ok(declaredMethods.length >= 30, `契约表里的 wire 方法数量异常（${declaredMethods.length}）`)
   // 两个面分别先验「读到了」：只匹配到一个面时 deepEqual 会以「少一半」失败，
   // 而那句话读起来像顺序问题，所以这里先把「哪一面空了」说清楚。
-  assert.ok(mcpDescriptors.length >= 30, `client 的 mcpManager descriptor 只读到 ${mcpDescriptors.length} 条`)
+  assert.ok(mcpDescriptors.length >= 30, `client 的 toolboxMcp descriptor 只读到 ${mcpDescriptors.length} 条`)
   assert.ok(skillDescriptors.length >= 9, `client 的 skillsManager descriptor 只读到 ${skillDescriptors.length} 条`)
   assert.deepEqual(contract, declaredMethods, 'lib/typert.js 的 invocation 必须与契约表同序')
   assert.deepEqual(descriptors, declaredMethods, 'lib/client.js 的 descriptor 必须与它们同序')
@@ -545,8 +545,8 @@ test('every workspace write goes through the one registered-target gate', async 
 })
 
 test('client Remote contract includes JSON preview and import operations', () => {
-  assert.match(client, /mcpManager\/previewImport/)
-  assert.match(client, /mcpManager\/importJson/)
+  assert.match(client, /toolboxMcp\/previewImport/)
+  assert.match(client, /toolboxMcp\/importJson/)
 })
 
 test('importing from other MCP clients goes through the Host, with no client-supplied path', async () => {
@@ -796,7 +796,7 @@ test('project MCP: the tools contract carries wsPath, so the detail pane is not 
   // 于是项目 MCP 的详情页永远是空的——Host 侧早就能按 scopeKey 枚举，错只在契约窄了一格。
   assert.equal(invocation.parameters.length, 1)
   assert.equal(invocation.parameters[0].wire, 'payload')
-  const clientDescriptor = client.match(/mcpManager\/tools'[^\n]*/)?.[0] ?? ''
+  const clientDescriptor = client.match(/toolboxMcp\/tools'[^\n]*/)?.[0] ?? ''
   assert.match(clientDescriptor, /mcpParam\('payload'/)
   // 两条分支都必须发对象；裸字符串会落回标量参数那条老路。
   assert.match(client, /call\('tools', \{ name: selected, wsPath: scope \}\)/)
@@ -811,7 +811,7 @@ test('project MCP: the read-only diagnostics RPC is declared, implemented and do
   // Host 有、契约没有 = 客户端永远调不到；契约有、Host 没有 = 调用必失败。两边都要在。
   assert.match(host, /async projectConnections\(\) \{/)
   assert.match(host, /projectConnectionsView\(this\.ctx\)/)
-  assert.match(client, /mcpManager\/projectConnections/)
+  assert.match(client, /toolboxMcp\/projectConnections/)
   // refs 与 sessions 是两个独立事实（相等=健康），设计文档必须把这条判读方式写清楚，
   // 否则这个接口的返回值没人知道怎么用。
   assert.match(designDoc, /projectConnections/)
