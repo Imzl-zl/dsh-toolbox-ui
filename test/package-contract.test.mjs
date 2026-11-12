@@ -56,7 +56,8 @@ const CORDIS_LOADER_DEV_BASELINE = process.env.DSH_HOST_MATRIX_LOADER || '~1.0.6
 
 test('package exposes one Web bundle entry', () => {
   assert.equal(packageJson.dsh?.bundle?.patch, './cordis.patch.yml')
-  assert.equal(packageJson.version, '1.11.1')
+  // 这里原本写死 `packageJson.version === '1.11.1'`：版本号本来只有一个来源（package.json），
+  // 抄一遍只会变成每次 bump 都要改的第四处。"最新条目 == package version" 由 whats-new 用例守。
   assert.equal(packageJson.dsh?.client?.platform, 'web')
   // dsh.client.inject 是客户端图里的「工厂先到」依赖边，只能写真实的 client 包名：
   //   @deepseek-ai/dsh-client-runtime  —— 上游 2026-08-22 已删除（be531688 "remove Runtime"）
