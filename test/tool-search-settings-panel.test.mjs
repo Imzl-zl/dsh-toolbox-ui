@@ -308,5 +308,7 @@ test('搜索参数固定在顶部默认可见，不折叠', async () => {
   const { tree } = await openPanel(internals, call)
   assert.equal(numericInputs(tree).length, 3, '三个数字控件默认都在')
   assert.ok(allText(tree).includes('搜索设置'), '顶部有明确的标题')
-  assert.ok(allText(tree).includes('这些参数管的是 tool_search 本身'), '说明这些参数管什么')
+  // 标题旁**不再**放一段重复说明（每个参数都有自己的 ⓘ，见上一条 HintMarker 用例）。
+  // 这条钉住“别把它加回来”——它是被用户点名删掉的冗余文案。
+  assert.equal(allText(tree).includes('这些参数管的是 tool_search 本身'), false, '标题旁的重复说明不得回来')
 })

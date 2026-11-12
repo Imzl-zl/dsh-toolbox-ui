@@ -339,7 +339,9 @@ test('工具加载面板：组头只读显示整台默认，写入口只有 MCP 
   const call = async (method) => (method === 'toolSearchSettings' ? { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } } : SETTINGS)
   const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
   const tree = await openModal(internals, call, props)
-  assert.match(allText(tree), /整台默认在 MCP 页的芯片上改/, '页面要直接说清两个写入口的分工')
+  // 页面上**不再**放“整台默认在 MCP 页改”那段小字（组头已经写着“整台：按需（未单独设置）”，
+  // 重复）；下面两条才是这条用例真正要守的事。
+  assert.equal(allText(tree).includes('整台默认在 MCP 页的芯片上改'), false, '重复的入口分工说明不得回来')
   assert.match(allText(tree), /整台：按需（未单独设置）/, '组头要显示整台默认及它从哪来')
   const groupPicks = collectAll(tree, (node) => String(node.props?.['aria-label'] || '').includes('整台默认'))
   assert.equal(groupPicks.length, 0, '工具页不提供整台默认的第二个写入口')
@@ -461,8 +463,14 @@ test('工具加载面板：目录体检显示延迟服务器、工具池与上�
     }
     : SETTINGS)
   const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
-  const text = allText(await openModal(internals, call, props))
-  assert.ok(text.includes('目录体检'), `体检块必须渲染出来：${text.slice(0, 200)}`)
+  const tree = await openModal(internals, call, props)
+  const text = allText(tree)
+  // 体检块**独立成块**，不塞进参数网格（用户点名：那段体检文字在 1/3 列里挤成一坠，
+  // 还把三个参数挤成两行）。这两条钉的是布局决定，不只是“文字出现过”。
+  assert.equal(collectAll(tree, (node) => node?.props?.className === 'dsh-mcp-tool-facts').length, 1,
+    `体检块必须渲染出来：${text.slice(0, 200)}`)
+  const grid = collectAll(tree, (node) => node?.props?.className === 'dsh-mcp-tool-params-grid')[0]
+  assert.equal(grid?.props?.children?.length, 3, '参数网格里只有三个控件（体检不在里面）')
   assert.ok(text.includes('延迟服务器 2 台（alpha、beta）'), '延迟服务器要列出名字（否则不知道该调哪台）')
   assert.ok(text.includes('目录预算 12500 字符'), '预算要与设置同源')
   // 上下文成本必须报**字符数**：这是 ToolSearch 场景的核心指标（每轮请求都要付）。

@@ -195,7 +195,9 @@ test('every label a table can produce is covered by the dictionary', () => {
  * （`C:\path`）。这些文案里只出现 `\\` 一种转义，所以一条 replace 就够。
  */
 function calledTranslationKeys() {
-  const code = clientSource.split('\n').map((line) => line.replace(/^\s*\/\/.*$/, '')).join('\n')
+  // CRLF 也要能剥：`.` 不匹配 `\r`，所以 `.*$` 在 CRLF 文件上一条注释都剥不掉，
+  // 行文里的 `t('中文')` 会被当成调用点（真踩过：脚本重写一个分片把行尾变成了 CRLF）。
+  const code = clientSource.split('\n').map((line) => line.replace(/^\s*\/\/.*\r?$/, '')).join('\n')
   return new Set([...code.matchAll(/\bt\(\s*'([^']*)'\s*[,)]/g)].map((match) => match[1].replace(/\\\\/g, '\\')))
 }
 
