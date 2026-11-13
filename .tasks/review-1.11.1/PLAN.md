@@ -1052,3 +1052,18 @@ node node_modules/@deepseek-ai/dsh/lib/bin.js --profile rc2 --no-open --port 198
 - 要守的其实是“两个真宿主各跑一次”：把上面那段做成 `.tasks/` 下的脚本 + 一个“对手条目”夹具，
   每版更新跑一次（约 2–3 分钟）。devDependency 目前仍钉 0.2.1-rc.5，应推进到最新、
   把“上一版”留成 legacy 夹具。
+
+<h3>工作目录约定（1.11.2 之后）</h3>
+
+这一轮的审查/验证产物**不再散放**，收敛到项目根的 `.tmp-review/`（`.gitignore` 的 `.tmp-*` 覆盖，
+不进 git、不随包发布）：
+
+- `*.mjs` / `*.cjs`：审查与测量探针（`audit-*`、`measure-*`、`inject.cjs`、`render-snapshot.mjs`）。
+  用 `../lib/…` 相对导入，所以**必须留在这一层**，别再建子目录（建了导入就断）。
+- `dsh-home/`：0.2.2-rc.1（出货桌面壳）真宿主实测用的隔离 home。
+- `home-rc2/`：0.2.2-rc.2（npm `next`）验证床——`profiles/rc2` 里装着 base/web-app/dsh 0.2.2-rc.2
+  与本工作树的 `file:` 副本；补上 `@koromix/koffi-win32-x64` 后能跑完整模型回合。
+- `render-*.html`：渲染快照，与 `render-baseline.html` 逐字节比对。
+
+`dsh-toolbox-ui.review` 那个隔离工作树在 1.11.2 发布后已合入 main 并被删除——**以后不再为审查单开
+工作树**：分支 + `.tmp-review/` 足够，`.tmp-review/` 只在本机、跨分支共享。

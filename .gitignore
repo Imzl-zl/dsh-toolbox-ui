@@ -19,6 +19,12 @@ node_modules/
 .tasks/_uipreview.html
 
 # 一次性筛选/实跑用的临时脚本。`tmp` 前缀就是「别提交」的意思，免得哪天误 add。
+# 约定：**本机验证一律住在项目根的 `.tmp-review/`**，不再另开工作树、也不在仓库外散放：
+#   `*.mjs` / `*.cjs`  = 审查与测量的探针（PLAN 引用的 `audit-*` / `measure-*` / `inject.cjs` …）。
+#                          它们用 `../lib/…` 相对导入，所以只能放在 `.tmp-review/` 这一层，别往下再建子目录。
+#   `dsh-home/`、`home-rc2/` = 隔离的 DSH_HOME（真宿主实测用；后者是 0.2.2-rc.2 的验证床）。
+#   `render-*.html` = 渲染快照，与 `render-baseline.html` 逐字节比对。
+#   这些都**不进 git**，也不随包发布。
 .tmp-*
 
 # DSH 宿主在仓库根写出的运行时副产物（本插件不读它，与本仓库无关）。
