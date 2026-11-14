@@ -38,21 +38,21 @@ const DSH_ENGINE_WINDOW = '>=0.2.1-rc.5 <0.3.0'
 // 并用 DSH_HOST_MATRIX_* 告诉这里"这一腿的目标是什么"。断言方向不变——仍然是"必须等于
 // 本腿的目标版本"，只是目标来自环境而不是写死：否则 rc.1 那一腿只能靠跳过它变绿。
 const MATRIX_BASELINE = process.env.DSH_HOST_MATRIX_BASELINE
-const DEV_BASELINE = MATRIX_BASELINE || '0.2.1-rc.5'
+const DEV_BASELINE = MATRIX_BASELINE || '0.2.2-rc.3'
 // 锁文件里解析出的具体版本。**从 DEV_BASELINE 推导**，不要另写一处：这里原本硬编码
 // /^0\.1\.5-rc\.2/，于是 bump 基线时就有了第二个真源。
 const DEV_BASELINE_VERSION = DEV_BASELINE.replace(/^[^0-9]*/, '')
-// Cordis 的已验窗口覆盖当前 rc.5 的 4.0.5 与新版 rc.1 的 4.1.0；上界
+// Cordis 的已验窗口覆盖 0.2.1-rc.5 的 4.0.5 与 0.2.2-rc.3 的 4.1.0；上界
 // 明确挡住下一代未验证的 4.2。
 const CORDIS_PEER = '>=4.0.5 <4.2.0'
-// dev 基线跟随已验证宿主（0.2.1-rc.5）自带的那一代（~4.0.5）：peer 窗口说的是"能装哪些"，
+// dev 基线跟随已验证宿主（0.2.2-rc.3）自带的那一代（~4.1.0）：peer 窗口说的是"能装哪些"，
 // devDependencies 说的是"本地这套用例跑在哪个真实组合上"。两者不是一回事。
-const CORDIS_DEV_BASELINE = process.env.DSH_HOST_MATRIX_CORDIS || '~4.0.5'
+const CORDIS_DEV_BASELINE = process.env.DSH_HOST_MATRIX_CORDIS || '~4.1.0'
 // reveal 用 loader 的 interpolate 求值 `!!js` 节点；范围跟随 dsh 自身对它的要求。
 const CORDIS_LOADER_PEER = '>=1.0.6 <1.2.0'
 // 1.0.6 与 1.1.0 都在当前支持窗口内；更早 loader 只在历史
 // loader-compat 回归夹具中保留，不是当前发布准入。
-const CORDIS_LOADER_DEV_BASELINE = process.env.DSH_HOST_MATRIX_LOADER || '~1.0.6'
+const CORDIS_LOADER_DEV_BASELINE = process.env.DSH_HOST_MATRIX_LOADER || '~1.1.0'
 
 test('package exposes one Web bundle entry', () => {
   assert.equal(packageJson.dsh?.bundle?.patch, './cordis.patch.yml')

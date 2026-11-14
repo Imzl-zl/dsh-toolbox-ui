@@ -7,7 +7,7 @@ This document distinguishes between a regular install and a local development in
 
 ## Requirements
 
-- DeepSeek Harness `0.2.1-rc.5` or later; verified `0.2.1-rc.5` (Cordis 4.0.5 / Loader 1.0.6) and `0.2.2-rc.1` (Cordis 4.1.0 / Loader 1.1.0)
+- DeepSeek Harness `0.2.1-rc.5` or later; verified `0.2.1-rc.5` (Cordis 4.0.5 / Loader 1.0.6) and `0.2.2-rc.3` (Cordis 4.1.0 / Loader 1.1.0)
 - An initialized `web` profile
 - Node.js and pnpm callable normally by DSH's plugin commands
 

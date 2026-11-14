@@ -178,7 +178,7 @@ DSH 宿主 API 通过 `peerDependencies` 与 `engines.dsh` 以 `>=0.2.1-rc.5 <0.
    注意这条**只对宿主自己的闸门成立**：谁要复核这个范围，必须用宿主自己的 `evaluatePluginCompatibility`，而不是 `semver.satisfies(range)` 或 pnpm 的 peer 检查。`test/package-contract.test.mjs` 只钉 manifest 的窗口与 engines 同源，不模拟 semver。
 3. **范围回答不了「装上还对不对」，而 CI 也只能盖住一半**。`0.1.6-alpha.2` 把 typert strict codec 从 `schema:`（zod v4 实例）换成 `create()`（进程内 realm 的懒工厂，registry 用 `record.value ??= record.create()` 物化）就是这么一次：它落在当时的 `>=0.1.5-rc.1 <0.2.0` 之内，插件的兼容性声明天生拦不住，2026-09-21 的漂移任务因此变红（那一次 130 项里唯一失败的就是加载期契约那条）。真正的保护分两层：**(a) 运行时契约**由 [`.github/workflows/upstream-drift.yml`](../.github/workflows/upstream-drift.yml) 每周把宿主整套换到 `latest` / `next` / `alpha` 三个渠道跑契约用例（`test/*.test.mjs` 去掉 `package-contract`，因为那份断言的是 pin 本身）；**(b) 宿主侧的加载期契约**（`lib/typert.js` 的形状由宿主 loader 校验，不由我们校验）由 `test/typert-manifest.test.mjs` 覆盖：它直接调宿主自己的 `validateTypertManifest` 验这份产物，形状一变就红；同一文件里还有一条**不依赖 loader 版本**的形状断言，钉住「strict codec 同时带 `schema` 与 `create()`」（下一条理由）——本地 devDependency 的 loader 是开发基线，看不见 alpha 的要求，只靠前者要等一周才知道。这一层原本是缺口——既有用例只保证 `lib/typert.js` 与 `lib/client.js` 两份产物彼此一致（`client-lifecycle.test.mjs`），宿主改了要求也不会变红，而后果是用户升级 DSH 后面板整个不可用。它也是 `@deepseek-ai/dsh-typert-loader` 只进 `devDependencies`、不进 peer 的原因：校验发生在宿主进程里，插件运行时不 import 它。
 
-4. **当前发布支持面从 0.2.1-rc.5 开始**。0.2.0 只作为历史 loader 回归保留，不是发布准入；当前两类宿主组合是 0.2.1-rc.5（Loader 1.0.6）与 0.2.2-rc.1（Loader 1.1.0），而**换的这层不在 dsh-\* 的 API 面上**——`@deepseek-ai/dsh@0.2.1-rc.2` 只是把依赖声明改成了 `cordis ~4.0.5` / `cordis-plugin-loader ~1.0.6`（0.2.0 是 `~4.0.2` / `^1.0.3`），破坏性全都在 `cordis-plugin-loader` 1.0.3 → 1.0.6 的重构里。实测两处差异，都在插件侧做了显式适配，各有一条**不依赖宿主版本**的常驻用例（`test/loader-compat.test.mjs`）：
+4. **当前发布支持面从 0.2.1-rc.5 开始**。0.2.0 只作为历史 loader 回归保留，不是发布准入；当前两类宿主组合是 0.2.1-rc.5（Loader 1.0.6）与 0.2.2-rc.3（Loader 1.1.0），而**换的这层不在 dsh-\* 的 API 面上**——`@deepseek-ai/dsh@0.2.1-rc.2` 只是把依赖声明改成了 `cordis ~4.0.5` / `cordis-plugin-loader ~1.0.6`（0.2.0 是 `~4.0.2` / `^1.0.3`），破坏性全都在 `cordis-plugin-loader` 1.0.3 → 1.0.6 的重构里。实测两处差异，都在插件侧做了显式适配，各有一条**不依赖宿主版本**的常驻用例（`test/loader-compat.test.mjs`）：
 
    | # | 差异 | 1.0.3（0.2.0） | 1.0.6（0.2.1） | 插件的适配 |
    |---|---|---|---|---|
@@ -198,7 +198,7 @@ DSH 宿主 API 通过 `peerDependencies` 与 `engines.dsh` 以 `>=0.2.1-rc.5 <0.
 | **双写** | PASS | PASS | PASS |
 | `mode: 'src-json'` | 拒 | 拒 | 拒 |
 
-历史验证记录：`0.2.0-rc.2` 与 `0.2.1-rc.2` 的 loader 都与 `0.1.6-alpha.2` 同列，只有 `create()` 通过、只有 `schema` 被拒。双写两个 codec 键仍保留，因为历史宿主可能检查不同键；这不是当前发布支持窗口的承诺。当前准入组合是 `0.2.1-rc.5`（Loader 1.0.6）与 `0.2.2-rc.1`（Loader 1.1.0），形状由 `test/typert-manifest.test.mjs` 与匹配宿主契约共同验证。
+历史验证记录：`0.2.0-rc.2` 与 `0.2.1-rc.2` 的 loader 都与 `0.1.6-alpha.2` 同列，只有 `create()` 通过、只有 `schema` 被拒。双写两个 codec 键仍保留，因为历史宿主可能检查不同键；这不是当前发布支持窗口的承诺。当前准入组合是 `0.2.1-rc.5`（Loader 1.0.6）与 `0.2.2-rc.3`（Loader 1.1.0），形状由 `test/typert-manifest.test.mjs` 与匹配宿主契约共同验证。
 
 浏览器半（`@deepseek-ai/dsh-typert-registry` 的 `lib/client.js`）做同一份校验，所以 `lib/client.js` 里的 codec 必须同步改——只改 host 那份会变成「面板能加载，一调用就炸」。
 
