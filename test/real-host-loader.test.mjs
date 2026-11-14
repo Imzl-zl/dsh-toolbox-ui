@@ -370,6 +370,17 @@ test('每个变更型 RPC 都返回 persisted / live / diagnostics', { timeout: 
     assertResult('updateToolLoadingSettings', await host.manager.updateToolLoadingSettings({ policy: { tools: { read: 'deferred' } } }))
     const repeatPolicy = await host.manager.updateToolLoadingSettings({ policy: { tools: { read: 'deferred' } } })
     assert.equal(repeatPolicy.live, 'unchanged', '策略没变的保存同样不得报"已生效"')
+    // 自定义分组与策略是**两个兄弟键**：各写各的，互不重置。
+    // 回归：MCP 芯片走 writablePolicy 整份重写 toolLoading，分组若塞在里面会被抹掉。
+    assertResult('updateToolLoadingSettings(customGroups)', await host.manager.updateToolLoadingSettings({
+      customGroups: { 分组: { policy: 'deferred', tools: ['read'] } },
+    }))
+    const withGroups = await host.manager.toolLoadingSettings()
+    assert.deepEqual(withGroups.customGroups, { 分组: { policy: 'deferred', tools: ['read'] } })
+    assert.deepEqual(withGroups.policy.tools, { read: 'deferred' }, '写分组不得重置策略')
+    assertResult('updateToolLoadingSettings(policy)', await host.manager.updateToolLoadingSettings({ policy: { tools: { read: 'resident' } } }))
+    const afterPolicy = await host.manager.toolLoadingSettings()
+    assert.deepEqual(afterPolicy.customGroups, { 分组: { policy: 'deferred', tools: ['read'] } }, '写策略不得抹掉分组')
     assertResult('removeServer', await host.manager.removeServer('b'))
   } finally {
     await host.cleanup()

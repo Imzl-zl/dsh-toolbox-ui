@@ -18,8 +18,10 @@ import {
   normalizeToolSearchSettings,
   readToolLoadingPolicy,
   readToolLoadingPolicyFromPatch,
+  readCustomGroupsFromPatch,
   readToolSearchSettings,
   readToolSearchSettingsFromPatch,
+  setCustomGroupsInPatch,
   setToolLoadingPolicyInPatch,
   setToolSearchSettingsInPatch,
 } from '../lib/tool-search-settings.js'
@@ -246,5 +248,54 @@ test('写 patch：非法值不落盘（先校验再动 YAML）', () => {
 
 test('配置键名是稳定的：toolSearch（面板与文档都引用它）', () => {
   assert.equal(TOOL_SEARCH_CONFIG_KEY, 'toolSearch')
+})
+
+// ── ④ 自定义分组（与 toolLoading 平级的兄弟键）──────────────────────────
+
+test('写 patch：customGroups 与 toolSearch / toolLoading 三个兄弟键互不干扰', () => {
+  const withSearch = setToolSearchSettingsInPatch(PATCH, { maxResults: 20 }, { name: PLUGIN })
+  const policy = { mode: 'recommended', groups: { jshook: 'resident' }, tools: {} }
+  const withPolicy = setToolLoadingPolicyInPatch(withSearch, policy, { name: PLUGIN })
+  const groups = {
+    表格工具: { policy: 'deferred', tools: ['xlsx_read', 'xlsx_write'] },
+    网页: { tools: ['web_fetch'] },
+  }
+  const written = setCustomGroupsInPatch(withPolicy, groups, { name: PLUGIN })
+  assert.deepEqual(readCustomGroupsFromPatch(written, { name: PLUGIN }), groups)
+  assert.deepEqual(readToolLoadingPolicyFromPatch(written, { name: PLUGIN }), policy, '写分组不得动策略')
+  assert.deepEqual(readToolSearchSettingsFromPatch(written, { name: PLUGIN }), { maxResults: 20 })
+
+  // 反向回归（DESIGN §5）：MCP 芯片走 writablePolicy 整份重写 toolLoading，
+  // 若分组塞在 toolLoading 里就会被抹掉。现在它是兄弟键，一条都不能少。
+  const policyBack = setToolLoadingPolicyInPatch(written, { mode: 'all-resident' }, { name: PLUGIN })
+  assert.deepEqual(readCustomGroupsFromPatch(policyBack, { name: PLUGIN }), groups, '写策略不得动分组')
+
+  // 空表 = 删键（与 toolLoading / toolSearch 同一条约定）
+  const cleared = setCustomGroupsInPatch(written, {}, { name: PLUGIN })
+  assert.doesNotMatch(cleared, /customGroups/)
+  assert.match(cleared, /toolLoading:/, '策略仍在')
+  assert.match(cleared, /toolSearch:/, '搜索参数仍在')
+
+  // 非法值绝不落盘
+  assert.throws(() => setCustomGroupsInPatch(written, { A: { tools: ['x', 'x'] } }, { name: PLUGIN }), /出现两次/)
+  assert.throws(() => setCustomGroupsInPatch(written, { A: { tools: ['x'] }, B: { tools: ['x'] } }, { name: PLUGIN }), /已在分组/)
+})
+
+test('配置 schema：customGroups 严格拒绝未知键与非法策略，且不影响老 profile', () => {
+  const ok = validate({ customGroups: { 表格工具: { policy: 'deferred', tools: ['xlsx_read'] } } })
+  assert.equal(ok.issues, undefined)
+
+  // 形状之外的语义约束（同一工具跨组）由写侧 validateCustomGroups 拦，schema 只负责形状。
+  for (const bad of [
+    { customGroups: { A: { policy: 'inherit', tools: [] } } },
+    { customGroups: { A: { tools: ['x'], typo: 1 } } },
+    { customGroups: { A: { tools: 'x' } } },
+    { customGroups: { A: 'nope' } },
+  ]) {
+    assert.notEqual(validate(bad).issues, undefined, `必须拒绝：${JSON.stringify(bad)}`)
+  }
+
+  // 没有 customGroups 的老 profile 照常通过（升级路径）。
+  assert.equal(validate({ toolLoading: { mode: 'recommended' } }).issues, undefined)
 })
 

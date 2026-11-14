@@ -562,3 +562,122 @@ test('工具加载面板：最近的搜索显示出来，无命中给中性标�
   const empty = allText(await openModal(internals, noSearches, { ...props, call: noSearches }))
   assert.match(empty, /还没有搜索记录/, '没有记录时要说"还没有"，而不是空白')
 })
+
+// ── 批量与自定义分组（DESIGN §16/§18）──────────────────────────────────
+// 这组用例钉的是"动作条作用于谁"：勾选优先、否则当前匹配集合；以及
+// 「存为分组」把刚写的逐工具覆盖上提成组策略（否则组策略会被覆盖压住）。
+
+const batchCall = (sent, settings = SETTINGS) => async (method, payload) => {
+  if (method === 'toolSearchSettings') return { ok: true, settings: { maxResults: 10, maxDiscovered: 20 } }
+  if (method === 'toolLoadingSettings' || method === 'workspaceToolLoading') return settings
+  sent.push([method, payload])
+  return { ok: true, policy: settings.policy, customGroups: payload?.customGroups ?? settings.customGroups ?? {} }
+}
+
+const findByText = (tree, text) => collectAll(tree, (node) => node.props?.children === text)[0]
+const findInput = (tree, placeholder) => collectAll(tree, (node) => node.type === 'input' && node.props?.placeholder === placeholder)[0]
+
+test('工具页批量：动作条作用于当前筛选结果，未建组也能用', async () => {
+  const internals = loadInternals()
+  const sent = []
+  const call = batchCall(sent)
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  // 没有筛选也没有勾选时不出现动作条（不做"全部工具一键"）。
+  assert.equal(collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-batch').length, 0)
+
+  const search = findInput(tree, '按名称或用途搜索')
+  search.props.onChange({ target: { value: 'mcp__alpha' } })
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  const bar = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-batch')[0]
+  assert.ok(bar, '有筛选时必须出现动作条')
+  assert.match(allText(bar), /匹配 2 个/, '计数来自当前筛选结果')
+
+  findByText(bar, '设为按需').props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  await collectAll(tree, (node) => node.props?.cls === 'primary')[0].props.onClick()
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0][0], 'updateToolLoadingSettings')
+  assert.deepEqual(JSON.parse(JSON.stringify(sent[0][1].policy.tools)), {
+    mcp__alpha__a: 'deferred',
+    mcp__alpha__b: 'deferred',
+  }, '只改匹配的两行')
+  assert.equal(sent[0][1].customGroups, undefined, '没有建组就不该提交 customGroups')
+})
+
+test('工具页批量：有勾选时只改勾选集合，不是全量匹配', async () => {
+  const internals = loadInternals()
+  const sent = []
+  const call = batchCall(sent)
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  tree = expandGroup(internals, props, '文件')
+  const box = collectAll(tree, (node) => node.type === 'input' && node.props?.className === 'dsh-mcp-tool-check')[0]
+  assert.ok(box, '行内必须有复选框')
+  box.props.onChange()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  const bar = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-batch')[0]
+  assert.match(allText(bar), /已选 1 个 · 共匹配 3 个/, '勾选数 + 匹配数都要说清')
+
+  findByText(bar, '设为按需').props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  await collectAll(tree, (node) => node.props?.cls === 'primary')[0].props.onClick()
+  assert.deepEqual(JSON.parse(JSON.stringify(sent[0][1].policy.tools)), { working_directory: 'deferred' })
+})
+
+test('工具页分组：存为分组把批量值上提为组策略，并删掉逐工具覆盖', async () => {
+  const internals = loadInternals()
+  const sent = []
+  const call = batchCall(sent)
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  const search = findInput(tree, '按名称或用途搜索')
+  search.props.onChange({ target: { value: 'mcp__alpha' } })
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  const bar = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-batch')[0]
+  findByText(bar, '设为按需').props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+
+  findByText(collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-batch')[0], '存为分组').props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  const input = findInput(tree, '例如：表格工具')
+  assert.ok(input, '存为分组要弹名称输入框')
+  assert.equal(input.props.value, 'mcp__alpha', '组名预填当前搜索词')
+  input.props.onChange({ target: { value: 'Alpha 组' } })
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  findByText(tree, '确定').props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+
+  await collectAll(tree, (node) => node.props?.cls === 'primary')[0].props.onClick()
+  const payload = JSON.parse(JSON.stringify(sent[0][1]))
+  assert.deepEqual(payload.customGroups, {
+    'Alpha 组': { policy: 'deferred', tools: ['mcp__alpha__a', 'mcp__alpha__b'] },
+  }, '组策略上提，成员进组')
+  assert.deepEqual(payload.policy.tools, {}, '逐工具覆盖被删掉，否则组策略会被压住')
+})
+
+test('工具页分组：项目作用域里分组只读，保存不带 customGroups', async () => {
+  const internals = loadInternals()
+  const sent = []
+  const settings = {
+    ...SETTINGS,
+    customGroups: { 只读组: { policy: 'deferred', tools: ['working_directory'] } },
+  }
+  const call = batchCall(sent, settings)
+  const props = { open: true, inline: true, onClose: () => {}, scope: 'proj-a', scopes: [{ id: 'global', label: '全局' }, { id: 'proj-a', label: '项目 A' }], onScope: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  const create = findByText(tree, '+ 新建分组')
+  assert.equal(create.props.disabled, true, '项目作用域不能建组（分组是全局的）')
+  const headerPicks = collectAll(tree, (node) => String(node.props?.className || '').includes('dsh-mcp-tool-pick') && String(node.props['aria-label'] || '') === '整组加载方式')
+  assert.ok(headerPicks.length >= 1, '自定义组头渲染出来')
+  assert.ok(headerPicks[0].children.every((button) => button.props.disabled === true), '组级三态在项目里只读')
+
+  tree = expandGroup(internals, props, '只读组')
+  const pick = collectAll(tree, (node) => typeof node.props?.className === 'string' && node.props.className.includes('dsh-mcp-tool-pick'))
+    .find((node) => String(node.props['aria-label'] || '').includes(' · 加载方式'))
+  collectAll(pick, (node) => node.type === 'button' && node.children?.[0] === '常驻')[0].props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  await collectAll(tree, (node) => node.props?.cls === 'primary')[0].props.onClick()
+  assert.equal(sent[0][0], 'setWorkspaceToolLoading')
+  assert.equal(sent[0][1].customGroups, undefined, '项目层不提交分组')
+})

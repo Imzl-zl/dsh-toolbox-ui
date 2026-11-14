@@ -441,14 +441,15 @@ test('client moves focus into dialogs so Escape handlers receive keyboard events
   assert.match(dialogCtor, /if \(e\.key !== 'Tab'\) return/, 'Tab 不能逃出模态框')
   assert.match(dialogCtor, /role: 'dialog'/)
   assert.match(dialogCtor, /tabIndex: -1/)
-  // 六个 modal 全部走构造器；有任何一个回去手写内层 div，这里就会掉下来。
+  // 八个 modal 全部走构造器；有任何一个回去手写内层 div，这里就会掉下来。
   // 6 → 7 后又合并回 6：搜索参数并进了「工具搜索」弹窗，不再单独开一个。
+  // 6 → 8：工具分组新增「新建/重命名分组」与「删除分组」两个确认框（同样走构造器）。
   const uses = [...client.matchAll(/h\(Dialog, \{ label: /g)].length
-  assert.equal(uses, 6, `走 Dialog 的对话框数量变了（现在 ${uses} 个）`)
+  assert.equal(uses, 8, `走 Dialog 的对话框数量变了（现在 ${uses} 个）`)
   assert.equal((client.match(/className: 'dsh-mcp-modal' \+ \(cls/g) || []).length, 1, 'modal 的 class 组合只该在 Dialog 里做一次')
-  // 遮罩由调用点渲染一次（七个 modal + 更新卡片自己那层，共八处）。Dialog 内部再套一层就会
+  // 遮罩由调用点渲染一次（八个 modal + 更新卡片自己那层，共九处）。Dialog 内部再套一层就会
   // 嵌套出两个 overlay——实测踩过，所以钉住。
-  assert.equal((client.match(/className: 'dsh-mcp-overlay'/g) || []).length, 7, '遮罩只在调用点渲染，Dialog 不重复套一层')
+  assert.equal((client.match(/className: 'dsh-mcp-overlay'/g) || []).length, 9, '遮罩只在调用点渲染，Dialog 不重复套一层')
 })
 
 test('the three contract faces list the same methods in the same order', async () => {

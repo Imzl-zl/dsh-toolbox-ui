@@ -223,3 +223,59 @@ test('writablePolicy：legacy 用删键表达，不把 legacy 写进配置', () 
   // 写出去的东西必须能通过写侧校验（这就是它存在的理由：validate 不接受 legacy）。
   assert.doesNotThrow(() => validatePolicyConfig(writablePolicy({ mode: 'legacy', groups: {}, tools: {} })))
 })
+
+test('自定义分组：作用于任意工具，排在逐工具之后、服务器组之前', () => {
+  const customGroups = {
+    heavy: { policy: 'deferred', tools: ['mcp__alpha__a', 'read'] },
+    quiet: { policy: 'resident', tools: ['mcp__beta__c'] },
+  }
+  const plain = resolveToolLoadingPolicy({ tools: TOOLS, customGroups })
+  assert.equal(plain.entries.get('read').policy, 'deferred', '非 MCP 工具也能被分组延迟')
+  assert.equal(plain.entries.get('read').reason, REASONS.USER_GROUP)
+  assert.equal(plain.entries.get('mcp__alpha__a').policy, 'deferred')
+  assert.equal(plain.entries.get('mcp__beta__c').policy, 'resident')
+
+  // 逐工具覆盖永远赢分组（"组里有个别例外"是正常配置，不是错误）。
+  const override = resolveToolLoadingPolicy({ tools: TOOLS, customGroups, policy: { tools: { read: 'resident' } } })
+  assert.equal(override.entries.get('read').policy, 'resident')
+  assert.equal(override.entries.get('read').reason, REASONS.GLOBAL_TOOL)
+})
+
+test('自定义分组压过服务器整台默认，但不影响同服务器其它工具', () => {
+  const customGroups = { quiet: { policy: 'deferred', tools: ['mcp__alpha__a'] } }
+  const resolution = resolveToolLoadingPolicy({
+    tools: TOOLS,
+    policy: { mode: 'recommended', groups: { alpha: 'resident' } },
+    customGroups,
+  })
+  assert.equal(resolution.entries.get('mcp__alpha__a').policy, 'deferred')
+  assert.equal(resolution.entries.get('mcp__alpha__a').reason, REASONS.USER_GROUP)
+  assert.equal(resolution.entries.get('mcp__alpha__b').policy, 'resident', '其它工具仍按整台默认')
+})
+
+test('组策略缺席 = 纯组织：继续落到下一层，不改变任何决策', () => {
+  const customGroups = { 只做组织: { tools: ['read', 'mcp__alpha__a'] } }
+  const resolution = resolveToolLoadingPolicy({
+    tools: TOOLS,
+    policy: { mode: 'recommended', groups: { alpha: 'resident' } },
+    customGroups,
+  })
+  assert.equal(resolution.entries.get('read').reason, REASONS.DEFAULT_RESIDENT)
+  assert.equal(resolution.entries.get('mcp__alpha__a').reason, REASONS.GLOBAL_GROUP)
+})
+
+test('保护名与总开关仍然压过自定义分组', () => {
+  const customGroups = { all: { policy: 'deferred', tools: TOOLS.map((tool) => tool.name) } }
+  const protectedRes = resolveToolLoadingPolicy({ tools: TOOLS, customGroups, protectedNames: ['tool_search'] })
+  assert.equal(protectedRes.entries.get('tool_search').policy, 'resident')
+  assert.equal(protectedRes.entries.get('tool_search').reason, REASONS.PROTECTED)
+
+  const off = resolveToolLoadingPolicy({ tools: TOOLS, customGroups, masterSwitch: 'off' })
+  assert.equal(deferredNamesOf(off).size, 0)
+  assert.equal(off.entries.get('read').reason, REASONS.MASTER_SWITCH)
+})
+
+test('手改坏的分组不影响决策：读侧归一化后忽略', () => {
+  const resolution = resolveToolLoadingPolicy({ tools: TOOLS, customGroups: { A: { policy: 'bogus', tools: ['read'] } } })
+  assert.equal(resolution.entries.get('read').policy, 'resident')
+})
