@@ -105,7 +105,9 @@ async function createHost({ presentation = 'native', deferral = true } = {}) {
   return {
     ctx, tools, agent, scope, systemPrompt, dispose, admit, assemble, search,
     names: (assembly) => assembly.tools.map((tool) => tool.name),
-    guard: (target, name, toolSet) => tools.checkGuards({ name, agent: target, toolSet }),
+    // 0.2.2-rc.3 起 `checkGuards()` 返回 `{ reason }` 而不是裸字符串（宿主把拒绝理由结构化），
+    // 这里只取 reason：下面两条断言要的是"拒绝理由里写了 deferred"与"通过时是 undefined"。
+    guard: (target, name, toolSet) => tools.checkGuards({ name, agent: target, toolSet })?.reason,
     cleanup: async () => { dispose(); await scope.dispose() },
   }
 }

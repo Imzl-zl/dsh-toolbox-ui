@@ -162,7 +162,7 @@ dsh plugin --profile web update dsh-toolbox-ui
 
 | 项目 | 已验证 |
 |---|---|
-| DeepSeek Harness | 支持准入从 `0.2.1-rc.5` 起；已验证 `0.2.1-rc.5`（Cordis 4.0.5 / Loader 1.0.6）与 `0.2.2-rc.1`（Cordis 4.1.0 / Loader 1.1.0）。旧宿主仅保留历史回归，不属于当前发布支持面。 |
+| DeepSeek Harness | 支持准入从 `0.2.1-rc.5` 起；已验证 `0.2.1-rc.5`（Cordis 4.0.5 / Loader 1.0.6）与 `0.2.2-rc.3`（Cordis 4.1.0 / Loader 1.1.0）。旧宿主仅保留历史回归，不属于当前发布支持面。 |
 | Node.js | DSH 自带/支持的运行时 |
 | 平台 | Windows；Linux/macOS 使用同一 DSH Web 契约 |
 

@@ -186,7 +186,7 @@ Three tradeoff rules; read them before changing the range:
 | **both** | PASS | PASS | PASS |
 | `mode: 'src-json'` | reject | reject | reject |
 
-Historical evidence: the loader of `0.2.0-rc.2` measures the same as the `0.1.6-alpha.2` column: only `create()` passes, and only `schema` is rejected. Both codec keys remain because historical hosts checked different keys; this is not a current release-support promise. Current admission is tested as the matched `0.2.1-rc.5` (Loader 1.0.6) and `0.2.2-rc.1` (Loader 1.1.0) combinations, with the shape pinned by `test/typert-manifest.test.mjs` and host contract tests.
+Historical evidence: the loader of `0.2.0-rc.2` measures the same as the `0.1.6-alpha.2` column: only `create()` passes, and only `schema` is rejected. Both codec keys remain because historical hosts checked different keys; this is not a current release-support promise. Current admission is tested as the matched `0.2.1-rc.5` (Loader 1.0.6) and `0.2.2-rc.3` (Loader 1.1.0) combinations, with the shape pinned by `test/typert-manifest.test.mjs` and host contract tests.
 
 The browser half (`@deepseek-ai/dsh-typert-registry`'s `lib/client.js`) performs the same validation, so the codec in `lib/client.js` must be changed in step — changing only the host copy produces "the panel loads, and blows up on the first call".
 

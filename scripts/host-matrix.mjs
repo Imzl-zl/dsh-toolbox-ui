@@ -23,11 +23,12 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const HOSTS = {
   '0.2.1-rc.5': { cordis: '~4.0.5', loader: '~1.0.6', include: '1.0.10', stepToolset: '0' },
   '0.2.2-rc.1': { cordis: '~4.1.0', loader: '~1.1.0', include: '~1.1.0', stepToolset: '1' },
+  '0.2.2-rc.3': { cordis: '~4.1.0', loader: '~1.1.0', include: '~1.1.0', stepToolset: '1' },
 }
 // 现代宿主（0.2.2）的用例要按真实安装形态装上官方执行器插件：`tool-search-rc22-host.test.mjs`
 // 直接 import 它们来搭"真 executor"夹具，插件的 ToolSearch 运行时也会 `loader.import` 这两个包
-// 取渲染器。它们**不是**插件的依赖（插件只说 peer），所以不在 package.json 的 devDependencies 里，
-// 只有这一腿需要——legacy 那代按能力跳过这些用例。
+// 取渲染器。它们**不是**插件的 peer（插件不 import 它们），但开发基线现在就是现代宿主，
+// 所以它们进了 package.json 的 devDependencies；这一腿按目标版本重钉，避免与基线混装。
 const MODERN_EXECUTORS = ['@deepseek-ai/dsh-tool-executor-native', '@deepseek-ai/dsh-tool-executor-ptc']
 const HOST_PACKAGES = [
   '@deepseek-ai/dsh-agent',

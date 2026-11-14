@@ -60,7 +60,7 @@ jobs:
             cordis: ~4.0.5
             loader: ~1.0.6
             include: 1.0.10
-          - host: 0.2.2-rc.1
+          - host: 0.2.2-rc.3
             cordis: ~4.1.0
             loader: ~1.1.0
             include: ~1.1.0
