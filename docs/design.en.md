@@ -471,18 +471,30 @@ protected (tool_search / run_code)
   → master switch DSH_MCP_TOOL_SEARCH=off
   → mode = all-resident
   → project per-tool → global per-tool
+  → custom groups (optional policy; an empty policy is pure organisation)
   → project per-group → global per-group
   → legacy defer (true / false)
   → mode default (recommended defers MCP tools, otherwise resident)
 ```
 
 **One writer per concept.** The chip and bulk button on the MCP list write `groups` (the server
-default, and the **only** entry point); the Tools page writes `tools` (per tool) only, and its
-group headers show the server default read-only. `mode` has no UI and is decided by the config
-file alone; when it overrides per-tool settings the page shows a banner saying those settings are
-kept but have no effect. Legacy `defer` is **read-only**: it stays an input layer so old configs
-behave the same after an upgrade, but no UI writes it any more. "Inherit" therefore always deletes
-the override key, which makes overrides reversible.
+default, and the **only** entry point); the Tools page writes `tools` (per tool) and `customGroups`
+(a sibling key next to `toolLoading`, so the chip's whole-policy rewrite can never touch it). `mode`
+has no UI and is decided by the config file alone; when it overrides per-tool settings the page
+shows a banner saying those settings are kept but have no effect. Legacy `defer` is **read-only**:
+it stays an input layer so old configs behave the same after an upgrade, but no UI writes it any
+more. "Inherit" therefore always deletes the override key, which makes overrides reversible.
+
+**Bulk changes and custom groups (whole page).** Every row — built-in, MCP or other — can be
+selected; the action bar targets the **selection**, or the **current filter result** when nothing
+is selected, and stays hidden when neither exists (there is no "all tools at once" button). It can
+set resident / on-demand / follow, or save the batch as a named group; when the batch was just set
+to one uniform value, that value is **promoted** to the group policy and the per-tool overrides are
+deleted — otherwise the overrides would shadow the group and its header would look dead. A group
+can hold any tool, its members are displayed **instead of** their system grouping (the original
+section reports "N in custom groups"), and one tool belongs to at most one group. The group policy
+sits below per-tool overrides and above server groups. Groups are **global** configuration: project
+scopes are read-only, and writing one through the project path is an explicit error.
 
 **The Tools page groups by purpose and server, with built-ins first.** Known host built-ins are
 grouped by purpose (files / commands and terminals / web / MCP resources / tasks and jobs /
