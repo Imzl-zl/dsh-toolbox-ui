@@ -700,3 +700,24 @@ test('工具页分组：筛选后默认展开，但用户点折叠必须生效�
   const openAfter = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-group open').map((node) => allText(node))
   assert.equal(openAfter.some((text) => text.includes('文件')), false, '筛选态下点击折叠必须生效')
 })
+
+test('工具页：段落头可整体折叠（我的分组 / 内置 / MCP / 其他）', async () => {
+  const internals = loadInternals()
+  const call = batchCall([])
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  // 默认展开：内置段里的「文件」组头在
+  assert.ok(collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-group-toggle')
+    .some((node) => allText(node).includes('文件')), '默认展开')
+  // 点段落头「内置工具（按用途）」→ 整段收起（里面的组头全部消失）
+  const head = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-section-toggle')
+    .find((node) => allText(node).includes('内置工具'))
+  assert.ok(head, '段落头必须可点')
+  head.props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  assert.equal(collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-group-toggle')
+    .some((node) => allText(node).includes('文件')), false, '段落收起后组头应消失')
+  // 段落头本身仍在（否则收不起来就再也点不回来）
+  assert.ok(collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-section-toggle')
+    .some((node) => allText(node).includes('内置工具')), '段落头必须保留')
+})
