@@ -681,3 +681,22 @@ test('工具页分组：项目作用域里分组只读，保存不带 customGrou
   assert.equal(sent[0][0], 'setWorkspaceToolLoading')
   assert.equal(sent[0][1].customGroups, undefined, '项目层不提交分组')
 })
+
+test('工具页分组：筛选后默认展开，但用户点折叠必须生效（不是点不动）', async () => {
+  const internals = loadInternals()
+  const call = batchCall([])
+  const props = { open: true, inline: true, onClose: () => {}, call, onSaved: () => {} }
+  let tree = await openModal(internals, call, props)
+  // 选类型筛选「内置」：命中的「文件」组自动展开（否则筛选看起来没结果）
+  findByText(tree, '内置').props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  const openBefore = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-group open').map((node) => allText(node))
+  assert.ok(openBefore.some((text) => text.includes('文件')), '筛选命中后应默认展开')
+  // 再点一次分组头：必须能折叠。这条钉的是"筛选把折叠权抢走"那个缺陷。
+  const toggle = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-group-toggle')
+    .find((node) => allText(node).includes('文件'))
+  toggle.props.onClick()
+  tree = internals.__render(internals.ToolLoadingModal, props)
+  const openAfter = collectAll(tree, (node) => node.props?.className === 'dsh-mcp-tool-group open').map((node) => allText(node))
+  assert.equal(openAfter.some((text) => text.includes('文件')), false, '筛选态下点击折叠必须生效')
+})
