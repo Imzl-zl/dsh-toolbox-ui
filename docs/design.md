@@ -265,7 +265,7 @@ peer 怎么被解析到也很关键：官方 profile 的 `pnpm-workspace.yaml` �
 「复制到另一个工作区」与「导出 JSON」看起来是同一件事（都是把配置弄到别处），但它们的**泄密面不同**，边界因此也分开定：
 
 - **复制**：源配置在 Host 内读出来、直接写进目标，浏览器只送 `{from, to, names, overwrite}`，拿回名字清单与计数（`added` / `updated` / `skipped` / `targetCount` / `changed`；写盘那次还多一个 `note`），配置值一律不出 Host。值的投影纪律与列表投影一致，所以同机搬运不需要任何新的信任假设。
-- **导出**：这是**唯一**一处让完整配置（含字面凭据）经过浏览器的路径，而且是有意的——备份、跨机器迁移、分享给同事都必须能拿到完整文件，给一份脱敏副本等于这些用途一个都做不了。代价写在界面上（「字面写死的凭据会原样出现在这里」）并落在文档里，而不是靠不提来回避。它只读、不写任何文件；**「只在项目作用域」是入口的性质，不是 Host 强制的**（`exportWorkspaceJson` 与既有只读 RPC 一样接受 canonical 路径，界面上只在项目标签页给这个入口）。要看**有效运行值**仍然走 `reveal`（那条路是逐字段、按需、且只对当前 Web profile 管理之外的 server 关闭）。
+- **导出**：这是**唯一**一处让完整配置（含字面凭据）经过浏览器的路径，而且是有意的——备份、跨机器迁移、分享给同事都必须能拿到完整文件，给一份脱敏副本等于这些用途一个都做不了。代价写在界面上（「字面写死的凭据会原样出现在这里」）并落在文档里，而不是靠不提来回避。它只读、不写任何文件；**「导的是当前作用域」是入口的性质，不是 Host 强制的**（`exportWorkspaceJson` 与既有只读 RPC 一样接受 canonical 路径，`exportGlobalJson` 的数据源是 profile patch，产出的仍是同一个 `{ mcpServers }` 形状；界面把这一颗按钮放在标题栏、紧挨「导入 MCP」，文案与取数都跟着当前作用域走——全局导出与项目导出是同一颗按钮，不是两个入口）。要看**有效运行值**仍然走 `reveal`（那条路是逐字段、按需、且只对当前 Web profile 管理之外的 server 关闭）。
 
 **写路径比读路径严**：读某个目录的配置只需要 canonical 路径（`getWorkspaceView` 一直如此），但写 `<目录>/.dsh/mcp.json` 需要那个目录是这台机器上**已注册**的工作区。只按 canonical 路径写，等于把「往任意目录写文件」的接口暴露给浏览器——那是与「读任意文件」完全不同量级的能力。这条不变量只在 `withRegisteredWorkspaceWrite(ctx, wsPath, operation)` 里表达一次，**所有**写项目配置的 Remote 都从它过（`lib/index.js` 里不再有直接调用 `withWorkspaceWrite` 的写路径），所以新增一条写路径不可能"忘了加门"——`test/package-contract.test.mjs` 把这一点钉成结构断言。注册表访问同样只有一处（`workspaceRegistryOf` 是低层取用，`registeredWorkspacePaths` 是它的抛出式投影）。
 

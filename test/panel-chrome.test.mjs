@@ -41,7 +41,7 @@ const exportMarker = 'exports.inject = inject;'
 const instrumentedClient = clientSource.replace(
   exportMarker,
   `${exportMarker}
-exports.__chrome = { McpTab, McpMarketView, SkillInstallModal, Btn, ServerList, ServerDetailPane, SkillsPanel, ServerDetail, SkillDetail, Notice, DropMenu, ICONS, connectionAnomalyOf, connectionDiagText, base64FromBytes, skillImportPayloadOf, importSkillFile, recentLogLines, mcpStatsText, skillStatsText, sortServers, sortSkills, skillScopeTabs, skillGroups, skillGroupKey, skillScopeOptions, skillTargetOptions, classifyHubError, catalogForScope, SORT_KEYS, deferAllState };`,
+exports.__chrome = { McpTab, McpMarketView, SkillInstallModal, Btn, ServerList, ServerDetailPane, WorkspaceExportModal, SkillsPanel, ServerDetail, SkillDetail, Notice, DropMenu, ICONS, connectionAnomalyOf, connectionDiagText, base64FromBytes, skillImportPayloadOf, importSkillFile, recentLogLines, mcpStatsText, skillStatsText, sortServers, sortSkills, skillScopeTabs, skillGroups, skillGroupKey, skillScopeOptions, skillTargetOptions, classifyHubError, catalogForScope, SORT_KEYS, deferAllState };`,
 )
 assert.notEqual(instrumentedClient, clientSource, 'client test export marker must stay current')
 
@@ -212,26 +212,95 @@ test('能力层按 MCP、技能、工具顺序渲染，工具页独立承载加�
 // 为什么钉这一段：R9 之前**没有任何测试覆盖导出界面**（`exportOpen` / `WorkspaceExportModal`
 // 在 test/ 下 0 次出现），而缺陷恰好就长在这个空档里——全局标签页没有导出按钮，用户只能
 // 在"项目页 → 全局共享"那个只读子标签里看见它们，却导不出来。
-test('导出出口在项目层与全局层都存在，且全局层走自己的方法', () => {
-  // ① 全局标签页（scope === 'global' 的分支）必须有导出按钮。
-  const globalBranch = clientSource.slice(
-    clientSource.indexOf("    : (scope === 'global'"),
-    clientSource.indexOf("      : h(\n        'div',\n        { className: 'dsh-mcp-ws-body'"),
-  )
-  assert.ok(globalBranch.length > 100, '找不到全局标签页的分支（选择器可能已随重构改变）')
-  assert.match(globalBranch, /onClick: \(\) => setExportOpen\(true\)/, '全局标签页必须有导出出口')
-  assert.match(globalBranch, /children: t\('导出全局'\)/, '按钮文案要与项目页区分（用户要能分清导的是哪一层）')
+//
+// R9 补这颗按钮时把它画成了 `.dsh-mcp-body` 的**第三个直接子元素**，而那是 `display:flex`
+// 的行容器——按钮于是自成一列（约 130px + 14px 间距），列表与详情一起被挤窄，用户当场
+// 指出「直接整体向右挤压，而且特别丑」。现在导出与它逆向的「导入 MCP」同居标题栏，
+// 所以下面第一条断言改成**渲染树**：位置、文案、点击效果，三者都验。
+const renderExportTab = async (internals, rows) => {
+  const callMcp = async (method) => {
+    if (method === 'listWorkspaces') return { ok: true, workspaces: [{ path: '/tmp/ws-a', name: 'ws-a', serverCount: 0 }] }
+    if (method === 'getWorkspaceView') return { ok: true, servers: rows, global: [], exclude: [], revision: 'r1' }
+    return { ok: true, servers: rows, revealRevision: '' }
+  }
+  const props = { call: callMcp, callSkills: async () => ({ ok: true, skills: [] }), timer: internals.timer, pluginManager: null, floating: true, onClose() {} }
+  internals.__render(internals.McpTab, props)
+  await internals.__settle()
+  return { props, tree: internals.__render(internals.McpTab, props) }
+}
 
-  // ② 弹窗不再排除全局：以前是 `exportOpen && scope !== 'global'`，于是全局页即使
+/** 标题栏动作区里那颗导出的按钮。文案随作用域变，所以按文本找。
+ *  ⚠️ 假 React 不展开子组件：`h(Btn, { children: '导出全局' })` 的文字在 **props** 里，
+ *  元素自身的 `children` 数组是空的（子节点是第 3 个参数时才进那个数组）。 */
+const actionLabel = (node) => {
+  const own = node?.props?.children
+  if (typeof own === 'string') return own
+  if (Array.isArray(own)) return own.filter((child) => typeof child === 'string').join('')
+  return textOf(node).join('')
+}
+const exportButtonOf = (tree, label) => {
+  const regions = byClass(tree, 'dsh-mcp-head-actions')
+  assert.equal(regions.length, 1, '标题栏要有唯一的动作区')
+  const buttons = regions[0].children.filter(Boolean)
+  const found = buttons.find((node) => actionLabel(node) === label)
+  assert.ok(found, `标题栏里找不到「${label}」；实际动作：${JSON.stringify(buttons.map(actionLabel))}`)
+  return found
+}
+
+const globalRows = [{ serverName: 'exa', toolCount: 3, scope: 'global', managed: true, enabled: true, status: 'connected', transport: 'http' }]
+
+test('导出入口在标题栏与导入成对，点得开，且主体只剩列表与详情两列', async () => {
+  const internals = loadClientInternals()
+  const { props, tree } = await renderExportTab(internals, globalRows)
+
+  // ① 全局作用域：标题栏里有一颗「导出全局」（文案与项目页不同——用户要能分清导的是哪一层）。
+  const button = exportButtonOf(tree, '导出全局')
+  assert.equal(String(button.props.title ?? '').includes('实际值'), true,
+    '全局导出的 title 必须点明「求值后的实际值」，否则用户不知道这份 JSON 里有明文凭据')
+
+  // ② 点击效果：这颗按钮曾经"点了没反应"（弹窗被 scope !== 'global' 挡掉），所以必须真的点一次。
+  button.props.onClick()
+  const opened = internals.__render(internals.McpTab, props)
+  const modal = ofType(opened, internals.WorkspaceExportModal)[0]
+  assert.ok(modal, '导出弹窗必须挂载')
+  assert.equal(modal.props.open, true, '点「导出全局」必须真的打开导出弹窗')
+  assert.equal(modal.props.scope, 'global', '弹窗要按全局层取数（exportGlobalJson），不是项目层')
+
+  // ③ 布局回归：`.dsh-mcp-body` 是 flex 行，多一个直接子元素就多一列。导出曾经住在这里，
+  //    面板因此被挤窄。主体只许有「列表 + 详情」两个直接子元素。
+  const body = byClass(opened, 'dsh-mcp-body')[0]
+  assert.ok(body, '找不到面板主体')
+  const columns = body.children.filter(Boolean)
+  assert.equal(columns.length, 2, `面板主体只能有列表与详情两列，实际 ${columns.length} 个直接子元素`)
+  assert.equal(columns[0].type, internals.ServerList, '第一列是列表')
+  assert.equal(columns[1].type, internals.ServerDetailPane, '第二列是详情')
+
+  // ④ 项目作用域：同一颗按钮、同一个位置，只换文案——切作用域不该让动作换地方。
+  const project = await renderExportTab(internals, globalRows)
+  const scopeTabs = collectAll(project.tree, (node) => Array.isArray(node?.props?.tabs) && node.props.tabs.some((tab) => tab.key === '/tmp/ws-a'))[0]
+  assert.ok(scopeTabs, '找不到作用域药丸，无法切到项目作用域')
+  scopeTabs.props.onSelect('/tmp/ws-a')
+  internals.__render(internals.McpTab, project.props)
+  await internals.__settle()
+  const projectTree = internals.__render(internals.McpTab, project.props)
+  const projectButton = exportButtonOf(projectTree, '导出')
+  assert.equal(String(projectButton.props.title ?? '').includes('本项目'), true, '项目作用域的导出 title 要指向本项目')
+  // 卡片里的动作行只剩项目专属的「复制到…」：导出不能同时住在两个地方。
+  const cardActions = byClass(projectTree, 'dsh-mcp-section-actions')
+  assert.equal(cardActions.length, 1, '项目卡片里仍要有「复制到…」的动作行')
+  const cardLabels = cardActions[0].children.filter(Boolean).map(actionLabel)
+  assert.deepEqual(cardLabels, ['复制到…'], `卡片动作行只留项目专属动作，实际 ${JSON.stringify(cardLabels)}`)
+
+  // ⑤ 弹窗不再排除全局：以前是 `exportOpen && scope !== 'global'`，于是全局页即使
   // setExportOpen(true) 也永远不显示——这正是"点了没反应"的形态。
   assert.match(clientSource, /h\(WorkspaceExportModal, \{ open: exportOpen, onClose/)
   assert.doesNotMatch(clientSource, /open: exportOpen && scope !== 'global'/)
 
-  // ③ 弹窗按作用域调不同方法：数据源不同（项目文件 vs profile patch），形状相同。
+  // ⑥ 弹窗按作用域调不同方法：数据源不同（项目文件 vs profile patch），形状相同。
   assert.match(clientSource, /scope === 'global'\s*\n\s*\? await call\('exportGlobalJson'\)/)
   assert.match(clientSource, /: await call\('exportWorkspaceJson', \{ wsPath: scope \}\)/)
 
-  // ④ 全局层的警告**必须**与项目层不同：patch 里存的是求值后的实际值，所以导出是明文；
+  // ⑦ 全局层的警告**必须**与项目层不同：patch 里存的是求值后的实际值，所以导出是明文；
   // 项目文件里存 ${VAR} 模板，导出保留引用。照抄项目文案就是对用户撒谎。
   assert.match(clientSource, /这是全局层的完整配置/)
   assert.match(clientSource, /求值后的实际值/, '全局导出的警告必须说出"实际值"这件事')
