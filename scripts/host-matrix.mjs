@@ -97,6 +97,14 @@ manifest.devDependencies = { ...manifest.devDependencies }
 for (const name of HOST_PACKAGES) manifest.devDependencies[name] = host
 if (preset.stepToolset === '1') {
   for (const name of MODERN_EXECUTORS) manifest.devDependencies[name] = host
+} else {
+  // 老宿主腿**必须把这两个包删掉**，不能留在开发基线的版本上。
+  // 它们是 0.2.2 才有的执行器，混进一片 0.2.1 的树里会把 0.2.2 的 peer 一起带进来；
+  // pnpm 于是给 `@deepseek-ai/dsh-tools@0.2.1-rc.5` 解出一套**不含 dsh-llm** 的 peer 集，
+  // 而那个包是它的 peerDependency——`import '@deepseek-ai/dsh-llm'` 当场 ERR_MODULE_NOT_FOUND，
+  // 整条腿红在 workspace-runtime 的宿主集成用例上（2026-11-17 的 ci 红灯就是这么来的）。
+  // 复现/回归：把这两个包留在 devDependencies 里，用 pnpm 11.28 装同一份 manifest 即可。
+  for (const name of MODERN_EXECUTORS) delete manifest.devDependencies[name]
 }
 manifest.devDependencies['@deepseek-ai/cordis'] = cordis
 manifest.devDependencies['@deepseek-ai/cordis-plugin-loader'] = loader
