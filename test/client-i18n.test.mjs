@@ -34,6 +34,13 @@ const testSurface = [
   // C2 的参数表单表：标签与提示存中文原文，渲染点 t(field.label) / t(field.hint)。
   // 和 MCP_PRESETS 一样，源码扫描看不见 `t(字段)`，所以必须显式登记进可达集。
   'SEARCH_PARAM_FIELDS',
+  // 上下文面的分类表：`t(CONTEXT_KIND_LABELS[kind])`（图例）与 `t(entry.label)`（筛选器）
+  // 都是**表驱动**的调用点，同属源码扫描的盲区——不登记就会被判成死词条。
+  'CONTEXT_KIND_LABELS',
+  'CONTEXT_KIND_ORDER',
+  // 块图列内的短名（窄列只放得下两个字）：同样是表驱动。
+  'CONTEXT_SHORT_LABELS',
+  'CONTEXT_FILTERS',
   'BUILTIN_CATEGORY_LABELS',
   'EN_DICT',
   't',
@@ -217,6 +224,11 @@ test('every t() call-site key has an English entry, and the dictionary has no de
     // 不是给懂行的人看的实测记录（证据留在 TUNING-DECISIONS 里）。
     ...i18n.SEARCH_PARAM_FIELDS.flatMap((field) => [field.label, field.about]),
     ...Object.values(i18n.BUILTIN_CATEGORY_LABELS),
+    // 上下文面的两张分类表（图例与筛选器都从这里取中文原文）。
+    ...Object.values(i18n.CONTEXT_KIND_LABELS ?? {}),
+    ...(i18n.CONTEXT_FILTERS ?? []).map((kind) => kind.label),
+    // 块图列内的短名表（窄列放得下两个字）——同样是 `t(表[kind])`。
+    ...Object.values(i18n.CONTEXT_SHORT_LABELS ?? {}),
   ]
   const reachable = new Set([
     ...calledTranslationKeys(),

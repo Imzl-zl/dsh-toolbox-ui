@@ -45,6 +45,7 @@ export const PARTS = [
   '40-shared-ui.js',       // 共享工具与 UI 原子（含 MCP 预设、Schema 可读化、排序键、能力层枚举）
   '50-mcp-panels.js',      // MCP 面：列表 / 详情 / 编辑 / 导入 / 市场 / 导出
   '60-tool-loading.js',    // 工具页：加载策略与工具表
+  '65-context-face.js',    // 上下文面：treemap、图例、明细、轮次（只排布，不估算）
   '70-shell.js',           // 面板外壳与入口（McpTab、悬浮按钮、更新提示）
   '80-skills-face.js',     // 技能面：列表 / 详情 / 市场
   '90-contribution.js',    // contribution 描述符 + apply

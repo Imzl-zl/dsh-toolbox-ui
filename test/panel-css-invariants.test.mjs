@@ -60,6 +60,21 @@ test('ListFooter 的死 action 槽位连样式一起删干净', () => {
   assert.deepEqual(dead.map((rule) => rule.selectors), [], '底栏动作槽位的样式必须一起删掉')
 })
 
+test('明细行的副标题必须限宽：长文本不能把同一行的标签挤没', () => {
+  // 真机预览踩到的：系统提示词那一条的副标题是提示词首行（最长 96 字），而 `.row-sub` 当时是
+  // `flex:none;white-space:nowrap`——它按内容撑到几百像素，把 flex 行里的标签压成 0 宽、
+  // 把大小值推出卡片外。界面不会报错，只是那一行"标签不见了"，看着像渲染丢了一块。
+  // 判据用**级联后的声明**（max-width + overflow 省略），不是类名字符串。
+  const rule = rules.find((entry) => entry.selectors.includes('.dsh-mcp-ctx-row-sub'))
+  assert.ok(rule, '找不到明细行副标题的规则')
+  assert.notEqual(declOf(rule, 'max-width'), undefined, '副标题必须限宽（max-width）')
+  assert.equal(declOf(rule, 'overflow'), 'hidden', '副标题必须裁切，不能溢出到同行其它元素上')
+  assert.equal(declOf(rule, 'text-overflow'), 'ellipsis', '裁切要留省略号，否则读者不知道后面还有字')
+  // flex 简写与 flex-shrink 两种写法都认：判的是"能不能收缩"，不是某个拼法。
+  const shrink = declOf(rule, 'flex-shrink') ?? (declOf(rule, 'flex') ?? '').trim().split(/\s+/)[1]
+  assert.equal(shrink, '1', '副标题必须可收缩（flex:none 会按内容撑宽）')
+})
+
 test('页签隐藏规则压得过组件自身的 display', () => {
   // 一个详情页签元素身上可能同时挂着这些类，所以它们之间的 display 规则会互相竞争。
   const PANE_CLASSES = new Set(['dsh-mcp-pane-off', 'dsh-mcp-card', 'dsh-mcp-d-diag', 'dsh-mcp-detail', 'dsh-mcp-d-body'])

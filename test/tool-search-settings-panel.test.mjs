@@ -148,8 +148,8 @@ test('打开时同时读取工具策略与搜索参数，两个参数和目录�
   const { tree } = await openPanel(internals, call)
   assert.deepEqual(calls.slice(0, 2).map((entry) => entry.method), ['toolLoadingSettings', 'toolSearchSettings'])
   assert.deepEqual(numericInputs(tree).map((node) => node.props.value), [25, 30, 120])
-  assert.ok(allText(tree).includes('一次最多返回几个'))
-  assert.ok(allText(tree).includes('同时记住几个已发现的工具'))
+  assert.ok(allText(tree).includes('一次搜回几个'))
+  assert.ok(allText(tree).includes('同时记住几个搜到的工具'))
   assert.ok(allText(tree).includes('限制目录大小'))
 })
 

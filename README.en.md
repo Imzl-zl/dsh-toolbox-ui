@@ -77,6 +77,15 @@ Tool definitions drop from **89.9K** to **9.4K** — **80.5K less (-89.5%)**, ab
 - **Located by its real position on disk** (never by skill name): skills whose file or directory name differs from the frontmatter `name` can still be read, toggled and removed
 - Market backed by [skillhub.cn](https://skillhub.cn): publisher verification and security-scan findings are disclosed before install, followed by one **explicit confirmation** (validated server-side)
 
+**Context**
+
+- **One pane answers "who is holding the context in the next request"**: the total is what the model reported (used / limit / remaining / share / roughly how many more messages fit / cache hit and fresh), and the composition falls into five kinds — system prompt, tool definitions, tool results, attachments, conversation
+- **Grouped by turn and by tool**: the conversation merges per turn and tool results merge per tool name (`pwsh ×341`, `read ×67`), so "which tool eats the most context" is visible at a glance; the detail list filters by kind, with a per-turn bar chart alongside
+- **Two views**: the block view lays out **fixed-order columns per category** with free space pinned to the far right (column width is the share; categories too small to see keep only a visible edge); the grid view turns the same composition into equal cells and answers "how many cells, how full"
+- **Tool card**: how many tools this request carried, how much context they take, and how many tool searches this session ran (by name vs keyword)
+- **Only running sessions**: no historical session list (that is the sidebar's job); when several sessions run at once you can switch, with the **workspace name** shown; when nothing is running it explains why it is empty and how to get numbers
+- **Estimates and truth stay separate**: the composition is an estimate and the total is the truth, so they do not match by construction — the pane scales the composition to the real total proportionally — only when every category is priced, so the numbers still add up to the total above; every reading also says which moment it describes ("previous turn" or "latest turn")
+
 **Shared**
 
 - Pick one or both entry points: the floating button (draggable, position remembered) and the sidebar "Toolbox" entry — at least one stays on
@@ -87,10 +96,10 @@ Tool definitions drop from **89.9K** to **9.4K** — **80.5K less (-89.5%)**, ab
 
 ```sh
 # Recommended: from npm — `dsh plugin update` then upgrades within ^1.x
-dsh plugin --profile web add dsh-toolbox-ui@^1.12.1
+dsh plugin --profile web add dsh-toolbox-ui@^1.13.0
 
 # Or pin a GitHub release tag (no automatic upgrades; re-add with a new tag)
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.12.1
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.13.0
 ```
 
 Then **restart `dsh web`**. To uninstall (your existing MCP entries stay):

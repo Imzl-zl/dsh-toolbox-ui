@@ -194,15 +194,18 @@ test('作用域条在第二行里必须吃掉中间那一列的剩余宽度', ()
 })
 
 // ═══ ③ 能力层顺序与职责 ═══════════════════════════════════════════════════
-test('能力层按 MCP、技能、工具顺序渲染，工具页独立承载加载策略', () => {
+test('能力层按 MCP、技能、工具、上下文顺序渲染，工具页与上下文页独立承载', () => {
   const start = clientSource.indexOf('const ABILITY_TABS = [')
   const end = clientSource.indexOf('];', start)
   assert.ok(start > 0 && end > start, '找不到能力层定义')
   const body = clientSource.slice(start, end)
   const ids = [...body.matchAll(/id: '([^']+)'/g)].map((match) => match[1])
-  assert.deepEqual(ids, ['mcp', 'skills', 'tool-loading'])
+  assert.deepEqual(ids, ['mcp', 'skills', 'tool-loading', 'context'])
   assert.match(body, /id: 'tool-loading',[\s\S]*label: '工具'/)
+  assert.match(body, /id: 'context',[\s\S]*label: '上下文'/)
   assert.match(clientSource, /ability === 'tool-loading'/, '工具标签必须切换到独立工具页')
+  // 上下文面是**观测**：它必须渲染那块只读面板，而不是复用配置页。
+  assert.match(clientSource, /ability === 'context'[\s\S]{0,80}ContextFace/, '上下文标签必须切换到上下文面板')
   assert.match(clientSource, /onToggleDefer: toggleDeferOne/, 'MCP 页必须继续持有服务器延迟开关')
   assert.match(clientSource, /deferAllAction/, 'MCP 页必须继续提供全部延迟动作')
 })

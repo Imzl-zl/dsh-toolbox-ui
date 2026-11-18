@@ -27,7 +27,7 @@ function createAgent() {
 /** 装载真插件，返回捕获面。deferEntries 控制 loader 条目里的 defer 配置。
  *  patchBody 覆盖写进 cordis.patch.yml 的初始内容（默认空列表）——需要真实 patch 条目
  *  的用例（如 setDeferAll）用它。occupied 模拟"工具名已被别人占用"（G4 重名预检）。 */
-async function mountPlugin(deferEntries, { toolsMode, patchBody = '[]\n', occupied = [] } = {}) {
+async function mountPlugin(deferEntries, { toolsMode, patchBody = '[]\n', occupied = [], sessionStore = true } = {}) {
   const { Context } = await import('@deepseek-ai/cordis')
   const { McpManagerGateway } = await import('../lib/index.js')
   const root = await mkdtemp(join(tmpdir(), 'dsh-wiring-'))
@@ -94,6 +94,10 @@ async function mountPlugin(deferEntries, { toolsMode, patchBody = '[]\n', occupi
         register: () => () => {},
         stateOf: () => undefined,
       })
+      // 会话存储：上下文观测面靠它枚举活会话。**必须提供**——宿主连这个服务都没有时，
+      // 面板拿到的是"没有会话在运行"（一个永远空着的面板），所以那边会明确报错。
+      // 这里给一个空的会话表：服务在、只是没有会话，那才是"空状态"的正常形状。
+      if (sessionStore) inner.provide('sessions', { list: () => [] })
       // systemPrompt 必须提供：ToolSearch 会注册一个静态引导 section。这里的 section()
       // **照抄宿主的 order 校验**——曾经就是少了它，导致"丢了 order"这种回归在 681 个
       // 全绿的用例里活了下来，直到真宿主一跑就炸（插件加载即抛错）。
@@ -562,8 +566,11 @@ test('setDeferAll 不传 wsPath 时走全局分支（空串不得被解析成 cw
 // 只落在宿主进程日志里，面板完全不可见。于是"参数该调多大"只能靠猜。
 //
 // 这一条只做**能立刻算出来的部分**（延迟服务器、工具池大小、预算值），不假装知道
-// "这次搜索会返回什么"——那是 R13b 试搜的事。
-test('toolSearchSettings 带目录体检：预算、延迟服务器、工具池大小（R13a）', async () => {
+// "这次搜索会返回什么"——那要等模型真的搜一次，记录在会话日志里。
+test('contextReport 带目录状态：预算、按需服务器、目录字符数（原 R13a 体检）', async () => {
+  // 这份数据原来从 `toolSearchSettings().catalog` 出去（工具页的「目录体检」卡）。它是**观测**，
+  // 不是配置，所以搬到 `contextReport`：工具页只负责配置，观测统一在一个页面里。
+  // 断言的不变量一条没少：同源、与 deferServersOf 一致、不得碰工具清单、未组装时如实 null。
   const { deferServersOf } = await import('../lib/tool-search-config.js')
   const mounted = await mountPlugin(
     [{ serverName: 'deferme', transport: 'stdio', command: 'node', defer: true }],
@@ -571,22 +578,35 @@ test('toolSearchSettings 带目录体检：预算、延迟服务器、工具池�
   )
   try {
     const manager = mounted.ctx.get('toolboxMcp')
-    const detail = await manager.toolSearchSettings()
-    assert.ok(detail.catalog, '必须带 catalog 体检字段（未修时是 undefined）')
+    const settings = await manager.toolSearchSettings()
+    // 工具页那个接口现在**只回答配置**，不再捎带观测量。
+    assert.equal('catalog' in settings, false, 'toolSearchSettings 不该再带 catalog（观测归 contextReport）')
+
+    const detail = await manager.contextReport()
+    assert.ok(detail.catalog, 'contextReport 必须带 catalog（未接上时是 undefined）')
     // ① 预算与 settings **同源**：体检里的值不许是第二个真相源。
-    assert.equal(detail.catalog.budget, detail.settings.maxCatalogChars ?? null)
-    // ② 延迟服务器与 deferServersOf 一致（同一个函数，不是重新实现一遍判断）。
+    assert.equal(detail.catalog.budget, settings.settings.maxCatalogChars ?? null)
+    // ② 按需服务器与 deferServersOf 一致（同一个函数，不是重新实现一遍判断）。
     assert.deepEqual(Array.from(detail.catalog.deferredServers).sort(), Array.from(deferServersOf(mounted.ctx)).sort())
-    assert.deepEqual(Array.from(detail.catalog.deferredServers), ['deferme'], '前置：这台必须是延迟的')
-    // ③ **体检不得碰工具清单**：`globalToolSchemas` 在缓存未命中时是宿主的全量 schema 深拷贝
-    // （实测 735 工具 ≈ 92ms / 1.6–2MB），拿它算"可见工具数"等于让"打开设置页"付一次全量枚举。
-    // ToolSearch 存在的意义就是省上下文，体检自己触发全量枚举完全反过来了。
+    assert.deepEqual(Array.from(detail.catalog.deferredServers), ['deferme'], '前置：这台必须是按需的')
+    // ③ **不得碰工具清单**：`globalToolSchemas` 在缓存未命中时是宿主的全量 schema 深拷贝
+    // （实测 735 工具 ≈ 92ms / 1.6–2MB），拿它算"可见工具数"等于让一次只读查询付全量枚举。
     assert.equal('globalToolCount' in detail.catalog, false,
-      '体检不得报"可见工具数"：那需要 enumerating 全部 schema，副作用大于信息价值')
-    // 该报的是**上下文成本**：目录段的字符数（每轮请求都要付）。
-    assert.equal('chars' in (detail.catalog.lastAssembly ?? {}), false, '未组装时 lastAssembly 是 null，不编 chars')
+      '不得报"可见工具数"：那需要 enumerating 全部 schema，副作用大于信息价值')
     // ④ 还没组装过目录时如实报 null——不编一个 0 出来。
     assert.equal(detail.catalog.lastAssembly, null, '未组装时必须 null（"还没跑过" ≠ "跑了但没截断"）')
+  } finally {
+    await mounted.dispose()
+  }
+})
+
+test('contextReport：宿主连会话服务都没有时明确报错，而不是永远显示"没有会话在运行"', async () => {
+  // 这两种情况在界面上长得一模一样，但一个是"你还没开会话"、一个是"这台宿主给不出会话"。
+  // 后者必须报错：一个永远空着的面板会让人以为插件坏了，而错误条至少说得清。
+  const mounted = await mountPlugin([], { sessionStore: false })
+  try {
+    const manager = mounted.ctx.get('toolboxMcp')
+    await assert.rejects(() => manager.contextReport(), /会话服务/)
   } finally {
     await mounted.dispose()
   }

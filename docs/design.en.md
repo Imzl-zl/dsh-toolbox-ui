@@ -529,11 +529,142 @@ latter is "the user cannot turn it off".
 settings. It still decides a server's default while no `groups` entry exists; once the chip or a
 group header writes `groups`, that layer wins.
 
+## The context observability pane
+
+**Why this pane exists**: the Tools page used to carry a "catalog checkup" block answering "how big is the
+catalog", while the question people actually ask is "who is holding the context in the next request". The
+first is a paragraph of text; the second needs a picture. So this is its own ability layer, and it **takes
+the catalog checkup over** — observability lives in one place, and the Tools page only configures.
+
+**The dividing line is configuration versus observation**: the Tools page writes parameters, loading choices
+and groups (what changes when you edit); the Context page reads the current state (what it looks like now).
+One reading appears in exactly one page, because the same number shown twice will disagree some day. The
+user's words were "you already have a page for this context, so it should show there".
+
+**Only running sessions are observed**. The pane answers "who is holding the context in the next request" —
+no request, no context. So it reads only **live sessions** (the sessions of `ctx.agents`, plus any loaded
+`Session` in `ctx.sessions`) and never walks the history on disk.
+
+That boundary is a product decision: an earlier version scanned `~/.dsh/sessions` and rendered dozens of
+historical sessions as a row of buttons; the user's words were "too many sessions, I cannot tell what your
+strategy is, some workspaces have several and some have none". An observability pane should not become a
+session picker that forces a choice — that is the sidebar's job.
+
+Dropping the disk path also dropped a whole degradation chain: multi-frame zstd decoding, two-phase parsing
+(read a 64KB digest first, fully parse on demand), the character-vs-token unit conversion, and `DSH_HOME`
+path resolution. A live session always has a `Session` object, so tokenMeter prices are the standard path
+and the composition is in tokens by construction.
+
+**No running session is not an error**: the Host returns an empty report (`{ empty: true }`) instead of
+throwing, because the pane polls every 3 seconds and a throw would make the error strip flash. There is
+exactly one empty state ("no session is running") and it never names a session: one entry covers every
+workspace, so singling one out implies the pane belongs to it. The Host does **not** remember which
+session it was asked about, so the old `requested` field is gone — nothing ever read it, yet the docs
+used it to describe two different empty states.
+
+**A session that disappeared falls back to the overview**: when the Host cannot find the requested
+`sessionId` it falls back to the most recently active session, so the returned `session.id` differs from
+what the pane asked for. The pane then does **not** hang that data under the clicked title (that would be
+"title says A, numbers are B"); it returns to the all-sessions overview. The check is a single string
+comparison and needs no cooperation from the Host.
+
+**The report carries no human-readable copy**: category ids, item ids, tool names, counts, turns, token or
+character counts — facts only. `label` / `sublabel` used to be assembled into Chinese on the Host side
+("×37", "8 messages", "unknown tool"): invisible in a Chinese UI, leaked verbatim into English, while
+both test suites stayed green. The rule is: any Chinese emitted here can never be translated by the
+client. So all wording lives in the client (`t()` exists only there) and the Host only answers "what, and
+how much".
+
+**The composition is scaled to the total only when every category is priced** (Host `totals.measured`).
+Scaling with one price missing inflates the remaining categories by `used / priced-sum`: the chart still
+fills, the numbers still add up, but every number is too large by exactly the missing category's share
+(tool definitions are commonly 10–20%). That is the "unknown treated as zero" variant wearing the mask of
+completeness — better to show raw estimates with the gap left in the chart.
+
+**Long sessions must be capped**: items grow per turn (400+ turns on a real machine). The detail list
+shows at most 20 rows and each treemap column at most 6 blocks, with the folded count written as
+"{count} more" — capping is fine, silently drawing less is not. Order still comes from the Host (fixed
+category order, size-descending inside a category); the client never re-sorts, because a second sort order
+is a second source of truth.
+
+**Composition and total are separate accounts**. `measure()` node prices are the **estimated composition**
+(the Host's fixed "four characters per token plus structural overhead"); `contextPressure()`'s
+`pressureTokens` is the **real total** (provider-reported). The two do not match by construction (CJK and
+JSON schema get undercounted), so scaling the composition up into the total, or spreading the total over the
+composition, would hand the user a fake number that looks precise. Instead the treemap scales the composition
+to the real total with a **proportional conversion** (ratios inside the composition are preserved, and the
+numbers add up to the total shown above) — **and only when every category carries a price**
+(`totals.measured`); with one price missing there is no conversion, and the numbers stay estimates with the
+gap left visible in the chart. The UI carries **no note about this basis**: the unit (tokens / characters)
+and the fact that the legend adds up to the total above already say it, and one more paragraph explaining it
+would be for the implementer, not the reader.
+
+**Why a hand-written layout**: an equal-cell grid makes small cells look about as big as large ones,
+which destroys the whole point of "which one is big at a glance"; a global squarified treemap lets a
+small category be squeezed into an invisible sliver by a large one. So the layout is **one column per
+category**: column width **is the share**, and items inside a column stack by size. The order is fixed:
+system → tools → tool-result → attachment → conversation → free space. The real-machine complaint was
+"why is the free space on the left, that is counter-intuitive", which is exactly what a pure
+size-descending order produces (the largest item lands leftmost). With a fixed order, "the Nth column in
+the picture" and "the Nth legend item" always agree, and the free space reliably sits at the far right.
+
+**Column width must not lie**: an earlier version lifted small categories to 68px and renormalised. But a
+420px floating panel cannot afford 68px per column for six columns (6×68 > 388), and renormalisation took
+the lift back — so the small category got neither the visible width nor proportionality (attachments at
+2K looked as wide as the 29K system prompt). A chart whose area ignores its value is worse than no chart,
+so the rule now is: width = share, and categories under 1.2% get a **2–8px** visible edge so "this
+category exists" is visible. Exact sizes are read from the legend and the detail rows. Columns too narrow
+for a label get no label — the legend is the lookup table and the hover title carries the full name.
+
+**Per-turn rows are not dumped into the detail list**: "turn N / 6 messages / 13K" looks identical 400
+times over, and the "how much each turn used" bar chart is the right shape for a time series. So the "all"
+view folds the conversation into **one row** ("Conversation · 400 turns"); per-turn rows appear only when
+the "Conversation" filter is selected.
+
+**The report must converge as sessions grow**: detail rows grow per turn while the pane polls every 3
+seconds. Uncapped, a 1500-turn session produced a **287KB** report (1504 items + 1500 turn rows) — around
+95KB/s with the panel open plus a 1500-entry JSON parse. So the Host caps: at most `MAX_ITEMS_PER_KIND`
+(24) rows per category and `TURN_HISTORY_LIMIT` (120) turns, with the overflow reported honestly through
+`kinds[].folded` and `turnTotal`; `totals` still counts everything, because the client uses it as the
+conversion denominator. Measured: 287KB → **16KB**.
+
+**"No session service" is not an empty state**: both cases look identical in the UI, but one means "you
+have not started a session" and the other means "this Host cannot provide sessions". The second must be an
+error (otherwise the panel is empty forever and users think the plugin is broken), so when both sources
+(`agents` and `sessions`) are missing the Host throws and the pane shows an error strip.
+
+**Five categories, all of them things the Host actually has**: system prompt (`system/message`), tool
+definitions (request-header `tools` plus `developer/message`), tool results (`tool/result`), attachments
+(the `image` blocks inside messages), and conversation (user/assistant text and reasoning). The Host has
+**no** "memory" dimension — no event or block type marks one — so the pane does not invent a fake
+category: splitting by memory/file would first need a Host-side marker, otherwise it could only guess
+from filenames, which is fake precision. Attachments are peeled out of the conversation by **character
+share**, and the node price is split by the same ratio (the total is preserved).
+
+**Two views for two questions**: the block view answers "who is big", the grid answers "how many cells,
+how full" (empty cells are visible). Each grid cell is an automatically chosen round amount (2K/5K/10K…);
+cell count grows with usage and the per-cell amount is enlarged past the cap — the per-cell amount is shown next to the section title ("5K per cell, 326 cells").
+
+**Units must line up**: the composition is in tokens when prices exist and in characters when only a
+character ledger is available, while `remaining` and `budget.window` are always tokens. Mixing them
+squeezes 549K tokens of free space into a small block next to 861K characters of conversation (a real
+machine showed exactly that, and the grid made it worse: capacity in tokens but cells laid out from
+characters meant 326 cells × 5K = 1.63M against a 1M capacity). So there is one `toDisplay()` exit: when
+only a character ledger exists, token values are multiplied by `character total / used tokens`; the block
+view, the legend, the grid capacity, and the per-cell caption all go through it.
+
+**Turn attribution** follows the Host's `assistant/message.data.turn`, not the `turn/start` cursor: a
+forked or resumed session may carry a single `turn/start` (a real machine had 424 steps and turn numbers
+up to 15 with exactly one `turn/start`), while `user/message` carries no turn field at all. **That
+resolution exists in exactly one place** (`foldSurfaceEvents`): the priced path once did its own
+`Number(event.data.turn ?? 0)`, so the same log produced different turns on the two paths.
+
 ## Package structure
 
 - `package.json`: declares `dsh.bundle` and the Web `dsh.client`
 - `cordis.patch.yml`: inserts the single Host plugin instance
 - `lib/index.js`: the `mcpManager` Host Remote
+- `lib/context-report.js`: pure assembly of context composition and usage (touches no ctx, testable without a Host)
 - `lib/mcp-registry.js`: enumeration of MCP entries in the loader and inference of tool ownership
 - `lib/workspace-runtime.js`: project config read/write state, the shared mcp-client connections reference-counted by `(project, serverName)`, and the projection of their tools into each session scope
 - `lib/workspace-config.js`: reading, writing, and conversion of project-level `.dsh/mcp.json`
