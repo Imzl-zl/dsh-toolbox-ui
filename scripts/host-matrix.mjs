@@ -1,30 +1,27 @@
 #!/usr/bin/env node
-// 双宿主矩阵：把本仓库的**源码**复制到一棵独立安装树里，装上指定的那一代 DSH 宿主包，
-// 然后在它里面跑全量用例。CI 用两腿（0.2.1-rc.5 / 0.2.2-rc.1）分别验证两代宿主的契约。
+// 宿主矩阵：把本仓库的**源码**复制到一棵独立安装树里，装上指定的那一代 DSH 宿主包，
+// 然后在它里面跑全量用例。腿清单在 `scripts/host-presets.mjs`（唯一一份）。
 //
 // 为什么不在仓库自己的 node_modules 上换版本：
 //   · `pnpm-lock.yaml` 被 `test/package-contract.test.mjs` 当作"开发基线"的唯一证据，
 //     CI 里改一次版本就会把那条断言变成假的；
-//   · 两腿必须能并行、互不影响，且**跑在真实安装出来的依赖树**上（junction 复用会掩盖解析问题）。
+//   · 各腿必须能并行、互不影响，且**跑在真实安装出来的依赖树**上（junction 复用会掩盖解析问题）。
 //
 // 用法：
 //   node scripts/host-matrix.mjs --host 0.2.1-rc.5
-//   node scripts/host-matrix.mjs --host 0.2.2-rc.1 --dir D:/tmp/matrix-rc1 --no-install
-//   node scripts/host-matrix.mjs --host 0.2.2-rc.1 --keep        # 保留安装树（排障用）
+//   node scripts/host-matrix.mjs --host 0.2.2-rc.3 --dir D:/tmp/matrix-rc3 --no-install
+//   node scripts/host-matrix.mjs --host 0.2.2-rc.5 --keep        # 保留安装树（排障用）
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { HOSTS } from './host-presets.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-// 两代宿主的依赖面（与 package.json 的 devDependencies 一一对应，只换版本）。
-const HOSTS = {
-  '0.2.1-rc.5': { cordis: '~4.0.5', loader: '~1.0.6', include: '1.0.10', stepToolset: '0' },
-  '0.2.2-rc.1': { cordis: '~4.1.0', loader: '~1.1.0', include: '~1.1.0', stepToolset: '1' },
-  '0.2.2-rc.3': { cordis: '~4.1.0', loader: '~1.1.0', include: '~1.1.0', stepToolset: '1' },
-}
+// 宿主腿清单住在 `scripts/host-presets.mjs`（无副作用模块，用例与 CI 都从那里读）。
+// 这里只负责按选中的腿换依赖面（与 package.json 的 devDependencies 一一对应，只换版本）。
 // 现代宿主（0.2.2）的用例要按真实安装形态装上官方执行器插件：`tool-search-rc22-host.test.mjs`
 // 直接 import 它们来搭"真 executor"夹具，插件的 ToolSearch 运行时也会 `loader.import` 这两个包
 // 取渲染器。它们**不是**插件的 peer（插件不 import 它们），但开发基线现在就是现代宿主，
@@ -74,7 +71,7 @@ function run(command, args, options = {}) {
 
 const args = parseArgs(process.argv.slice(2))
 const host = args.host
-if (!host) throw new Error('必须给 --host <版本>（例如 0.2.1-rc.5 或 0.2.2-rc.1）')
+if (!host) throw new Error('必须给 --host <版本>（例如 0.2.1-rc.5 或 0.2.2-rc.5）')
 const preset = HOSTS[host]
 if (!preset) throw new Error(`未知宿主版本 ${host}；已知：${Object.keys(HOSTS).join(' / ')}`)
 const cordis = args.cordis ?? preset.cordis

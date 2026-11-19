@@ -47,7 +47,10 @@ jobs:
       - name: Test
         run: npm test
 
-  # 双宿主矩阵：同一份源码在两代宿主的真实安装树上各跑一次全量。
+  # 宿主矩阵：同一份源码在每一代宿主的真实安装树上各跑一次全量。
+  # 腿**只列宿主版本**：每腿的 cordis / loader / include / stepToolset 在
+  # `scripts/host-presets.mjs` 里（唯一一份），`test/package-contract.test.mjs` 断言本
+  # matrix 与那份表一一对应——漏加一行会红，而不是静默少跑一腿。
   # 每一腿用 DSH_EXPECT_STEP_TOOLSET 在**加载期**断言"跑到的确实是目标那一代"，
   # 另一代的用例按能力跳过（理由写在 skip 文案里），不靠整腿跳过变绿。
   host-matrix:
@@ -57,13 +60,8 @@ jobs:
       matrix:
         include:
           - host: 0.2.1-rc.5
-            cordis: ~4.0.5
-            loader: ~1.0.6
-            include: 1.0.10
           - host: 0.2.2-rc.3
-            cordis: ~4.1.0
-            loader: ~1.1.0
-            include: ~1.1.0
+          - host: 0.2.2-rc.5
     steps:
       - uses: actions/checkout@v7
 
@@ -79,6 +77,3 @@ jobs:
         run: >-
           node scripts/host-matrix.mjs
           --host ${{ matrix.host }}
-          --cordis ${{ matrix.cordis }}
-          --loader ${{ matrix.loader }}
-          --include ${{ matrix.include }}

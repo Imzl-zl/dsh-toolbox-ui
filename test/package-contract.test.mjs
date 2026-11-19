@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { parse } from 'yaml'
+import { HOSTS } from '../scripts/host-presets.mjs'
 
 const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 const patch = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
@@ -36,16 +37,16 @@ const DSH_ENGINE_WINDOW = '>=0.2.1-rc.5 <0.3.0'
 //
 // 矩阵腿（`scripts/host-matrix.mjs`）会在**独立安装树**里把开发基线换成另一代宿主，
 // 并用 DSH_HOST_MATRIX_* 告诉这里"这一腿的目标是什么"。断言方向不变——仍然是"必须等于
-// 本腿的目标版本"，只是目标来自环境而不是写死：否则 rc.1 那一腿只能靠跳过它变绿。
+// 本腿的目标版本"，只是目标来自环境而不是写死：否则别的代的腿只能靠跳过它变绿。
 const MATRIX_BASELINE = process.env.DSH_HOST_MATRIX_BASELINE
-const DEV_BASELINE = MATRIX_BASELINE || '0.2.2-rc.3'
+const DEV_BASELINE = MATRIX_BASELINE || '0.2.2-rc.5'
 // 锁文件里解析出的具体版本。**从 DEV_BASELINE 推导**，不要另写一处：这里原本硬编码
 // /^0\.1\.5-rc\.2/，于是 bump 基线时就有了第二个真源。
 const DEV_BASELINE_VERSION = DEV_BASELINE.replace(/^[^0-9]*/, '')
-// Cordis 的已验窗口覆盖 0.2.1-rc.5 的 4.0.5 与 0.2.2-rc.3 的 4.1.0；上界
+// Cordis 的已验窗口覆盖 0.2.1-rc.5 的 4.0.5 与 0.2.2 系列（rc.3 / rc.5）的 4.1.0；上界
 // 明确挡住下一代未验证的 4.2。
 const CORDIS_PEER = '>=4.0.5 <4.2.0'
-// dev 基线跟随已验证宿主（0.2.2-rc.3）自带的那一代（~4.1.0）：peer 窗口说的是"能装哪些"，
+// dev 基线跟随已验证宿主（0.2.2-rc.5）自带的那一代（~4.1.0）：peer 窗口说的是"能装哪些"，
 // devDependencies 说的是"本地这套用例跑在哪个真实组合上"。两者不是一回事。
 const CORDIS_DEV_BASELINE = process.env.DSH_HOST_MATRIX_CORDIS || '~4.1.0'
 // reveal 用 loader 的 interpolate 求值 `!!js` 节点；范围跟随 dsh 自身对它的要求。
@@ -143,6 +144,28 @@ test('lockfile resolves DSH host packages only as a development baseline on the 
   }
   assert.equal(importer.dependencies?.['@deepseek-ai/cordis'], undefined)
   assert.equal(importer.devDependencies?.['@deepseek-ai/cordis']?.specifier, CORDIS_DEV_BASELINE)
+})
+
+// 宿主腿清单只有一份（`scripts/host-presets.mjs`），但 CI 的 matrix 仍是手写 YAML：
+// 「加了一条腿却忘了加 CI 行」不会让任何用例变红，只会静默少跑一腿——而腿清单的存在意义
+// 正是"这条宿主组合我们验过"。这条断言把两份清单钉在一起，顺带钉住"每腿的 cordis /
+// loader / include 只住在 presets 里"（ci.yml 再抄一遍就是第二个真源，改一处忘一处）。
+test('the CI host matrix lists exactly the legs in scripts/host-presets.mjs', async () => {
+  const workflow = parse(await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8'))
+  const include = workflow?.jobs?.['host-matrix']?.strategy?.matrix?.include
+  assert.ok(Array.isArray(include), 'ci.yml 的 host-matrix 必须用 matrix.include 列腿')
+  assert.deepEqual(
+    include.map((leg) => leg.host),
+    Object.keys(HOSTS),
+    'ci.yml 的腿与 scripts/host-presets.mjs 不一致：加了腿就要在两边各加一行（这里故意不自动生成，见该文件注释）',
+  )
+  for (const leg of include) {
+    assert.deepEqual(
+      Object.keys(leg),
+      ['host'],
+      'ci.yml 每腿只写宿主版本：cordis / loader / include / stepToolset 只住在 scripts/host-presets.mjs',
+    )
+  }
 })
 
 test('runtime YAML parser includes the nested-collection stack overflow fix', () => {

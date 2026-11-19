@@ -32,7 +32,7 @@ jobs:
           const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
           const baseline = manifest.devDependencies['@deepseek-ai/dsh-agent']
           const targets = new Map()
-          for (const [label, version] of [['baseline', baseline], ['npm-rc', '0.2.2-rc.1'], ...['latest', 'next', 'alpha'].map(tag => [tag, tags[tag]])]) {
+          for (const [label, version] of [['baseline', baseline], ['npm-rc', '0.2.2-rc.3'], ...['latest', 'next', 'alpha'].map(tag => [tag, tags[tag]])]) {
             if (version === undefined) {
               console.log(`::notice::npm channel ${label} is absent`)
               continue
