@@ -587,6 +587,23 @@ shows at most 20 rows and each treemap column at most 6 blocks, with the folded 
 category order, size-descending inside a category); the client never re-sorts, because a second sort order
 is a second source of truth.
 
+**The tool-definition price has exactly one source, and it is two levels deep**: the tool schemas are not on
+the surface (they are not messages), so `measure()` carries no node price for them; the only figure is the
+Host's `contextBreakdown` projection, computed by tokenMeter with the same estimator. That projection's
+**state is the outer object**: `{ systems, surfaceTokens, claim?, breakdown: { systemTokens, toolsTokens,
+messageTokens } }`, and the value to read, `toolsTokens`, sits inside. The assembly point (`lib/index.js`)
+unwraps it in exactly one place — 1.13.1 shipped without that step, so the tool card's "share of context"
+read `—` forever while the pure-function tests fed the inner object and stayed green on both sides. The
+regression case is `test/context-report-host.test.mjs`, and it feeds the **real host shape** to pin the seam.
+
+One risk worth recording: the Host marks this projection's accessor deprecated — `ctx.sessionProjections.
+stateOf(session, key)` still exists (the shape is identical on 0.2.1-rc.5 / 0.2.2-rc.3 / rc.5, and each key
+warns once), but the recommended path is an awaited registration's handle. There is no other public read on
+the Host side (`tokenMeter` exposes only `measure` / `contextPressure` / `estimateMessage`), so the two-arg
+form stays. If the Host ever removes it, the symptom is that "share of context" goes back to `—` (the error
+is caught inside a `try`, one warn only) rather than a broken panel — so that one cell needs a human look at
+every baseline bump.
+
 **Composition and total are separate accounts**. `measure()` node prices are the **estimated composition**
 (the Host's fixed "four characters per token plus structural overhead"); `contextPressure()`'s
 `pressureTokens` is the **real total** (provider-reported). The two do not match by construction (CJK and

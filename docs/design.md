@@ -591,6 +591,21 @@ RPC 的四张脸（宿主 `@Remote`、`lib/typert.js`、`lib/client.js` 的 desc
 条数写成"其余 N 项"——封顶可以，"悄悄少画"不行。顺序仍由宿主给（分类固定顺序，分类内按大小
 降序），客户端不重排：重排就是第二个排序真相源。
 
+**工具定义的价格只有一个来源，而且它是两层的**：工具 schema 不在 surface 上（它不是消息），所以
+`measure()` 的节点价格里没有它；唯一的口径是宿主的 `contextBreakdown` 投影，由 tokenMeter 用同一套
+估算器算出。这个投影的 **state 是外层**：`{ systems, surfaceTokens, claim?, breakdown: { systemTokens,
+toolsTokens, messageTokens } }`，要读的 `toolsTokens` 在里层。装配处（`lib/index.js`）负责只在这一处
+拆开它——2026-11-19 的 1.13.1 就是漏了这一步：把整个 state 传给了纯函数，于是工具卡的「占上下文」
+一直是「—」，而纯函数用例喂的是内层对象，两边各自都绿。回归用例在
+`test/context-report-host.test.mjs`，喂的是**宿主真实形状**，钉的就是这条接缝。
+
+顺带记一条风险：宿主把这个投影的读取方式标成了 deprecated——`ctx.sessionProjections.stateOf(session,
+key)` 仍在（0.2.1-rc.5 / 0.2.2-rc.3 / rc.5 三代形状一致，且每个 key 只 warn 一次），但官方推荐的是
+「awaited registration 的 handle」。宿主侧没有别的公开读法（`tokenMeter` 只暴露 `measure` /
+`contextPressure` / `estimateMessage`），所以这里继续用两参形式；哪天宿主把它删掉，表现会是「占上下文」
+又回到「—」（`try` 里接住错误、只打一条 warn），不会让面板崩——所以每次升基线时，工具卡那一格要人眼
+过一遍。
+
 **构成与总量的分工**：`measure()` 的节点价格是**估算构成**（宿主固定"每 4 字符 1 token +
 结构开销"），`contextPressure()` 的 `pressureTokens` 是**真实总量**（提供方报告）。两者本来就不
 相等（CJK 与 JSON schema 会被低估），把构成放大成总量或把总量摊给构成，都是给用户一个看起来
