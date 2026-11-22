@@ -61,7 +61,7 @@ async function scopeAgent(ctx, agent) {
  * 宿主在 waterfall 之后才把 provider-owned 的 `tools` 贴回最终 assembly。所以必须
  * 在 `systemPrompt.assemble()` 返回之后投影，否则目录段会出现、声明一个都不会少。
  */
-async function createHost({ presentation = 'native', deferral = true } = {}) {
+async function createHost({ presentation = 'native', deferral = true, limits = {} } = {}) {
   const [{ default: SystemPrompt }, executorModule] = await Promise.all([
     import(pathToFileURL(toolsRequire.resolve('@deepseek-ai/dsh-system-prompt')).href),
     importHost(presentation === 'ptc' ? '@deepseek-ai/dsh-tool-executor-ptc' : '@deepseek-ai/dsh-tool-executor-native'),
@@ -92,6 +92,7 @@ async function createHost({ presentation = 'native', deferral = true } = {}) {
     deferServers: deferral ? ['rc22'] : [],
     serverNames: ['rc22'],
     policyFor: () => undefined,
+    ...limits,
   })
   const admit = (target = agent) => tools.resolve({ agent: target, modelSelection: MODEL, signal: signal() })
   const assemble = (target, toolSet) => systemPrompt.assemble({
@@ -156,6 +157,55 @@ test('npm 0.2.2-rc.1: native 声明先隐藏、搜索后出现，when=false 与 
     await host.cleanup()
   }
 })
+
+for (const presentation of ['native', 'ptc']) {
+  test(`modern host ${presentation}: 混合超量结果的每个工具保持守卫与呈现可用`, MODERN, async () => {
+    const host = await createHost({ presentation, limits: { maxResults: 1, maxDiscovered: 2 } })
+    const extra = definitionOf('mcp__rc22__gamma', 'RC22 gamma fixture tool')
+    host.tools.register(extra)
+    let admission
+    try {
+      admission = await host.admit()
+      await host.assemble(host.agent, admission)
+      const names = ['mcp__rc22__alpha', 'mcp__rc22__beta', extra.name]
+      await host.search(host.agent, admission, `select:${names.slice(0, 2).join(',')}`)
+      const result = await host.search(host.agent, admission, `select:${names.join(',')}`)
+      assert.deepEqual(result.matches.map((match) => match.name), names)
+      assert.deepEqual(result.discoveredTools, [extra.name])
+      for (const match of result.matches) {
+        assert.equal(host.guard(host.agent, match.name, admission), undefined,
+          `${match.name} 的完整 schema 已返回，本次提交必须保持可调`)
+        assert.ok(host.tools.executable(match.name, host.agent, admission))
+      }
+      const after = await host.assemble(host.agent, admission)
+      if (presentation === 'native') {
+        for (const name of names) assert.ok(host.names(after).includes(name))
+        const batch = await host.tools.execute({
+          calls: names.map((name, index) => ({ type: 'tool-call', id: `mixed-${index}`, name, arguments: JSON.stringify({ text: 'verify' }) })),
+          agent: host.agent, toolSet: admission, signal: signal(),
+        })
+        assert.equal(batch.results.length, names.length)
+        for (let index = 0; index < batch.results.length; index++) {
+          const outcome = batch.results[index].result
+          assert.notEqual(outcome.isError, true, `${names[index]} 必须通过实际执行器派发`)
+          assert.deepEqual(JSON.parse(outcome.content.find((block) => block.type === 'text').text), { tool: names[index] })
+        }
+      } else {
+        const sdk = after.sections.find((section) => section.name === 'tools:sdk')
+        assert.ok(sdk)
+        for (const name of names) {
+          assert.ok(sdk.text.includes(name), `${name} 必须保留在 PTC 手册`)
+          const bound = host.tools.executable(name, host.agent, admission)
+          assert.deepEqual(await bound.execute({ text: 'verify' }, { agent: host.agent, toolSet: admission }), { tool: name })
+        }
+      }
+      assert.equal(result.discoveredCount, names.length)
+    } finally {
+      admission?.dispose()
+      await host.cleanup()
+    }
+  })
+}
 
 test('npm 0.2.2-rc.1: 没有任何延迟工具时，搜索入口与目录段一起不出现（issue #9）', MODERN, async () => {
   // 用户报的现象：MCP 全部禁用后 `tool_search` 还在，模型看见就去搜一次空目录。

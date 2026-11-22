@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import vm from 'node:vm'
+import { createHookRenderer } from '../test-support/hook-renderer.mjs'
 
 const clientSource = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
 const exportMarker = 'exports.inject = inject;'
@@ -22,7 +23,7 @@ const instrumented = clientSource.replace(
 )
 assert.notEqual(instrumented, clientSource, 'client test export marker must stay current')
 
-function loadInternals() {
+function loadInternals(lifecycle) {
   const stores = new Map()
   let current = null
   const react = {
@@ -86,13 +87,14 @@ function loadInternals() {
     clearInterval,
     clearTimeout,
     // 没有 ResizeObserver：面板必须走 window.resize 兜底路径（量不到宽度时用默认 760）。
-    window: { __ModuleLoader__: { load(definition) { client = definition.factory(() => react) } }, addEventListener() {}, removeEventListener() {} },
+    window: { __ModuleLoader__: { load(definition) { client = definition.factory(() => lifecycle ?? react) } }, addEventListener() {}, removeEventListener() {} },
   })
   return {
     ...client.__context,
-    __render: react.__render,
+    __render: lifecycle?.__render ?? react.__render,
     /** 跑一遍排队的 effect，并把它们的清理函数收起来（卸载时统一跑）。 */
     __drainEffects() {
+      if (lifecycle) { lifecycle.__flushEffects(); return }
       for (const effect of react.__effects.splice(0)) {
         const cleanup = effect()
         if (typeof cleanup === 'function') react.__cleanups.push(cleanup)
@@ -100,6 +102,7 @@ function loadInternals() {
     },
     /** 模拟卸载：跑掉全部清理函数。定时器因此不会把测试进程挂住。 */
     __unmount() {
+      if (lifecycle) { lifecycle.__unmount(client.__context.ContextFace); return }
       for (const cleanup of react.__cleanups.splice(0)) cleanup()
       react.__effects.length = 0
     },
@@ -792,22 +795,25 @@ test('上下文面：只跑一个会话时直接进详情，不经过总览', as
 test('上下文面：读取失败的"重试"真的会再发一次请求（不是死按钮）', async (t) => {
   // 曾经这里是 `onClick: () => load(sessionId)`，而 `sessionId` 在这个作用域里根本不存在：
   // 按钮画得出来、点下去抛 ReferenceError，面板一动不动。这条钉住"点了就真的重发"。
-  const internals = loadInternals()
+  // 生命周期行为必须模拟稳定的 ref/memo/effect；静态快照替身每次生成新 ref 会制造死按钮。
+  const lifecycle = createHookRenderer()
+  const internals = loadInternals(lifecycle)
   withUnmount(t, internals)
   let calls = 0
   const call = async () => { calls += 1; return { ok: false, error: '宿主断开了' } }
   const props = { call }
   internals.__render(internals.ContextFace, props)
   internals.__drainEffects()
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  await lifecycle.__settle()
   const failed = internals.__render(internals.ContextFace, props)
   assert.match(allText(failed), /宿主断开了/, '失败要说清原因')
   const retry = collectAll(failed, (node) => node.type === 'button' && allText(node) === '重试')[0]
   assert.ok(retry, '错误态要有一个"重试"')
   const before = calls
   retry.props.onClick()
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  await lifecycle.__settle()
   assert.equal(calls, before + 1, '点重试必须真的再发一次请求')
+  assert.match(allText(internals.__render(internals.ContextFace, props)), /宿主断开了/, '重试的有效失败仍须展示')
 })
 
 test('上下文面：点选的会话已经不在了，就退回总览（不静默换成别的会话）', async (t) => {

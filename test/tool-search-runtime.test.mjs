@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { capabilityCues } from '../lib/tool-discovery-cues.js'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import * as dshTools from '@deepseek-ai/dsh-tools'
@@ -436,18 +437,14 @@ test('catalogSectionText: 摘要按字符预算裁剪并以省略号收尾', () 
   assert.ok(summary.endsWith('…'))
 })
 
-test('instructionFingerprint: 只认 mcp: 段，且随文本长度变化（缓存键不得漏判）', () => {
-  assert.notEqual(
-    instructionFingerprint([{ name: 'mcp:srv', text: 'abc' }]),
-    instructionFingerprint([{ name: 'mcp:srv', text: 'abcdef' }]),
-  )
-  assert.equal(
-    instructionFingerprint([{ name: 'mcp:srv', text: 'abc' }]),
-    instructionFingerprint([{ name: 'mcp:srv', text: 'xyz' }]),
-    '同长度同指纹（B 档：摘要陈旧只损失措辞）',
-  )
-  assert.equal(instructionFingerprint([{ name: 'other', text: 'abc' }]), 0, '只累计 mcp: 段')
-  assert.equal(instructionFingerprint(undefined), 0)
+test('instructionFingerprint: 用途内容变化必须失效，不能以等長当相同', () => {
+  const first = [{ name: 'mcp:srv', text: 'Read account records.' }]
+  const second = [{ name: 'mcp:srv', text: 'Send account records.' }]
+  assert.equal(first[0].text.length, second[0].text.length, '前置：来源真实文本等长')
+  assert.notEqual(instructionFingerprint(first), instructionFingerprint(second), '用途改变必须更新目录缓存')
+  assert.notEqual(instructionFingerprint(first), instructionFingerprint([{ name: 'mcp:else', text: first[0].text }]), '服务名也属于内容')
+  assert.equal(instructionFingerprint([{ name: 'other', text: 'abc' }]), instructionFingerprint([]), '只认 mcp: 段')
+  assert.equal(instructionFingerprint(undefined), instructionFingerprint([]))
 })
 
 test('maskGuidanceSection: 只清空引导段，段里没有它时原样返回', () => {
@@ -1288,6 +1285,80 @@ test('混合批次：本批返回的已发现工具不得被本次淘汰（守�
     }
   } finally {
     fixture.cleanup()
+  }
+})
+
+test('混合超量批次：全部返回项可调用且本批保护按返回总数计算', { timeout: 60_000 }, async () => {
+  const schemas = BIG_SCHEMAS.slice(0, 3)
+  const fixture = createFixture({
+    schemas,
+    config: { ...DEFER_CONFIG, maxResults: 1, maxDiscovered: 2 },
+  })
+  try {
+    const search = fixture.registered.get('tool_search')
+    const names = schemas.map((schema) => schema.name)
+    await search.execute({ query: `select:${names.slice(0, 2).join(',')}` }, { agent: fixture.agent })
+    const result = await search.execute({ query: `select:${names.join(',')}` }, { agent: fixture.agent })
+    assert.deepEqual(result.matches.map((match) => match.name), names)
+    assert.deepEqual(result.discoveredTools, names.slice(2), '返回旧项不算重新发现')
+    for (const match of result.matches) {
+      assert.deepEqual(match.parameters, schemas.find((schema) => schema.name === match.name).parameters)
+      assert.equal(fixture.guards[0]({ name: match.name, agent: fixture.agent }), undefined,
+        `${match.name} 在混合超量结果里承诺可用，守卫不得收回`)
+    }
+    assert.equal(result.discoveredCount, result.matches.length, '保护下限是返回总数，不是新增数')
+    assert.deepEqual(result.discoverySnapshot.orderedNames, names)
+    const visible = await assemble(fixture, { tools: schemas, sections: [] })
+    for (const name of names) assert.ok(visible.tools.some((tool) => tool.name === name))
+  } finally {
+    fixture.cleanup()
+  }
+})
+
+
+test('能力代价统计：A/B/A命中缓存时也必须对应本次真实输出', { timeout: 60_000 }, async () => {
+  const schemas = [
+    { name: 'edit', description: 'Edit an existing text file.', parameters: { type: 'object' } },
+    { name: 'write', description: 'Create or completely replace an owned UTF-8 file with the provided content.', parameters: { type: 'object' } },
+  ]
+  const fixture = createFixture({ schemas, config: { policyFor: () => ({ entries: new Map(schemas.map((schema) => [schema.name, { policy: 'deferred' }])) }) } })
+  const peer = { ...fixture.agent, session: { deriveMessages: () => [], snapshotEvents: () => [] } }
+  try {
+    const input = () => ({ tools: fixture.visibleSchemas(), sections: [] })
+    const first = await assemble(fixture, input())
+    const firstCue = first.sections.find((section) => section.name === 'tool-search:capabilities').text
+    await fixture.registered.get('tool_search').execute({ query: 'select:edit' }, { agent: peer })
+    const second = await assemble(fixture, input(), peer)
+    const secondCue = second.sections.find((section) => section.name === 'tool-search:capabilities').text
+    assert.notEqual(firstCue.length, secondCue.length, '前置：两个agent当前线索代价不同')
+    const again = await assemble(fixture, input())
+    const cue = again.sections.find((section) => section.name === 'tool-search:capabilities').text
+    const catalog = again.sections.find((section) => section.name === 'tool-search:catalog').text
+    const facts = fixture.cleanup.catalog()
+    assert.equal(cue, firstCue, 'A应命中自己的实际线索')
+    assert.equal(facts.capabilityChars, cue.length, '不能留下B的旧观测值')
+    assert.equal(facts.discoveryChars, cue.length + catalog.length)
+  } finally { fixture.cleanup() }
+})
+
+test('MCP用途例数：选够后不再读取将被丢弃的描述', { timeout: 60_000 }, () => {
+  let reads = 0
+  const names = ['first', 'second', 'third', 'fourth'].map((bare) => `mcp__s__${bare}`)
+  const catalog = new Map(names.map((name) => [name, { name, get description() { reads++; return `Actual purpose for ${name}.` } }]))
+  const cues = capabilityCues(catalog, { groups: [{ server: 's', names: names.map((name) => ({ name })) }], unattributed: [] })
+  assert.equal(cues.count, 1, '均衡契约：无说明的每MCP至多1个example')
+  assert.equal(reads, cues.count, '未展示描述不应该先付格式化代价')
+  assert.ok(!cues.text.includes(names.at(-1)))
+})
+
+test('名字目录文案：限定本段names-only，不否认前置能力摘录', { timeout: 60_000 }, () => {
+  const schema = { name: 'mcp__s__tool', description: 'Actual purpose.', parameters: { type: 'object' } }
+  const catalog = new Map([[schema.name, schema]])
+  for (const grouping of [undefined, { ownerOf: new Map([[schema.name, 's']]) }]) {
+    const { text } = catalogSectionText(catalog, resolveRuntimeConfig(), grouping)
+    assert.match(text, /names-only/i)
+    assert.doesNotMatch(text, /neither descriptions nor parameter schemas are loaded/i)
+    assert.ok(!text.includes(schema.description), '名字行仍不得变用途行')
   }
 })
 

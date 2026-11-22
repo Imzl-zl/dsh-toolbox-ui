@@ -97,6 +97,30 @@ test('presentAssembly: PTC 才裁 SDK；裁剪失败必须沿用原文', async (
   assert.equal(failing.sections.find((section) => section.name === 'tools:sdk').text, 'sdk-full')
 })
 
+
+test('presentAssembly: 能力线索与名字目录使用同一快照，前置展示且不激活', async () => {
+  const input = assembly()
+  const snap = snapshot({ discovered: ['mcp__srv__a'] })
+  const before = [...snap.state.discovered]
+  const expectedDeferred = [...deferredOf(snap.view.managed, snap.state.discovered)]
+  let observed
+  const output = await presentAssembly(input, snap, handlers({
+    capabilityText: (current, deferred, sections) => {
+      observed = { current, deferred: [...deferred], sections }
+      return `capabilities:${[...deferred].join(',')}`
+    },
+  }), { ...OPTIONS, capabilitySection: 'tool-search:capabilities' })
+  const cue = output.sections.find((section) => section.name === 'tool-search:capabilities')
+  assert.ok(cue, '有按需定义时应提供能力入口，而非只有名字')
+  assert.equal(observed.current, snap, '不重读另一份策略/定义')
+  assert.deepEqual(observed.deferred, expectedDeferred)
+  assert.equal(observed.sections, input.sections)
+  assert.equal(cue.text, `capabilities:${expectedDeferred.join(',')}`)
+  assert.equal(cue.interpolate, false)
+  assert.ok(output.sections.indexOf(cue) < output.sections.findIndex((section) => section.name === OPTIONS.catalogSection))
+  assert.deepEqual([...snap.state.discovered], before, '能力说明不是发现工具')
+})
+
 test('presentAssembly: assembly 没有 tools 时原样放行并报诊断（不许把它当成空集覆盖）', async () => {
   const input = { sections: [{ name: 'persona', text: 'x' }] }
   const diagnostics = []
