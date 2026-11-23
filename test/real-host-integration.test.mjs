@@ -463,6 +463,47 @@ test('real host: two workspaces mounting the same server names at once stay isol
   }
 })
 
+test('real host: project tool ownership does not re-admit an excluded global server with an overlapping namespace', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-mcp-project-ownership-'))
+  const globalName = 'docs__shared'
+  const projectName = 'docs'
+  const control = join(root, 'control')
+  const project = join(root, 'project')
+  let host
+  try {
+    const globalScript = join(root, 'global.mjs')
+    const projectScript = join(root, 'project.mjs')
+    await writeFile(globalScript, fixtureServerWithTool('globalOnly'))
+    await writeFile(projectScript, fixtureServerWithTool('projectOnly'))
+    for (const wsPath of [control, project]) {
+      await mkdir(join(wsPath, '.dsh'), { recursive: true })
+      const mcpServers = wsPath === project
+        ? { [projectName]: { command: process.execPath, args: [projectScript, join(root, 'project-exit')] } }
+        : {}
+      await writeFile(join(wsPath, '.dsh', 'mcp.json'), JSON.stringify({ mcpServers, exclude: [globalName] }))
+    }
+    host = await createRealHost(project, {
+      globalServers: [{ transport: 'stdio', serverName: globalName, command: process.execPath, args: [globalScript, join(root, 'global-exit')] }],
+    })
+    const global = host.tools.schemas().find(({ name }) => name === `mcp__${globalName}__globalOnly`)
+    assert.ok(global, '前置：真实全局 stdio 工具已挂载')
+    const unpaired = await host.createAgent(control)
+    const paired = await host.createAgent(project)
+    const visible = (agent) => host.tools.schemas(agent.key).map(({ name }) => name)
+    const ownName = `mcp__${projectName}__projectOnly`
+    assert.ok(await waitFor(() => visible(paired).includes(ownName)), '前置：项目自有工具已实际投射')
+    assert.ok(!visible(unpaired).includes(global.name), '对照：没有交叉前缀的项目按 exclude 正常屏蔽')
+    assert.ok(!visible(paired).includes(global.name), '有交叉前缀的项目仍须屏蔽同一全局定义')
+    assert.deepEqual(workspaceToolSchemas(host.ctx, projectName, project).map(({ name }) => name), [ownName],
+      '详情必须只列出这一条连接实际提供的工具')
+    assert.deepEqual(workspaceScopeErrorsView(project), [], '全局其他服务器的工具不是这个项目连接的隔离故障')
+  } finally {
+    await host?.cleanup()
+    // root 是上面创建的测试专用叶目录（不是当前工作区或 profile）。
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 // 依赖树里 @deepseek-ai/dsh-scope 有两份实例时（宿主一份、插件一份 → 作用域标签互不相认），
 // 官方的 serverName 判重键会退化成 ctx.root。这一条钉住"那时也必须能用"：两个项目的同名条目
 // 照旧各自挂上，而不是第二个项目整批报 already in use（issue #4 评论的形状）。同一根因的另一面

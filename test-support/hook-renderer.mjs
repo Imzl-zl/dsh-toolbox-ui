@@ -44,11 +44,18 @@ export function createHookRenderer() {
     }
   }
 
-  const pendingEffects = () => [...roots.values()].flatMap((root) => root.hooks
-    .filter((slot) => slot.kind === 'effect' && slot.pending))
+  const pendingEffects = (kind) => [...roots.values()].flatMap((root) => root.hooks
+    .filter((slot) => slot.kind === kind && slot.pending))
 
-  const flushEffects = () => {
-    const effects = pendingEffects().map((slot) => ({ slot, pending: slot.pending }))
+  const effect = (kind, callback, deps) => {
+    const slot = hook(kind, () => ({ initialized: false }))
+    slot.pending = !slot.initialized || !sameDeps(slot.deps, deps)
+      ? { effect: callback, deps: deps?.slice() }
+      : null
+  }
+
+  const flushEffects = (kind) => {
+    const effects = pendingEffects(kind).map((slot) => ({ slot, pending: slot.pending }))
     // React commits all changed-effect cleanups before starting their replacements.
     for (const { slot } of effects) {
       slot.pending = null
@@ -89,11 +96,22 @@ export function createHookRenderer() {
     useRef(initial) { return hook('ref', () => ({ value: { current: initial } })).value },
     useMemo(factory, deps) { return memo('memo', factory, deps) },
     useCallback(callback, deps) { return memo('callback', () => callback, deps) },
-    useEffect(effect, deps) {
-      const slot = hook('effect', () => ({ initialized: false }))
-      slot.pending = !slot.initialized || !sameDeps(slot.deps, deps)
-        ? { effect, deps: deps?.slice() }
-        : null
+    useEffect(callback, deps) { effect('effect', callback, deps) },
+    useLayoutEffect(callback, deps) { effect('layout', callback, deps) },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      const root = current
+      const snapshot = getSnapshot()
+      effect('effect', () => {
+        let observed = snapshot
+        const check = () => {
+          const next = getSnapshot()
+          if (!Object.is(next, observed)) { observed = next; root.dirty = true }
+        }
+        const unsubscribe = subscribe(check)
+        check()
+        return unsubscribe
+      }, [subscribe, getSnapshot])
+      return snapshot
     },
     __render(Component, props) {
       let root = roots.get(Component)
@@ -104,14 +122,16 @@ export function createHookRenderer() {
       root.props = props
       return render(root)
     },
-    __flushEffects: flushEffects,
+    __flushEffects() { flushEffects('layout'); flushEffects('effect') },
     async __settle({ effects = true } = {}) {
       for (let attempt = 0; attempt < 50; attempt += 1) {
         for (const root of roots.values()) if (root.dirty) render(root)
-        if (effects) flushEffects()
+        // Layout commits synchronously; tests can hold the following passive phase.
+        flushEffects('layout')
+        if (effects) flushEffects('effect')
         // Flush resolved RPC promise chains without awaiting intentionally deferred responses.
         await new Promise((resolve) => setImmediate(resolve))
-        if (![...roots.values()].some((root) => root.dirty) && (!effects || pendingEffects().length === 0)) return
+        if (![...roots.values()].some((root) => root.dirty) && (!effects || pendingEffects('effect').length === 0)) return
       }
       assert.fail('hook renderer exceeded 50 effect/state flushes')
     },
@@ -119,7 +139,9 @@ export function createHookRenderer() {
       const root = roots.get(Component)
       assert.ok(root, 'cannot unmount a component that was never rendered')
       roots.delete(Component)
-      for (const slot of root.hooks) if (slot.kind === 'effect') slot.cleanup?.()
+      for (const kind of ['layout', 'effect']) {
+        for (const slot of root.hooks) if (slot.kind === kind) slot.cleanup?.()
+      }
     },
   }
 }

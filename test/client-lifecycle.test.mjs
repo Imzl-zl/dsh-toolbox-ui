@@ -101,6 +101,31 @@ test('client Remote contribution matches the generated Typert contract', async (
   }
 })
 
+test('the toolbox overlay receives the public connection generation source', { timeout: 60000 }, async () => {
+  const document = createFakeDocument()
+  const { client, cleanup } = await loadClient(document)
+  const generation = { getSnapshot: () => undefined, subscribe: () => () => {} }
+  let overlay
+  const ctx = {
+    get: (key) => key === 'connection' ? { generation } : undefined,
+    remote: { $mount: async () => async () => {} },
+    slots: {
+      inject(_name, mount) { return mount() },
+      register(options) { if (options.id === 'mcp-fab') overlay = options; return () => {} },
+    },
+  }
+  try {
+    const dispose = await client.apply(ctx)
+    try {
+      assert.equal(overlay.inject().connectionGeneration, generation, '只用宿主真实代次，不用 remote proxy 代替')
+    } finally {
+      await dispose()
+    }
+  } finally {
+    cleanup()
+  }
+})
+
 test('client descriptors carry both codec channels, including the skills namespace', async () => {
   // ⚠️ 这条补的是一个**真实漏测**（变异测试发现）：上面那条契约用例只比较
   // mode/typeSymbol，看不到 codec 内部；而 typert-manifest 的「双渠道」用例只读

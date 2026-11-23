@@ -31,6 +31,7 @@ MCP 规范补充了连接语义：session 在客户端"不再需要（例如用�
 - **挂载点**：一个 `agent/created` 串行监听器（`mountProjectMcpForAgent`）。删掉了对 `agents.create/resume` 的 monkey-patch 及其 generation/restore/双重防线记账——旧注释断言该事件是 fire-and-forget，那是把同步的 `sessions.announce()` 认成了 `agents.announce()`；后者是 `await ctx.serial(...)`。
 - **连接生命周期**：配置驱动。`releaseSharedConnection`（会话结束）只归还引用并起空闲计时器；`retireSharedConnection`（不再有效）才立刻销毁。空闲回收 `idleTimeoutMs` 默认 5 分钟，`0` = 永不；插件卸载一律立刻销毁。
 - **配置对齐**：`reconcileWorkspaceConnections(ctx, wsPath)` 是唯一同步点，面板每次写盘后调用；挂载路径另做一次 `retireStaleConnection`，于是手工编辑配置文件也会在下一次会话挂载时被采纳。改配置走 `repointConnectionSlots`（所有会话槽位改指新连接、引用随所有权转移），删除走 `dropConnectionSlots`（整批撤投射，不留僵尸工具）。
+- **工具归属**：共享作用域的工具视图也包含全局定义。项目详情与会话投射只用本连接的定义；即使服务器名称前缀重叠，也不把继承的全局项重新注册到会话自身层，因此项目 `exclude` 仍生效。
 - **首轮就绪**：共享就绪预算 `readyTimeoutMs`（默认 5s，`0` = 不等），超时不阻断会话。
 - **终态恢复**：`isDeadConnection`（fiber ACTIVE 且 0 工具且已存在 > 5s）在下次挂载时重建；面板「重连」= `reconnectWorkspaceServer` RPC 立即拆旧建新并对齐存活会话。
 - **面板**：`wsSub` 把"连接在不在"与"几个会话在用"分开说；`待会话挂载` 与 `配置待生效` 两个合成/过期状态被删除。

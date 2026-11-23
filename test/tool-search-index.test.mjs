@@ -192,6 +192,16 @@ test('searchCatalog: select 精确取，缺失也回报，保序去重', () => {
   assert.equal(matches[2].name, 'mcp__firecrawl__firecrawl_scrape')
 })
 
+test('searchCatalog: select aliases merge canonical hits without losing distinct ambiguous tools or misses', () => {
+  const canonical = ['mcp__north__lookup', 'mcp__south__lookup', 'mcp__south__read']
+  const catalog = buildCatalog(canonical.map((name) => ({ name, parameters: null })))
+  const matches = searchCatalog(catalog, 'select:south.lookup,first_missing,lookup,mcp__north__lookup,SOUTH LOOKUP,second_missing,read,first_missing', 1)
+  assert.deepEqual(matches.map(({ name, found }) => [name, found]), [
+    [canonical[1], true], ['first_missing', false], [canonical[0], true],
+    ['second_missing', false], [canonical[2], true],
+  ])
+})
+
 test('searchCatalog: 名字命中压过描述命中（非精确名形态）', () => {
   // M3 的闸门：**查询词不能等于工具全名/裸名**。等名形态会走 isExactName 的 Infinity 分支，
   // 把 NAME_BONUS 短路掉——旧的 'screenshot' 用例正是这样，于是 NAME_BONUS 12→0 时全量仍绿。

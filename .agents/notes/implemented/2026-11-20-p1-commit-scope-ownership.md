@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-沿现有所有者只纠正事实，不修改排序/默认策略/轮询频率或注册准入：runtime 给 discovery 的本批保护量使用返回总数；tools(payload) 提供 wsPath 时先使用共享路径验证并只查该项目；ContextFace 的来源对象固定目标/RPC/选择 epoch，并由自身 effect token 约束准入和在途提交；结果按已完成响应序号单调推进，loading 额外只由最近发出的有效请求收尾。
+沿现有所有者只纠正事实，不修改排序、默认策略或轮询频率：runtime 给 discovery 的本批保护量使用已按完整工具名去重的返回总数；tools(payload) 提供 wsPath 时先使用共享路径验证并只查该项目，归属见 [项目工具定义所有权](2026-11-23-project-tool-definition-ownership.md)。ContextFace 的来源由选择、RPC 和可观察的宿主连接代次组成，布局提交与卸载即切换令牌；详情与该来源绑定，结果按已完成序号推进，loading 只由最近发出的有效请求收尾。
 
 可机械判定的门槛：
 1. 旧旧新混合、返回总数超过 cap 的 select，所有刚返回项都通过守卫，native 执行器可以实际派发；PTC 保持手册/绑定。
@@ -34,5 +34,5 @@ Status: implemented
 ## Consequences
 
 - 收益：返回即能调、按请求作用域返回工具、UI 提交单调且不因慢轮询饿死；没有新依赖或另一套调用通道。
-- 代价：显式大批次仍可能暂时超呈现 cap；UI 在后续轮询尚未完成时显示最新已完成数据并保持 loading，内部必须维护 epoch / issued / committed 三个不同事实；提供空/非法 wsPath 不再被同名全局项掩盖。
+- 代价：显式大批次仍可能暂时超呈现 cap；UI 在后续轮询尚未完成时显示最新已完成数据并保持 loading，内部必须分别维护来源、已发出序号和已提交序号；提供空/非法 wsPath 不再被同名全局项掩盖。
 - 验证边界：native 走实际执行器，PTC 的持久测试覆盖守卫/手册/绑定；GUI 与完整宿主验证由本批独立实例完成，不等同所有模型线上成功率。

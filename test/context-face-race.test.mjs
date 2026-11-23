@@ -50,8 +50,17 @@ const reportFor = (id, used) => ({
   })),
 })
 
-function createFixture(t) {
+function createFixture(t, { observeConnection = false } = {}) {
   const renderer = createHookRenderer()
+  let generation = { id: 1 }
+  const generationListeners = new Set()
+  const connectionGeneration = {
+    getSnapshot: () => generation,
+    subscribe(listener) {
+      generationListeners.add(listener)
+      return () => { generationListeners.delete(listener) }
+    },
+  }
   const requests = []
   const polls = new Set()
   const unexpectedCalls = []
@@ -85,6 +94,7 @@ function createFixture(t) {
     window: { __ModuleLoader__: { load(definition) { client = definition.factory(() => react) } }, addEventListener() {}, removeEventListener() {} },
   })
   const props = {
+    connectionGeneration: observeConnection ? connectionGeneration : undefined,
     call(method, payload) {
       if (method !== 'contextReport') {
         unexpectedCalls.push({ method, payload })
@@ -109,6 +119,7 @@ function createFixture(t) {
   t.after(() => {
     if (mounted) unmount()
     assert.equal(polls.size, 0, '卸载必须清掉当前轮询')
+    assert.equal(generationListeners.size, 0, '卸载必须收回连接代次订阅')
     assert.deepEqual(unexpectedCalls, [], '不能让组件 catch 吞掉测试环境中的错误 RPC')
   })
   const latest = (before) => {
@@ -157,6 +168,11 @@ function createFixture(t) {
       const previous = props.call
       props.call = (method, payload) => previous(method, payload)
     },
+    changeConnectionGeneration(value) {
+      generation = value
+      for (const listener of generationListeners) listener()
+    },
+    removeConnectionGeneration() { props.connectionGeneration = undefined },
     async poll() {
       assert.equal(polls.size, 1, '重渲染不得积累轮询 effect')
       const before = requests.length
@@ -175,7 +191,18 @@ function createFixture(t) {
       assert.equal(textOf(used), client.__contextRace.formatTokens(response.budget.used), '旧响应不得覆盖有效报告的用量')
     },
     assertNoError() { assert.equal(byClass(render(), 'dsh-mcp-ctx-foot-err').length, 0, '旧错误不得覆盖有效报告状态') },
-    assertLoading(expected) { assert.equal(byClass(render(), 'dsh-mcp-ctx-foot-live').length > 0, expected, 'loading 只能由当前请求收尾') },
+    assertLoading(expected) {
+      const tree = render()
+      const loading = byClass(tree, 'dsh-mcp-ctx-foot-live').length > 0
+        || byClass(tree, 'dsh-mcp-ctx-empty').some((node) => textOf(node) === '正在读取上下文…')
+      assert.equal(loading, expected, 'loading 只能由当前请求收尾')
+    },
+    assertWaiting() {
+      const tree = render()
+      assert.equal(byClass(tree, 'dsh-mcp-ctx-card-value').length, 0, '新选择没有报告时不能显示旧会话的用量')
+      assert.equal(byClass(tree, 'dsh-mcp-ctx-back').length, 1, '详情还在加载也必须可返回总览')
+      assert.equal(byClass(tree, 'dsh-mcp-ctx-empty').length, 1, '新选择必须显示真实加载态')
+    },
   }
 }
 
@@ -187,6 +214,102 @@ async function acrossTargets(fixture) {
   return { old, current }
 }
 const timeout = { timeout: 60000 }
+
+test('首次读取新选择时不把总览报告画成该会话详情', timeout, async (t) => {
+  const fixture = createFixture(t)
+  await fixture.mountOverview()
+  const current = await fixture.select('B')
+  fixture.assertWaiting()
+  const response = reportFor('B', 220)
+  current.reply(response)
+  await fixture.settle()
+  fixture.assertShown(response)
+})
+
+test('新选择首次读取失败时显示当前错误，不继续显示另一会话的数字', timeout, async (t) => {
+  const fixture = createFixture(t)
+  await fixture.mountOverview()
+  const current = await fixture.select('B')
+  current.fail(new Error('B temporarily unavailable'))
+  await fixture.settle()
+  const tree = fixture.render()
+  assert.equal(byClass(tree, 'dsh-mcp-ctx-card-value').length, 0, 'B 读取失败时也不显示 A 的用量')
+  assert.equal(byClass(tree, 'dsh-mcp-ctx-back').length, 1)
+  assert.match(textOf(tree), /B temporarily unavailable/)
+  const retry = retryFrom(fixture)
+  retry()
+  await fixture.settle()
+  assert.equal(fixture.requests.at(-1).payload.sessionId, 'B')
+  const response = reportFor('B', 220)
+  fixture.requests.at(-1).reply(response)
+  await fixture.settle()
+  fixture.assertShown(response)
+})
+
+test('call 已布局提交但还未被动 cleanup：旧回退不得清空选择', timeout, async (t) => {
+  const fixture = createFixture(t)
+  await fixture.mountOverview()
+  const old = await fixture.select('B')
+  const before = fixture.requests.length
+  fixture.changeCallIdentity()
+  fixture.render()
+  await fixture.settle({ effects: false })
+  old.reply(reportFor('A', 330))
+  await fixture.settle({ effects: false })
+  assert.equal(fixture.requests.length, before, '尚未启动换源后的被动轮询')
+  await fixture.settle()
+  const current = fixture.requests.at(-1)
+  assert.equal(current.payload.sessionId, 'B', '旧回退不能让新 call 首次请求总览')
+  const response = reportFor('B', 220)
+  current.reply(response)
+  await fixture.settle()
+  fixture.assertShown(response)
+})
+
+test('call 身份不变的连接换代同步拒绝旧回退，并重新读取当前选择', timeout, async (t) => {
+  const fixture = createFixture(t, { observeConnection: true })
+  await fixture.mountOverview()
+  const selected = await fixture.select('B')
+  selected.reply(reportFor('B', 220))
+  await fixture.settle()
+  const old = await fixture.poll()
+  const oldPoll = fixture.capturePoll()
+  const before = fixture.requests.length
+  // 连接来源已换代，故意在任何 React render/layout 或新轮询之前执行旧回调和响应。
+  fixture.changeConnectionGeneration({ id: 2 })
+  oldPoll()
+  assert.equal(fixture.requests.length, before, '旧 poll 不得发新请求认领新代次')
+  old.reply(reportFor('A', 330))
+  await new Promise((resolve) => setImmediate(resolve))
+  await fixture.settle()
+  assert.equal(fixture.requests.length, before + 1, '换代应发出新的当前选择请求')
+  const current = fixture.requests.at(-1)
+  assert.equal(current.payload.sessionId, 'B', '换代前旧回退不得清空 B')
+  fixture.assertWaiting()
+  const response = reportFor('B', 440)
+  current.reply(response)
+  await fixture.settle()
+  fixture.assertShown(response)
+})
+
+test('连接代次提供者撤销，即使快照同为 undefined 也不得复用旧来源', timeout, async (t) => {
+  const fixture = createFixture(t, { observeConnection: true })
+  fixture.changeConnectionGeneration(undefined)
+  await fixture.mountOverview()
+  const old = await fixture.select('B')
+  const before = fixture.requests.length
+  fixture.removeConnectionGeneration()
+  fixture.render()
+  await fixture.settle({ effects: false })
+  old.reply(reportFor('A', 330))
+  await fixture.settle()
+  assert.equal(fixture.requests.length, before + 1)
+  const current = fixture.requests.at(-1)
+  assert.equal(current.payload.sessionId, 'B', '无代次能力的兼容来源也必须重新读 B')
+  current.reply(reportFor('B', 220))
+  await fixture.settle()
+  fixture.assertShown(reportFor('B', 220))
+})
 
 test('不同 target：旧成功不能覆盖新选择的报告', timeout, async (t) => {
   const fixture = createFixture(t)
@@ -252,7 +375,7 @@ test('选择已变、新 effect 尚未执行：旧成功没有提交窗口', tim
   old.reply(reportFor('A', 330))
   await fixture.settle({ effects: false })
   assert.equal(fixture.requests.length, before, '不得靠提前执行新 effect 掩盖竞态')
-  fixture.assertShown(fixture.initialReport)
+  fixture.assertWaiting()
   await fixture.settle()
   const current = fixture.requests.at(-1)
   assert.equal(current.payload?.sessionId, 'B')
@@ -390,7 +513,7 @@ test('选择已变、cleanup 未执行：旧总览 poll 不得认领新来源或
   oldPoll()
   await fixture.settle({ effects: false })
   assert.equal(fixture.requests.length, before, '旧回调不能用当前 epoch 重新认领请求归属')
-  fixture.assertShown(fixture.initialReport)
+  fixture.assertWaiting()
   await fixture.settle()
   const current = fixture.requests.at(-1)
   assert.equal(current.payload?.sessionId, 'B', '旧 cleanup 不得作废新选择的初次加载')
@@ -421,27 +544,32 @@ test('选择已变、cleanup 未执行：旧手动 retry 不得重新发起总�
   fixture.assertShown(response)
 })
 
-test('call prop 重装：旧 retry 失效，旧 cleanup 不得作废新渲染的 retry', timeout, async (t) => {
+test('call prop 重装：已布局提交即拒绝旧 retry，旧 cleanup 不得使新来源失效', timeout, async (t) => {
   const fixture = createFixture(t)
   const oldRetry = await failedRetry(fixture)
   fixture.changeCallIdentity()
   fixture.render()
-  const newRetry = retryFrom(fixture) // 在新 effect setup 之前捕获新来源。
-  await fixture.settle()
-  const effectRequest = fixture.requests.at(-1)
-  const before = fixture.requests.length
+  await fixture.settle({ effects: false })
+  const beforeSetup = fixture.requests.length
   oldRetry()
+  await fixture.settle({ effects: false })
+  assert.equal(fixture.requests.length, beforeSetup, '尚未 cleanup 的旧 RPC 来源也不能重新借用新生命周期')
   await fixture.settle()
-  assert.equal(fixture.requests.length, before, '已 cleanup 的 RPC 来源不能重新借用新生命周期')
+  assert.equal(fixture.requests.length, beforeSetup + 1, '旧 cleanup 不得作废新来源的初次读取')
+  fixture.requests.at(-1).fail(new Error('new source failed'))
+  await fixture.settle()
+  const newRetry = retryFrom(fixture)
+  const older = await fixture.poll()
+  const beforeRetry = fixture.requests.length
   newRetry()
   await fixture.settle()
-  assert.equal(fixture.requests.length, before + 1, '新渲染的 retry 在自身 setup 后必须有效')
+  assert.equal(fixture.requests.length, beforeRetry + 1, '新来源的 retry 必须有效')
   const seed = reportFor('A', 220)
   const response = { ...seed, sessions: seed.sessions.filter((entry) => entry.active) }
   fixture.requests.at(-1).reply(response)
   await fixture.settle()
   fixture.assertShown(response)
-  effectRequest.reply(reportFor('A', 330))
+  older.reply(reportFor('A', 330))
   await fixture.settle()
   fixture.assertShown(response)
 })
@@ -457,12 +585,13 @@ test('卸载后旧手动 retry 不得发出 RPC 或提交 loading', timeout, asy
   assert.equal(fixture.postUnmountCommits.length, 0, '失效来源必须在任何状态提交之前被拒绝')
 })
 
-test('新渲染尚未 setup 就卸载：其 retry 也不得激活请求', timeout, async (t) => {
+test('换源的新渲染不复用旧错误；未 setup 就卸载也不能激活旧 retry', timeout, async (t) => {
   const fixture = createFixture(t)
-  await failedRetry(fixture)
+  const retry = await failedRetry(fixture)
   fixture.changeCallIdentity()
-  fixture.render()
-  const retry = retryFrom(fixture)
+  const tree = fixture.render()
+  assert.equal(byClass(tree, 'dsh-mcp-d-err').length, 0, '换源尚无结果时不显示旧错误及重试')
+  assert.doesNotMatch(textOf(tree), /重试/)
   const before = fixture.requests.length
   fixture.unmount()
   retry()

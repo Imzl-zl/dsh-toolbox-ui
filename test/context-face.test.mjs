@@ -23,59 +23,9 @@ const instrumented = clientSource.replace(
 )
 assert.notEqual(instrumented, clientSource, 'client test export marker must stay current')
 
-function loadInternals(lifecycle) {
-  const stores = new Map()
-  let current = null
-  const react = {
-    Fragment: Symbol('Fragment'),
-    createElement(type, props, ...children) {
-      const rest = props ?? {}
-      return {
-        type,
-        props: children.length === 0 ? rest : { ...rest, children: children.length === 1 ? children[0] : children },
-        children,
-      }
-    },
-    useCallback: (callback) => callback,
-    // ⚠️ effect 的**返回值**（清理函数）必须收起来并在卸载时跑：上下文面每 2.5s 轮询一次，
-    // 丢掉清理就等于测试进程里留下一个永不停止的 interval——`node --test` 会一直挂着不退出
-    // （实测：9 条用例全绿，进程 120s 后还在跑）。React 在卸载时调它，harness 也得调。
-    useEffect(fn) { react.__effects.push(fn) },
-    useMemo: (factory) => factory(),
-    useRef: (value) => ({ current: value }),
-    useState(initial) {
-      const store = current
-      const index = store.cursor
-      store.cursor += 1
-      if (index >= store.values.length) store.values[index] = typeof initial === 'function' ? initial() : initial
-      const set = (next) => {
-        const value = typeof next === 'function' ? next(store.values[index]) : next
-        if (value !== store.values[index]) { store.values[index] = value; store.dirty = true }
-      }
-      return [store.values[index], set]
-    },
-    __effects: [],
-    __cleanups: [],
-    __render(Component, props) {
-      let store = stores.get(Component)
-      if (store === undefined) { store = { values: [], cursor: 0, dirty: false }; stores.set(Component, store) }
-      let tree
-      let guard = 0
-      const previous = current
-      current = store
-      try {
-        do {
-          store.dirty = false
-          store.cursor = 0
-          tree = Component(props)
-          guard += 1
-        } while (store.dirty && guard < 50)
-      } finally {
-        current = previous
-      }
-      return tree
-    },
-  }
+function loadInternals(lifecycle = createHookRenderer()) {
+  // 快照用例也必须保留 React 的 memo/ref 归属和布局提交；别另造一个每次都换身份的 renderer。
+  let mounted = false
   let client
   vm.runInNewContext(instrumented, {
     console,
@@ -87,25 +37,14 @@ function loadInternals(lifecycle) {
     clearInterval,
     clearTimeout,
     // 没有 ResizeObserver：面板必须走 window.resize 兜底路径（量不到宽度时用默认 760）。
-    window: { __ModuleLoader__: { load(definition) { client = definition.factory(() => lifecycle ?? react) } }, addEventListener() {}, removeEventListener() {} },
+    window: { __ModuleLoader__: { load(definition) { client = definition.factory(() => lifecycle) } }, addEventListener() {}, removeEventListener() {} },
   })
   return {
     ...client.__context,
-    __render: lifecycle?.__render ?? react.__render,
-    /** 跑一遍排队的 effect，并把它们的清理函数收起来（卸载时统一跑）。 */
-    __drainEffects() {
-      if (lifecycle) { lifecycle.__flushEffects(); return }
-      for (const effect of react.__effects.splice(0)) {
-        const cleanup = effect()
-        if (typeof cleanup === 'function') react.__cleanups.push(cleanup)
-      }
-    },
-    /** 模拟卸载：跑掉全部清理函数。定时器因此不会把测试进程挂住。 */
-    __unmount() {
-      if (lifecycle) { lifecycle.__unmount(client.__context.ContextFace); return }
-      for (const cleanup of react.__cleanups.splice(0)) cleanup()
-      react.__effects.length = 0
-    },
+    __render(Component, props) { mounted = true; return lifecycle.__render(Component, props) },
+    __drainEffects: lifecycle.__flushEffects,
+    __settle: lifecycle.__settle,
+    __unmount() { if (mounted) lifecycle.__unmount(client.__context.ContextFace) },
   }
 }
 
@@ -174,13 +113,12 @@ async function mount(internals, report) {
   const call = async (method) => (method === 'contextReport' ? report : { ok: false, error: 'unexpected ' + method })
   const props = { call }
   internals.__render(internals.ContextFace, props)
-  internals.__drainEffects()
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  await internals.__settle()
   return { props, tree: internals.__render(internals.ContextFace, props) }
 }
 
 /**
- * 每条用例结束前必须卸载：面板开着的时候每 2.5s 轮询一次宿主，不卸载就是给测试进程
+ * 每条用例结束前必须卸载：面板开着的时候每 3s 轮询一次宿主，不卸载就是给测试进程
  * 留一个永不停止的 interval。这里用 t.after 统一兜底，用例自己不必记得。
  */
 function withUnmount(t, internals) {

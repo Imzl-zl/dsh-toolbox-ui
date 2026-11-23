@@ -207,6 +207,153 @@ for (const presentation of ['native', 'ptc']) {
   })
 }
 
+test('modern host: one canonical alias hit only protects one discovery slot', MODERN, async () => {
+  const host = await createHost({ limits: { maxResults: 1, maxDiscovered: 2 } })
+  const extra = definitionOf('mcp__rc22__gamma', 'Read a third synthetic record.')
+  host.tools.register(extra)
+  let admission
+  try {
+    admission = await host.admit()
+    await host.assemble(host.agent, admission)
+    const first = await host.search(host.agent, admission, 'select:alpha,beta')
+    assert.equal(first.discoveredCount, 2)
+    const found = await host.search(host.agent, admission, 'select:gamma,mcp__rc22__gamma,rc22.gamma')
+    assert.deepEqual(found.matches.map(({ name, parameters }) => ({ name, parameters })), [
+      { name: extra.name, parameters: extra.parameters },
+    ])
+    assert.deepEqual(found.discoveredTools, [extra.name])
+    assert.equal(found.discoveredCount, 2, 'three spellings of one tool cannot expand the cap')
+    assert.match(host.guard(host.agent, first.matches[0].name, admission) ?? '', /deferred/)
+    assert.equal(host.guard(host.agent, extra.name, admission), undefined)
+  } finally {
+    admission?.dispose()
+    await host.cleanup()
+  }
+})
+
+const exclusiveSection = { name: 'fixture:exclusive-system', order: 0, text: 'Only the deployment-owned prompt.', complete: true }
+
+for (const presentation of ['native', 'ptc']) {
+  test(`modern host ${presentation}: the sole complete prompt survives ToolSearch`, MODERN, async () => {
+    const host = await createHost({ presentation })
+    let admission
+    try {
+      const stopComplete = host.systemPrompt.section(exclusiveSection)
+      admission = await host.admit()
+      const assembly = await host.assemble(host.agent, admission)
+      assert.deepEqual(assembly.sections, [{ name: exclusiveSection.name, text: exclusiveSection.text }])
+      if (presentation === 'native') {
+        const beta = host.tools.get('mcp__rc22__beta', host.agent, admission)
+        const schema = assembly.tools.find((entry) => entry.name === beta.name)
+        assert.deepEqual(schema?.parameters, beta.parameters, 'the admission-backed native declaration must remain whole')
+        assert.ok(!host.names(assembly).includes('mcp__rc22__conditional'), 'complete prompt never widens actual tool admission')
+        assert.ok(!host.names(assembly).includes('tool_search'), 'there is nothing to load with ToolSearch disabled for this step')
+      } else {
+        assert.deepEqual(host.names(assembly), ['run_code'], 'do not synthesize declarations or a PTC manual the host chose to omit')
+        assert.match(host.guard(host.agent, 'mcp__rc22__beta', admission) ?? '', /deferred/, 'without an actual declaration do not guess an authorization from custom prompt prose')
+      }
+      stopComplete()
+      const normal = await host.assemble(host.agent, admission)
+      assert.ok(normal.sections.some((section) => section.name === 'tool-search:catalog'), 'normal public registration is still supported')
+    } finally {
+      admission?.dispose()
+      await host.cleanup()
+    }
+  })
+}
+
+test('modern host: a scoped complete section matching guidance text is not the registered contributor', MODERN, async () => {
+  const host = await createHost()
+  let admission
+  try {
+    admission = await host.admit()
+    const normal = await host.assemble(host.agent, admission)
+    const guidance = normal.sections.find((section) => section.name === 'tool-search:guidance')
+    assert.ok(guidance?.text)
+    const shadow = { ...guidance, order: 0, complete: true }
+    const scopedPrompt = host.agent.ctx.get('systemPrompt')
+    const stopShadow = scopedPrompt.section(shadow)
+    try {
+      const assembled = await host.assemble(host.agent, admission)
+      assert.deepEqual(assembled.sections, [guidance], 'same name and bytes do not prove our scoped section contributed')
+    } finally { stopShadow() }
+  } finally {
+    admission?.dispose()
+    await host.cleanup()
+  }
+})
+
+test('modern host native: complete prompt allows the actually declared tools in only the matching admitted step', MODERN, async () => {
+  const host = await createHost()
+  const beta = 'mcp__rc22__beta'
+  const alpha = 'mcp__rc22__alpha'
+  let ordinary, exclusive
+  try {
+    ordinary = await host.admit()
+    await host.assemble(host.agent, ordinary)
+    assert.match(host.guard(host.agent, beta, ordinary) ?? '', /deferred/)
+    const stopComplete = host.systemPrompt.section(exclusiveSection)
+    exclusive = await host.admit()
+    await host.assemble(host.agent, exclusive)
+    // The difference is the assembled step, not a different agent, installation, or policy.
+    assert.match(host.guard(host.agent, beta, ordinary) ?? '', /deferred/)
+    assert.match(host.guard(host.agent, beta) ?? '', /deferred/, 'no matching step admission means no exception')
+    const anotherGuard = host.tools.guard((execution) => execution.name === alpha ? 'independent scope guard' : undefined)
+    const calls = [beta, alpha].map((name, index) => ({ type: 'tool-call', id: `complete-${index}`, name, arguments: '{}' }))
+    const { results } = await host.tools.execute({ calls, agent: host.agent, toolSet: exclusive, signal: signal() })
+    assert.notEqual(results[0].result.isError, true, 'a directly advertised tool must survive the real native executor/guard pipeline')
+    assert.deepEqual(JSON.parse(results[0].result.content[0].text), { tool: beta })
+    assert.equal(results[1].result.isError, true, 'other near/scope guards cannot be bypassed')
+    assert.match(results[1].result.content[0].text, /independent scope guard/)
+    anotherGuard()
+    await assert.rejects(() => host.search(host.agent, exclusive, `select:${beta}`), /deferred tool loading is unavailable/)
+    stopComplete()
+    const normal = await host.assemble(host.agent, ordinary)
+    assert.ok(!host.names(normal).includes(beta), 'complete-step direct execution must not discover the tool for other steps')
+  } finally {
+    ordinary?.dispose()
+    exclusive?.dispose()
+    await host.cleanup()
+  }
+})
+
+test('modern host PTC: a complete prompt preserves explicitly invoked discovery', MODERN, async () => {
+  const host = await createHost({ presentation: 'ptc' })
+  const beta = 'mcp__rc22__beta'
+  let admission
+  try {
+    host.systemPrompt.section(exclusiveSection)
+    admission = await host.admit()
+    assert.deepEqual(host.names(await host.assemble(host.agent, admission)), ['run_code'])
+    assert.match(host.guard(host.agent, beta, admission) ?? '', /deferred/)
+    // Custom prompt deployments can teach the existing PTC search method themselves.
+    const value = await host.search(host.agent, admission, `select:${beta}`)
+    assert.deepEqual(value.matches.map(({ name }) => name), [beta])
+    assert.equal(host.guard(host.agent, beta, admission), undefined)
+    assert.deepEqual((await host.assemble(host.agent, admission)).sections.map(({ name }) => name), [exclusiveSection.name])
+  } finally {
+    admission?.dispose()
+    await host.cleanup()
+  }
+})
+
+test('modern host native: a complete prompt does not waive discovery for host-deferred declarations', MODERN, async () => {
+  const host = await createHost()
+  const name = 'mcp__rc22__host_deferred'
+  let admission
+  try {
+    host.tools.register({ ...definitionOf(name, 'Read a synthetic record.'), deferLoading: true })
+    host.systemPrompt.section(exclusiveSection)
+    admission = await host.admit()
+    const assembly = await host.assemble(host.agent, admission)
+    assert.equal(assembly.tools.find((tool) => tool.name === name)?.deferLoading, true, '前置：宿主明确仍延迟该声明')
+    assert.match(host.guard(host.agent, name, admission) ?? '', /deferred/)
+  } finally {
+    admission?.dispose()
+    await host.cleanup()
+  }
+})
+
 test('npm 0.2.2-rc.1: 没有任何延迟工具时，搜索入口与目录段一起不出现（issue #9）', MODERN, async () => {
   // 用户报的现象：MCP 全部禁用后 `tool_search` 还在，模型看见就去搜一次空目录。
   // 这里用同一套真宿主夹具、只把"有延迟服务器"这一条去掉。

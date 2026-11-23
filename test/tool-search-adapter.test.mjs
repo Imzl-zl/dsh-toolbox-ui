@@ -1,5 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
 import {
   CORDIS_ORIGINAL,
   GENERATIONS,
@@ -177,4 +180,38 @@ test('assemble decorator: systemPrompt 缺席时明确报不可用，晚到后�
   ctx.remount(late.service)
   assert.equal(port.status().attached, true)
   port.dispose()
+})
+
+test('assemble decorator: registered guidance follows late service and HMR ownership', { timeout: 60000 }, async () => {
+  const require = createRequire(import.meta.url)
+  const hostRequire = createRequire(require.resolve('@deepseek-ai/dsh-tools'))
+  const { default: SystemPrompt } = await import(pathToFileURL(hostRequire.resolve('@deepseek-ai/dsh-system-prompt')).href)
+  const first = new Context()
+  const second = new Context()
+  await first.plugin(SystemPrompt)
+  await second.plugin(SystemPrompt)
+  const ctx = fakeCtx(undefined)
+  const guidance = { name: 'fixture:guidance', order: 100, text: 'Use the fixture guidance.', interpolate: false }
+  const agent = {}
+  const outputGuidance = (assembly) => assembly.sections.find(({ name }) => name === guidance.name)?.text
+  const port = installAssembleDecorator(ctx, async (assembly, _context, guidanceSurvived) => ({ ...assembly, guidanceSurvived }), { guidanceSection: guidance })
+  try {
+    ctx.remount(first.get('systemPrompt'))
+    const late = await first.get('systemPrompt').assemble({ agent })
+    assert.equal(outputGuidance(late), guidance.text)
+    assert.equal(late.guidanceSurvived, true)
+
+    ctx.remount(second.get('systemPrompt'))
+    const current = await second.get('systemPrompt').assemble({ agent })
+    assert.equal(outputGuidance(current), guidance.text)
+    assert.equal(current.guidanceSurvived, true)
+    assert.equal(outputGuidance(await first.get('systemPrompt').assemble({ agent })), undefined)
+
+    port.dispose()
+    assert.equal(outputGuidance(await second.get('systemPrompt').assemble({ agent })), undefined)
+  } finally {
+    port.dispose()
+    await first.fiber.dispose()
+    await second.fiber.dispose()
+  }
 })

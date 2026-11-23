@@ -16,7 +16,12 @@
 - MCP 当前实际 instructions 非空时，不再重复提示；否则每 owner 至多一条例子，全局至多三条，仍受总字符预算约束。这只按说明存在性去重，不判断说明质量。
 - 有限提示可以省略工具；完整目录、全文描述索引与原 schema 均保留。元数据不是调用契约或授权，源首句及 ICU 文本边界也不是语义概括的保证。**尚未验证通用版的模型质量或总 token 收益。**
 - 名字与用途来自同一 PresentationSnapshot；缓存按实际 MCP 说明内容失效，命中也发布当前组装统计。`chars` / `budget` 仍仅表示名字目录，新增 `capabilityChars` / `capabilityCount` / `discoveryChars` 也不是完整请求或计费 token。
-- 混合搜索批次的淘汰保护按**本批返回总数**计算；查询算法、默认值、作用域/加载守卫、native/PTC 绑定和恢复协议不变。
+- 混合搜索批次的淘汰保护按**本批返回总数**计算；默认值、普通装配的作用域/加载守卫、native/PTC 绑定和恢复协议不变。
+
+未发布维护修正：
+
+- `select:` 的全名、裸名和可还原的连接写法按解析后的完整工具名合并；不同工具仍分别返回，未命中的请求仍明确标出。批次保护只数实际返回的不同定义。
+- 现代宿主不保留本次实际注册的 ToolSearch 引导时（例如 `complete: true`），不追加目录、用途提示或 PTC 手册。只有同一步准入中被宿主完整声明的定义才无需再经本插件发现，其他宿主守卫不变。全部准入定义都已直发时撤掉本插件的 native 搜索入口；PTC 或宿主仍延迟的工具保留显式搜索路径。旧宿主在 waterfall 后自行恢复独占段，既有加载行为不改。
 
 实现见 [用途提示](../lib/tool-discovery-cues.js)、[运行时](../lib/tool-search-runtime.js)与[呈现投影](../lib/tool-search-presentation.js)；独立回归见[通用元数据测试](../test/tool-discovery-generic-hints.test.mjs)与[真实宿主测试](../test/tool-search-capability-cues.test.mjs)。取舍见[通用用途提示决定](../.agents/notes/implemented/2026-11-22-toolsearch-generic-purpose-hints.md)。
 
