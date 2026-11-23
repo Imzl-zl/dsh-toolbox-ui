@@ -82,9 +82,9 @@ test('mounting the plugin exposes the skills service without a second patch entr
   const pluginDefault = (await import('../lib/index.js')).default
   const root = await mkdtemp(join(tmpdir(), 'dsh-mount-'))
   const patch = join(root, 'cordis.patch.yml')
-  await writeFile(patch, '[]\n')
+  const ctx = new Context()
   try {
-    const ctx = new Context()
+    await writeFile(patch, '[]\n')
     await ctx.plugin({
       name: 'host-stub',
       apply(inner) {
@@ -99,12 +99,21 @@ test('mounting the plugin exposes the skills service without a second patch entr
       },
     })
     // 只装载插件本身——不手工挂任何子服务。
-    await ctx.plugin(pluginDefault, {})
+    const fiber = await ctx.plugin(pluginDefault, {})
+    await fiber.await()
 
-    assert.notEqual(ctx.get('toolboxMcp'), undefined, 'MCP 服务应已激活')
-    assert.notEqual(ctx.get('skillsManager'), undefined,
-      '装载插件本身就必须带出 skills 服务（由现有插件内部 ctx.plugin 挂载，而不是靠外部再挂一次）')
+    const mcp = ctx.get('toolboxMcp')
+    const skills = ctx.get('skillsManager')
+    assert.ok(mcp, 'MCP 服务应已激活')
+    assert.ok(skills, '装载插件本身就必须带出 skills 服务')
+    assert.deepEqual((await mcp.list()).servers, [])
+    assert.deepEqual((await skills.list()).skills, [])
+
+    await fiber.dispose()
+    assert.equal(ctx.get('toolboxMcp'), undefined)
+    assert.equal(ctx.get('skillsManager'), undefined)
   } finally {
+    await ctx.fiber.dispose()
     await rm(root, { recursive: true, force: true })
   }
 })
