@@ -51,6 +51,7 @@ function loadClientInternals() {
     },
     useCallback: (callback) => callback,
     useEffect(fn) { react.__effects.push(fn) },
+    useLayoutEffect(fn) { react.__effects.push(fn) },
     useMemo: (factory) => factory(),
     useRef: (value) => ({ current: value }),
     useState(initial) {
@@ -236,6 +237,7 @@ function mountSkillsPanel({ onCall }) {
     useCallback: (callback) => callback,
     // 立即执行：首次挂载的加载逻辑都写在 useEffect 里，不跑就等于没挂载。
     useEffect: (fn) => { react.__effects.push(fn) },
+    useLayoutEffect: (fn) => { react.__effects.push(fn) },
     useMemo: (factory) => factory(),
     useRef: (value) => ({ current: value }),
     useState: (value) => [typeof value === 'function' ? value() : value, () => {}],

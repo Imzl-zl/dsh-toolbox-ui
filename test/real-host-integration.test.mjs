@@ -601,8 +601,8 @@ test('real host: project config written while a session is live reaches it, and 
   const server = join(root, 'fixture-server.mjs')
   await mkdir(join(wsRoot, '.dsh'), { recursive: true })
   await writeFile(server, FIXTURE_SERVER)
-  // 开局：项目里没有任何 server（会话先开）。
-  await writeFile(join(wsRoot, '.dsh', 'mcp.json'), JSON.stringify({ mcpServers: {} }, null, 2))
+  // 开局连配置文件都没有（首次给一个已经打开的项目添加 MCP）。
+  assert.equal(existsSync(join(wsRoot, '.dsh', 'mcp.json')), false)
 
   const host = await createRealHost(wsRoot)
   try {

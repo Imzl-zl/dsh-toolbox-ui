@@ -168,12 +168,12 @@ test('actual nonempty MCP instructions suppress all duplicate cue entries from t
   assert.equal(catalog.size, rows.length)
 })
 
-test('missing MCP instructions allow one short example per owner and at most three globally', OPTIONS, () => {
+test('missing MCP instructions allow one short example per owner under the shared character budget', OPTIONS, () => {
   const rows = ['north', 'south', 'east', 'west'].flatMap(owner => [row(`mcp__${owner}__q0`, `Read current ${owner} proof.`, owner), row(`mcp__${owner}__q1`, `Read current ${owner} state.`, owner)])
   const { cues } = render(rows, () => ' \r\n\t ')
   bounded(cues)
   const shown = entries(cues)
-  assert.equal(shown.length, 3, 'global example allowance is three when three complete small examples fit')
+  assert.equal(shown.length, 4, 'all four complete source examples fit; the shared budget is the limit')
   for (const owner of ['north', 'south', 'east', 'west']) assert.ok(shown.filter(entry => entry.name.startsWith(`mcp__${owner}__`)).length <= 1)
   assert.match(cues.text, /examples?|non[- ]?exhaustive|not exhaustive/i)
 })

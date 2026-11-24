@@ -10,7 +10,8 @@
 //   - 宿主返回的 source 是唯一可靠的作用域依据（本机 ~/.dsh/skills 就不存在，
 //     技能都在 ~/.agents/skills），UI 不得写死根路径。
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import fs, { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
@@ -72,6 +73,58 @@ test('does not duplicate global skills when a project query returns the merged v
     '全局技能不得因为项目查询也返回它而重复出现',
   )
   assert.equal(rows.filter((row) => row.name === 'zhanggui').length, 1)
+})
+
+async function withSkillIoCounts(t, root, run) {
+  const counts = { scans: 0, documents: 0 }
+  const originalReaddir = fs.readdir
+  const originalReadFile = fs.readFile
+  const scan = t.mock.method(fs, 'readdir', (path, ...args) => {
+    if (path === root) counts.scans += 1
+    return originalReaddir(path, ...args)
+  })
+  const read = t.mock.method(fs, 'readFile', (path, ...args) => {
+    if (typeof path === 'string' && dirname(path) === root && path.endsWith('.md')) counts.documents += 1
+    return originalReadFile(path, ...args)
+  })
+  syncBuiltinESMExports()
+  try { return await run(counts) } finally {
+    scan.mock.restore()
+    read.mock.restore()
+    syncBuiltinESMExports()
+  }
+}
+
+async function flatSkillsFixture(t, names) {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-skill-list-io-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const summaries = []
+  for (const name of names) {
+    const path = join(root, `${name}.md`)
+    await writeFile(path, `---\nname: ${name}\ndescription: List fixture\n---\n`)
+    summaries.push(skill({ name, path: await realpath(path), resourceBase: { path: root } }))
+  }
+  return { root, summaries }
+}
+
+test('project queries filter inherited global skills before reading their documents', async (t) => {
+  const { root, summaries } = await flatSkillsFixture(t, ['user-flat'])
+  const workspaces = ['/proj/a', '/proj/b', '/proj/c']
+  const byCwd = Object.fromEntries(['', ...workspaces].map((cwd) => [cwd, summaries]))
+  await withSkillIoCounts(t, root, async (counts) => {
+    const rows = await listSkillViews(ctxWith(fakeSkills(byCwd)), { workspaces })
+    assert.deepEqual(rows.map((row) => row.name), summaries.map((summary) => summary.name))
+    assert.equal(counts.documents, rows.length, 'only returned global documents need to be read')
+  })
+})
+
+test('one skill listing scans a flat skill root only once', async (t) => {
+  const { root, summaries } = await flatSkillsFixture(t, ['flat-first', 'flat-second', 'flat-third'])
+  await withSkillIoCounts(t, root, async (counts) => {
+    const rows = await listSkillViews(ctxWith(fakeSkills({ '': summaries })))
+    assert.deepEqual(rows.map((row) => row.entry), summaries.map(({ name }) => `${name}.md`))
+    assert.equal(counts.scans, 1, 'flat entries in this root share one directory scan')
+  })
 })
 
 test('lists every scope by querying once per workspace plus the unscoped root', async () => {

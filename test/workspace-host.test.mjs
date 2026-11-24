@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { realpathSync } from 'node:fs'
 import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile, mkdir } from 'node:fs/promises'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -260,6 +261,50 @@ test('concurrent workspace writes are serialized without losing updates', async 
     ])
     const parsed = JSON.parse(await readFile(configPath(fixture.wsRoot), 'utf8'))
     assert.deepEqual(Object.keys(parsed.mcpServers).sort(), ['alpha', 'beta'])
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('workspace import refuses to overwrite an external edit made after its snapshot', async (t) => {
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const fixture = await createHostFixture('[]\n', [{ title: 'proj-a' }])
+  try {
+    const wsPath = realpathSync(fixture.wsRoot)
+    const path = configPath(wsPath)
+    const original = { mcpServers: { original: { command: 'before' } }, editorMetadata: 'before' }
+    const external = {
+      mcpServers: { original: { command: 'after' }, fromEditor: { command: 'elsewhere' } },
+      editorMetadata: 'after',
+    }
+    await mkdir(join(wsPath, '.dsh'), { recursive: true })
+    await writeFile(path, JSON.stringify(original))
+    const nativeRead = readFile
+    const fs = createRequire(import.meta.url)('node:fs/promises')
+    let edited = false
+    const readHook = t.mock.method(fs, 'readFile', async (file, ...args) => {
+      const value = await nativeRead(file, ...args)
+      if (file === path && !edited) {
+        // 确定性地在 Host 读到旧快照后模拟另一个编辑器保存，不依赖 sleep 或 mtime 精度。
+        edited = true
+        await writeFile(path, JSON.stringify(external))
+      }
+      return value
+    })
+    syncBuiltinESMExports()
+    try {
+      await assert.rejects(
+        McpManagerGateway.prototype.importWorkspaceJson.call({ ctx: fixture.ctx }, {
+          wsPath, mode: 'merge', json: { mcpServers: { incoming: { command: 'incoming' } } },
+        }),
+        /FS_STALE_VERSION/,
+      )
+      assert.equal(edited, true)
+      assert.deepEqual(JSON.parse(await nativeRead(path, 'utf8')), external)
+    } finally {
+      readHook.mock.restore()
+      syncBuiltinESMExports()
+    }
   } finally {
     await fixture.cleanup()
   }

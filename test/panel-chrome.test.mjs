@@ -67,6 +67,7 @@ function loadClientInternals(hookRenderer = null) {
     },
     useCallback: (callback) => callback,
     useEffect(fn) { react.__effects.push(fn) },
+    useLayoutEffect(fn) { react.__effects.push(fn) },
     useMemo: (factory) => factory(),
     useRef: (value) => ({ current: value }),
     useState(initial) {

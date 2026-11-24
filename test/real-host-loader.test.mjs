@@ -460,6 +460,40 @@ test('real loader host: 面板改延迟参数 → 写进 plugin patch 并当场�
   }
 })
 
+test('real loader host: a settings reload waits for the old discovery projection to release', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const host = await createLoaderHost('- insert:\n  - id: mcp-manager-ui\n    name: dsh-toolbox-ui\n')
+  const releasing = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  let registered = 0
+  let update
+  try {
+    host.ctx.provide('sessionProjections', {
+      async register() {
+        const first = ++registered === 1
+        return {
+          stateOf: () => undefined,
+          async dispose() { if (first) { releasing.resolve(); await release.promise } },
+        }
+      },
+    })
+    // The first save installs the projection service in the already running gateway.
+    await host.manager.updateToolSearchSettings({ settings: { maxResults: 11 } })
+    assert.equal(registered, 1)
+    update = host.manager.updateToolSearchSettings({ settings: { maxResults: 12 } })
+    await releasing.promise
+    assert.equal(registered, 1, 'do not register the same key while the previous disposer is pending')
+    release.resolve()
+    const saved = await update
+    assert.equal(saved.live, 'applied')
+    assert.equal(registered, 2)
+    assert.equal(saved.settings.maxResults, 12)
+  } finally {
+    release.resolve()
+    await update?.catch(() => {})
+    await host.cleanup()
+  }
+})
+
 test('real loader host: 工具加载面板读到的是真实工具与理由（不是空列表）', { timeout: TEST_TIMEOUT_MS }, async () => {
   // 面板读的是"当前进程可见的工具 + 每个工具的决策"。这里曾经有一个真实缺陷：
   // 读取时没有 agent，决策回退成空工具表，于是面板永远显示"当前没有可管理的工具"。

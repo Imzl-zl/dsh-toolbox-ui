@@ -324,6 +324,25 @@ test('parseDiscoveredMeta / discoveredFromMessages: 同一份协议定义，v1 �
   assert.deepEqual([...discoveredFromMessages(messages)], ['mcp__a__x'])
 })
 
+test('native v2 备用恢复：只保留有界的新发现，拒绝损坏回执', () => {
+  const receipt = (discoveredTools, matches = discoveredTools.map((name) => ({ name, description: 'Read a note.', parameters: { type: 'object' } }))) => ({
+    protocol: 'dsh-tool-search/v2', query: 'read a note', matches, discoveredTools,
+  })
+  const message = (body, isError = false) => ({ role: 'tool', isError, content: [{ type: 'text', text: JSON.stringify(body) }] })
+  const messages = [
+    message(receipt(['old', 'rediscovered'])),
+    message(receipt(['middle'])),
+    message(receipt(['rediscovered'])),
+    message(receipt(['not-on-receipt'], [])),
+    message(receipt(['not-found'], [{ name: 'not-found', found: false }])),
+    message(receipt(['malformed', 7])),
+    message(receipt(['duplicate', 'duplicate'])),
+    message({ ...receipt(['bad-snapshot']), discoverySnapshot: { orderedNames: [5] } }),
+    message(receipt(['error']), true),
+  ]
+  assert.deepEqual([...discoveredFromMessages(messages, { max: 2 })], ['middle', 'rediscovered'])
+})
+
 test('promise: 已返回给模型的工具在未被使用前不进淘汰候选', () => {
   const state = createState()
   discover(state, ['a', 'b', 'c'])

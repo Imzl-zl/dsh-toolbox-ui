@@ -1079,6 +1079,65 @@ test('恢复：投影缺席时退回派生消息（native 有效，PTC 降级但
   }
 })
 
+test('恢复投影 pending：早期 guard 不会把空种子固定到同一个 agent', async () => {
+  let resolveRegistration
+  const ready = new Promise((resolve) => { resolveRegistration = resolve })
+  const name = 'mcp__jshook__tool_2'
+  const handle = { stateOf: () => ({ protocol: 'dsh-tool-search/v2', discovered: [name] }), dispose() {} }
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, projections: { register: () => ready } })
+  try {
+    assert.match(fixture.guards[0]({ agent: fixture.agent, name }) ?? '', /deferred/, 'pending 时同步守卫不能猜测成功')
+    const pending = assemble(fixture, { tools: fixture.visibleSchemas(), sections: [] })
+    resolveRegistration(handle)
+    const result = await pending
+    assert.ok(result.tools.some((tool) => tool.name === name), '首轮组装必须读到投影，而不是永久采用 pending 时的空种子')
+    assert.equal(fixture.guards[0]({ agent: fixture.agent, name }), undefined, '同一 agent 必须使用已经可读的投影种子')
+  } finally {
+    resolveRegistration(handle)
+    await fixture.cleanup()
+  }
+})
+
+test('恢复投影 pending：搜索在持久种子之后提交新发现', async () => {
+  let resolveRegistration
+  const ready = new Promise((resolve) => { resolveRegistration = resolve })
+  const previous = 'mcp__jshook__tool_2'
+  const next = 'mcp__jshook__tool_3'
+  const handle = { stateOf: () => ({ protocol: 'dsh-tool-search/v2', discovered: [previous] }), dispose() {} }
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, projections: { register: () => ready } })
+  try {
+    const search = fixture.registered.get('tool_search').execute({ query: `select:${next}` }, { agent: fixture.agent })
+    resolveRegistration(handle)
+    const result = await search
+    assert.deepEqual(result.discoveredTools, [next])
+    assert.deepEqual(result.discoverySnapshot.orderedNames, [previous, next], '提交的替换快照不能掩盖尚未读取的持久种子')
+  } finally {
+    resolveRegistration(handle)
+    await fixture.cleanup()
+  }
+})
+
+test('运行时现代投影清理：重复调用共享尚未完成的释放', async () => {
+  let finishRelease, startRelease
+  const started = new Promise((resolve) => { startRelease = resolve })
+  const release = new Promise((resolve) => { finishRelease = resolve })
+  const projections = { async register() {
+    return { stateOf: () => undefined, dispose() { startRelease(); return release } }
+  } }
+  const fixture = createFixture({ schemas: BIG_SCHEMAS, config: DEFER_CONFIG, projections })
+  try {
+    assert.deepEqual(await fixture.cleanup.ready, { state: 'ready' })
+    const disposing = fixture.cleanup()
+    await started
+    assert.equal(fixture.cleanup(), disposing, '后续调用也必须等旧投影释放，不能抢先重注册')
+    finishRelease()
+    await disposing
+  } finally {
+    finishRelease()
+    await fixture.cleanup()
+  }
+})
+
 test('fail-open：宿主视图抛错时退回全量可见，不炸会话', async () => {
   // ToolSearch 是优化不是正确性机制。算不出视图就回到 feature 前的行为并记账，
   // 而不是让 assemble/guard 抛错——那会否决建会话或让 agent loop 每步失败。

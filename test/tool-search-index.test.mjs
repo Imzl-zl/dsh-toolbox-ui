@@ -156,9 +156,9 @@ test('buildCatalog: 同名后者覆盖', () => {
 test('parseQuery: +约束按名字同一切词规则切成词集合', () => {
   // serverName 允许 - 和 _（mcp-client SERVER_NAME_PATTERN），而工具名按非字母数字切词，
   // 所以约束也必须切成词集合——否则 +chrome-devtools 永远匹配不上任何名字。
-  assert.deepEqual(parseQuery('+slack send'), { kind: 'filter', requiredTokens: ['slack'], terms: ['send'], raw: '+slack send' })
-  assert.deepEqual(parseQuery('+chrome-devtools snapshot'), { kind: 'filter', requiredTokens: ['chrome', 'devtools'], terms: ['snapshot'], raw: '+chrome-devtools snapshot' })
-  assert.deepEqual(parseQuery('+my_server send'), { kind: 'filter', requiredTokens: ['my', 'server'], terms: ['send'], raw: '+my_server send' })
+  assert.deepEqual(parseQuery('+slack send'), { kind: 'filter', requiredServer: 'slack', requiredTokens: ['slack'], terms: ['send'], raw: '+slack send' })
+  assert.deepEqual(parseQuery('+chrome-devtools snapshot'), { kind: 'filter', requiredServer: 'chrome-devtools', requiredTokens: ['chrome', 'devtools'], terms: ['snapshot'], raw: '+chrome-devtools snapshot' })
+  assert.deepEqual(parseQuery('+my_server send'), { kind: 'filter', requiredServer: 'my_server', requiredTokens: ['my', 'server'], terms: ['send'], raw: '+my_server send' })
   // 约束词被完整剔除，不再作为排序词重复计分。
   assert.deepEqual(parseQuery('+jshook browser').terms, ['browser'])
 })

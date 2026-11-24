@@ -61,10 +61,12 @@ test('probeHost: 缺 sessionProjections / modeFor → false 且各记一次', ()
   assert.ok(without.logged.some((line) => line.includes('modeFor')))
 })
 
-test('probeHost: 服务存在但方法缺失也算缺项', () => {
-  // "服务挂着"不等于"契约在"：投影要 register + stateOf 两件，只挂一半等于没有。
-  const caps = probeHost(fakeCtx({ services: { sessionProjections: { register: () => () => {} } }, tools: fullTools() }))
-  assert.equal(caps.projections, false)
+test('probeHost: 投影探测以注册入口为准，不要求已废弃的注册表 stateOf', () => {
+  const tools = newTools()
+  const unavailable = fakeCtx({ services: { sessionProjections: { stateOf: () => undefined } }, tools })
+  assert.equal(probeHost(unavailable).projections, false)
+  const modern = fakeCtx({ services: { sessionProjections: { async register() {} } }, tools })
+  assert.equal(probeHost(modern).projections, true, '现代宿主从注册句柄读取，不依赖注册表级 stateOf')
 })
 
 test('warnOnce: 同一个键只记一次，不同键各记各的', () => {

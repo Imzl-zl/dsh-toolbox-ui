@@ -25,14 +25,14 @@
 推荐用 npm 安装：包里的 `^1.x` 范围让后续 `dsh plugin update` 能自动升级小版本。
 
 ```sh
-dsh plugin --profile web add dsh-toolbox-ui@^1.14.0
+dsh plugin --profile web add dsh-toolbox-ui@^1.15.0
 ```
 
 也可以固定 GitHub release tag（适合需要锁定某个具体版本时）：
 
 ```sh
 # 固定 release tag
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.14.0
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.15.0
 
 # 或固定某个 commit
 dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#<commit>
@@ -83,7 +83,7 @@ dsh plugin --profile web update dsh-toolbox-ui
 
 | 安装规格 | `update` 的效果 | 怎么跨版本 |
 |---|---|---|
-| `dsh-toolbox-ui@^1.14.0`（npm，推荐） | 在 `^1.x` 内自动升到最新小版本，不会跨到 2.0.0 | 已是自动；跨大版本显式安装 `@^2` |
+| `dsh-toolbox-ui@^1.15.0`（npm，推荐） | 在 `^1.x` 内自动升到最新小版本，不会跨到 2.0.0 | 已是自动；跨大版本显式安装 `@^2` |
 | `github:...#v1.4.0`（tag） | 重新解析同一个 tag，**不会动** | 换成新 tag 重新 `add`：`... #<新 tag>` |
 | `github:...#<commit>` | 同上，固定在 commit | 用新 commit/tag 重新 `add` |
 | `github:...#main`（分支） | 拉取最新 main | 已是自动；但不推荐生产（无 release 门槛） |
@@ -95,7 +95,7 @@ dsh plugin --profile web update dsh-toolbox-ui
 
 ## 发布流程（维护者）
 
-npm 与 GitHub Releases 必须**同一次发布里都更新**：用户从 npm 升级，而面板的更新提示问的正是 npm 上本包的 latest。两者版本不一致就会出现「提示说有新版、`update` 却拿不到」。这两件事现在由 `.github/workflows/release.yml` 在推 tag 时自动完成，并且会先校验「tag 与 package.json 版本一致」再跑测试。
+npm 与 GitHub Releases 必须**同一次发布里都更新**：用户从 npm 升级，而面板的更新提示问的正是 npm 上本包的 latest。两者版本不一致就会出现「提示说有新版、`update` 却拿不到」。这两件事由 `.github/workflows/release.yml` 在推 tag 时自动完成：发布必须等 tag 所在提交的 CI（包括全部受支持宿主）通过，并核对 tag 与 `package.json` 版本一致。
 
 ### 一次性准备（只需做一次）
 
@@ -123,10 +123,10 @@ dsh web    # 打开面板点一遍
 # 3) 提交并推 tag（CI 会校验 tag 与 version 一致，不一致就拒绝发布）
 git add -A && git commit -m "..."
 git push origin main
-git tag -a v1.14.0 -m "dsh-toolbox-ui 1.14.0" && git push origin v1.14.0
+git tag -a v1.15.0 -m "dsh-toolbox-ui 1.15.0" && git push origin v1.15.0
 ```
 
-推 tag 后 CI 依次做：校验版本 → `pnpm install --frozen-lockfile` → `npm test` → `npm publish`（trusted publishing，无需 token）→ `gh release create`。
+推 tag 后，发布流程先复用 CI 的生成物检查、开发基线测试和宿主兼容矩阵；任何一项失败都不会进入发布。随后校验版本，再执行 `npm publish`（trusted publishing，无需 token）与 `gh release create`。
 
 **第 2 步的真机检查什么时候必须做**：客户端那一半是替身测试——组件在 node 里渲染不起来（见[设计与限制](design.md#版本范围怎么定以及它管不到什么)），所以 CI 全绿也证明不了面板能显示。因此**只要本次改动碰了 `lib/client.js`、或推进了 DSH 基线，就必须做**：起 `dsh web`，确认侧栏入口能打开面板、悬浮按钮在位，然后导入 / 预览 / 启停各点一次。
 
@@ -142,7 +142,7 @@ git tag -a v1.14.0 -m "dsh-toolbox-ui 1.14.0" && git push origin v1.14.0
 
 ```sh
 npm publish          # 会弹 2FA 挑战；若用 bypass-2FA 的 granular token 则非交互
-gh release create v1.14.0 --title "dsh-toolbox-ui v1.14.0" --notes-file <notes>
+gh release create v1.15.0 --title "dsh-toolbox-ui v1.15.0" --notes-file <notes>
 ```
 
 `npm login` 的会话 token 只有 2 小时，超时需要重新登录；classic token 已被 npm 永久吊销，能非交互发布的只剩勾了 **Bypass 2FA** 的 granular access token——但它正在被 npm 收窄（已不能做账号/包管理类操作，且 2027-01 起将失去直接发布能力），所以长期方案是上面的 trusted publishing。

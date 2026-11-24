@@ -51,7 +51,7 @@ test('面板的数据面与明文状态住在 hook 里，组件不再各自持�
 
   // ④ 反向：hook 必须真的被用起来。少了这一半，"把状态全删掉"也能让上面几条变绿。
   // 诊断的**数据面**在 hook 里（R10），组件只持有展开态——所以入参里必须有 diagEnabled。
-  assert.ok(body.includes('useMcpServers({ call, scope, timer, flash, revealRevisionRef, clearRevealed, diagEnabled: diagOpen })'),
+  assert.ok(body.includes('useMcpServers({ call, scope, enabled: mcpActive, timer, flash, revealRevisionRef, clearRevealed, diagEnabled: diagOpen })'),
     'McpTab 必须调用 useMcpServers，并把 reveal 的两个接缝与诊断展开态传进去')
   assert.equal(body.includes('const [diagRows, set'), false, 'diagRows 是数据面，归 useMcpServers')
   assert.ok(body.includes('useReveal({ call, scope, resetOn: selected, flash })'), 'McpTab 必须调用 useReveal')
@@ -77,7 +77,7 @@ test('useReveal 必须在 flash 之后调用（TDZ 回归闸）', () => {
   const body = componentBody(shell)
   const flashAt = body.indexOf('const flash = useCallback(')
   const revealAt = body.indexOf('useReveal({ call, scope, resetOn: selected, flash })')
-  const serversAt = body.indexOf('useMcpServers({ call, scope, timer, flash')
+  const serversAt = body.indexOf('useMcpServers({ call, scope, enabled: mcpActive, timer, flash')
   assert.ok(flashAt > 0 && revealAt > 0 && serversAt > 0, '三个调用点都必须存在')
   assert.ok(flashAt < revealAt, 'useReveal 必须在 flash 之后（它内部会调用 flash）')
   assert.ok(flashAt < serversAt, 'useMcpServers 必须在 flash 之后（load 用 flash 报刷新结果）')

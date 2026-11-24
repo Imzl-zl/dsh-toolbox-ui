@@ -621,6 +621,98 @@ test('readiness budget protects the first turn but never blocks a config write',
   }
 })
 
+function pauseMcpLoader(fixture) {
+  const entered = Promise.withResolvers()
+  const gate = Promise.withResolvers()
+  const load = fixture.ctx.loader.import
+  fixture.ctx.loader.import = async (name) => {
+    if (name === '@deepseek-ai/dsh-mcp-client') {
+      entered.resolve()
+      await gate.promise
+    }
+    return load(name)
+  }
+  return { entered: entered.promise, release: gate.resolve }
+}
+
+test('removing a project MCP while its loader is pending prevents stale publication', async () => {
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const { projectConnectionsView } = await import('../lib/workspace-runtime.js')
+  const fixture = await createRuntimeFixture({ deferTools: false, readyTimeoutMs: 0 })
+  const { entered, release } = pauseMcpLoader(fixture)
+  let mounting
+  const cleanup = installAgentRuntime(fixture.ctx)
+  try {
+    const session = makeSession(fixture, 'pending')
+    mounting = fixture.handlers['agent/created']({ agent: session.sessionAgent })
+    await entered
+    assert.deepEqual((await projectConnectionsView(fixture.ctx)).map((row) => row.state), ['connecting'])
+
+    const outcome = await McpManagerGateway.prototype.removeWorkspaceServer.call({ ctx: fixture.ctx }, {
+      wsPath: fixture.wsRoot, name: 'db',
+    })
+    assert.equal(outcome.persisted, 'applied')
+    assert.deepEqual(JSON.parse(await readFile(join(fixture.wsRoot, '.dsh', 'mcp.json'), 'utf8')).mcpServers, {})
+
+    release()
+    await mounting
+    assert.deepEqual(fixture.ownToolNames(session), [], 'a stale mount must not restore tools that have been removed')
+    assert.deepEqual(await projectConnectionsView(fixture.ctx), [], 'the removed connection must not survive')
+  } finally {
+    release()
+    await mounting
+    await cleanup()
+    await fixture.cleanup()
+  }
+})
+
+test('changing only exclude during a pending mount does not lose the desired project tools', async () => {
+  const { McpManagerGateway } = await import('../lib/index.js')
+  const fixture = await createRuntimeFixture({ deferTools: false, exclude: [], readyTimeoutMs: 0 })
+  const { entered, release } = pauseMcpLoader(fixture)
+  let mounting
+  const cleanup = installAgentRuntime(fixture.ctx)
+  try {
+    const session = makeSession(fixture, 'pending')
+    mounting = fixture.handlers['agent/created']({ agent: session.sessionAgent })
+    await entered
+    const outcome = await McpManagerGateway.prototype.setWorkspaceExclude.call({ ctx: fixture.ctx }, {
+      wsPath: fixture.wsRoot, serverName: 'github', hidden: true,
+    })
+    assert.equal(outcome.persisted, 'applied')
+    release()
+    await mounting
+    assert.deepEqual(fixture.ownToolNames(session), ['mcp__db__x', 'mcp__db__y'])
+    assert.equal(fixture.createdScopes.length, 1, 'the old version must not create a scope before retrying')
+  } finally {
+    release()
+    await mounting
+    await cleanup()
+    await fixture.cleanup()
+  }
+})
+
+test('the next mount retracts tools removed by a manual project edit from existing sessions', async () => {
+  const { projectConnectionsView } = await import('../lib/workspace-runtime.js')
+  const fixture = await createRuntimeFixture({ deferTools: false, idleTimeoutMs: 0 })
+  const cleanup = installAgentRuntime(fixture.ctx)
+  try {
+    const first = makeSession(fixture, 'first')
+    await fixture.handlers['agent/created']({ agent: first.sessionAgent })
+    assert.deepEqual(fixture.ownToolNames(first), ['mcp__db__x', 'mcp__db__y'])
+
+    await writeFile(join(fixture.wsRoot, '.dsh', 'mcp.json'), JSON.stringify({ mcpServers: {} }))
+    const next = makeSession(fixture, 'next')
+    await fixture.handlers['agent/created']({ agent: next.sessionAgent })
+    assert.deepEqual(fixture.ownToolNames(next), [])
+    assert.deepEqual(fixture.ownToolNames(first), [], 'the old session must not keep removed tools')
+    assert.deepEqual(await projectConnectionsView(fixture.ctx), [])
+  } finally {
+    await cleanup()
+    await fixture.cleanup()
+  }
+})
+
 // 空闲计时器与「重新被引用」的竞态：计时器到点时若连接已被重新持有，绝不能拆。
 // （这是空闲回收唯一的危险窗口：refs 归零起计时器，之后又有人 acquire。）
 test('shared project connection: a re-acquired connection is not disposed by a stale idle timer', async () => {
@@ -1904,9 +1996,9 @@ test('R2: stale diagnostics are filtered by the current config at read time, not
     assert.ok((await view()).restrictError, '只过滤失效的那一类，不许一刀切掉所有诊断')
     assert.equal(rt.workspaceMountErrorsView(fixture.wsRoot).length, 1, '记录端不变：禁用不清表')
 
-    // 重新启用 → 真实挂载再次失败 → 诊断必须回来（过滤器不是单向隐藏）。
+    // 显式重新启用；更新省略 disabled 已改为保留源状态，不能借 omission 偷偷启用。
     await McpManagerGateway.prototype.updateWorkspaceServer.call({ ctx: fixture.ctx }, {
-      wsPath: fixture.wsRoot, spec: { name: 'db', transport: 'stdio', command: 'psql' },
+      wsPath: fixture.wsRoot, spec: { name: 'db', transport: 'stdio', command: 'psql', disabled: false },
     })
     assert.deepEqual(names((await view()).mountErrors), ['db'])
 

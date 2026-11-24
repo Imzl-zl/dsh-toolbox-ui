@@ -61,7 +61,7 @@ async function scopeAgent(ctx, agent) {
  * 宿主在 waterfall 之后才把 provider-owned 的 `tools` 贴回最终 assembly。所以必须
  * 在 `systemPrompt.assemble()` 返回之后投影，否则目录段会出现、声明一个都不会少。
  */
-async function createHost({ presentation = 'native', deferral = true, limits = {} } = {}) {
+async function createHost({ presentation = 'native', language = 'typescript', deferral = true, limits = {} } = {}) {
   const [{ default: SystemPrompt }, executorModule] = await Promise.all([
     import(pathToFileURL(toolsRequire.resolve('@deepseek-ai/dsh-system-prompt')).href),
     importHost(presentation === 'ptc' ? '@deepseek-ai/dsh-tool-executor-ptc' : '@deepseek-ai/dsh-tool-executor-native'),
@@ -72,7 +72,7 @@ async function createHost({ presentation = 'native', deferral = true, limits = {
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
   // PTC 会话需要 ptcRuntime：宿主的 sdkSection / wireSchemas 都要求它存在。
-  if (presentation === 'ptc') ctx.provide('ptcRuntime', { language: 'typescript', programFormat: 'typescript' })
+  if (presentation === 'ptc') ctx.provide('ptcRuntime', { language, programFormat: 'typescript' })
   await ctx.plugin(executorModule, {})
 
   const tools = ctx.get('tools')
@@ -329,6 +329,8 @@ test('modern host PTC: a complete prompt preserves explicitly invoked discovery'
     // Custom prompt deployments can teach the existing PTC search method themselves.
     const value = await host.search(host.agent, admission, `select:${beta}`)
     assert.deepEqual(value.matches.map(({ name }) => name), [beta])
+    assert.match(value.instruction, /run_code/, '即使保留独占提示，回执也要使用真实 PTC 执行路径')
+    assert.match(value.matches[0].signature ?? '', /tools\[/)
     assert.equal(host.guard(host.agent, beta, admission), undefined)
     assert.deepEqual((await host.assemble(host.agent, admission)).sections.map(({ name }) => name), [exclusiveSection.name])
   } finally {
@@ -457,6 +459,103 @@ test('npm 0.2.2-rc.1: 两个 agent 的发现集互不污染（同一宿主、同
   }
 })
 
+
+test('真实现代 native：当前 v2 回执经 Session 派生消息恢复（无投影）', MODERN, async () => {
+  const fromLoop = createRequire(require.resolve('@deepseek-ai/dsh-agent-loop'))
+  const { Session } = await import(pathToFileURL(fromLoop.resolve('@deepseek-ai/dsh-session')).href)
+  const host = await createHost()
+  const session = new Session('tool-search-native-resume-fixture')
+  host.agent.session = session
+  const name = 'mcp__rc22__beta'
+  let initialAdmission, nextAdmission, nextScope
+  try {
+    initialAdmission = await host.admit()
+    assert.ok(!host.names(await host.assemble(host.agent, initialAdmission)).includes(name))
+    const calls = [{ type: 'tool-call', id: 'search-call', name: 'tool_search', arguments: JSON.stringify({ query: `select:${name}` }) }]
+    const log = { turn: 0, step: 0 }
+    session.append('assistant/message', {
+      ...log,
+      message: { id: 'fixture-assistant', role: 'assistant', source: { kind: 'model', ...MODEL }, content: calls },
+    }, { surfaceOp: 'append' })
+    const { results } = await host.tools.execute({ calls, agent: host.agent, log, signal: signal(), toolSet: initialAdmission })
+    assert.notEqual(results[0].result.isError, true, JSON.stringify(results[0].result.content))
+    const message = session.deriveMessages().find(({ role }) => role === 'tool')
+    const body = JSON.parse(message.content[0].text)
+    assert.equal(body.protocol, results[0].result.meta.protocol)
+    assert.deepEqual(body.discoveredTools, [name])
+    assert.equal(Object.hasOwn(body, 'discoverySnapshot'), false, '模型正文不得附带累计发现快照')
+    assert.equal(host.guard(host.agent, name, initialAdmission), undefined)
+
+    const resumed = { id: 'native-resumed', session }
+    nextScope = await scopeAgent(host.ctx, resumed)
+    nextAdmission = await host.admit(resumed)
+    assert.ok(host.names(await host.assemble(resumed, nextAdmission)).includes(name), '恢复后仍声明已经搜索的工具')
+    assert.equal(host.guard(resumed, name, nextAdmission), undefined, '恢复后已经搜索的工具仍可直调')
+  } finally {
+    initialAdmission?.dispose()
+    nextAdmission?.dispose()
+    await nextScope?.dispose()
+    await host.cleanup()
+  }
+})
+
+for (const language of ['typescript', 'python']) {
+  test(`真实现代 PTC ${language}：回执使用合法 SDK 索引并保留 schema 字面量`, MODERN, async () => {
+    const server = 'fixture-notes'
+    const host = await createHost({ presentation: 'ptc', language, limits: { serverNames: ['rc22', server], deferServers: ['rc22', server] } })
+    const literal = 'In  "Review"'
+    const definition = {
+      ...definitionOf(`mcp__${server}__read_notes`, 'Read the selected note.'),
+      parameters: { type: 'object', properties: { 'note  status': { type: 'string', const: literal } }, required: ['note  status'] },
+      output: { ...output, schema: { type: 'string', enum: [literal] } },
+    }
+    host.tools.register(definition)
+    let admission
+    try {
+      admission = await host.admit()
+      const before = await host.assemble(host.agent, admission)
+      assert.deepEqual(host.names(before), ['run_code'])
+      assert.ok(!before.sections.find(({ name }) => name === 'tools:sdk').text.includes(definition.name))
+      const result = await host.search(host.agent, admission, `select:${definition.name}`)
+      const next = await host.assemble(host.agent, admission)
+      const sdk = next.sections.find(({ name }) => name === 'tools:sdk').text
+      const key = JSON.stringify(definition.name)
+      assert.ok(sdk.includes(key), '宿主手册必须用带引号的名字声明该绑定')
+      const expected = JSON.stringify(definition.output.schema.enum[0])
+      assert.ok(sdk.includes(expected), '前置：宿主类型保留了带连续空格和转义的原枚举')
+      const { signature } = result.matches[0]
+      assert.ok(signature.startsWith(`tools[${key}](`), `签名必须能指到宿主绑定：${signature}`)
+      assert.ok(signature.includes(expected), `签名应保留宿主的原字面量：${signature}`)
+      assert.ok(!signature.includes('\n'), '签名仍为一行')
+      if (language === 'typescript') {
+        assert.ok(signature.includes(JSON.stringify(Object.keys(definition.parameters.properties)[0])), '引号键中的空白也必须保留')
+      }
+      assert.match(result.instruction, /run_code/)
+      assert.doesNotMatch(result.instruction, /call the tool directly/)
+    } finally {
+      admission?.dispose()
+      await host.cleanup()
+    }
+  })
+}
+
+test('真实现代 PTC：守卫和目录不引导不存在的直调路径', MODERN, async () => {
+  const host = await createHost({ presentation: 'ptc' })
+  let admission
+  try {
+    admission = await host.admit()
+    const before = await host.assemble(host.agent, admission)
+    assert.deepEqual(host.names(before), ['run_code'])
+    const denial = host.guard(host.agent, 'mcp__rc22__beta', admission)
+    assert.match(denial ?? '', /run_code/, '拒绝时也要指向 SDK 内的搜索入口')
+    assert.doesNotMatch(denial, /then call it directly/)
+    const catalog = before.sections.find(({ name }) => name === 'tool-search:catalog')
+    assert.doesNotMatch(catalog.text, /callable directly/)
+  } finally {
+    admission?.dispose()
+    await host.cleanup()
+  }
+})
 
 test('npm 0.2.2-rc.1: PTC 会话的搜索结果必须带签名（模式在执行时读装配记录）', MODERN, async () => {
   // 缺陷原样：`execute` 用 `viewFor(agent, undefined, toolSet)` 取模式，没有 assembly 可看，

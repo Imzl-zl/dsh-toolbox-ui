@@ -16,7 +16,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
 
 /** 取一个顶层函数体（从 `function name(` 到下一个顶层声明之前），用于判断实现住哪。 */
 function functionBody(source, name) {
-  const start = source.search(new RegExp(`^(async )?function ${name}\\(`, 'm'))
+  const start = source.search(new RegExp(`^(?:export )?(async )?function ${name}\\(`, 'm'))
   if (start < 0) return undefined
   const rest = source.slice(start + 1)
   const next = rest.search(/^(async )?function |^const |^let |^var |^class /m)
@@ -42,12 +42,15 @@ test('index.js 只留装配与 wire 面，业务实现住各自的模块', async
   assert.notEqual(functionBody(patchStore, 'withPatchWrite'), undefined, 'lib/patch-store.js 必须实现 withPatchWrite')
   assert.notEqual(functionBody(patchStore, 'managedState'), undefined, 'lib/patch-store.js 必须实现 managedState')
 
-  // ③ 脱敏与 reveal 求值：一份"哪些字段该遮、遮了之后怎么复原"的规则，只该有一处。
-  assert.equal(functionBody(host, 'restoreRedactedSpec'), undefined,
-    'restoreRedactedSpec 的实现应住在 lib/mcp-projection.js')
-  assert.equal(functionBody(host, 'redactMap'), undefined, 'redactMap 的实现应住在 lib/mcp-projection.js')
+  // ③ Read projection and authorized retention are separate homes; the old unbound restorer must not remain.
+  assert.equal(functionBody(host, 'admitMcpUpdate'), undefined, 'index.js must only assemble the scoped update boundary')
+  assert.equal(functionBody(host, 'redactMap'), undefined, 'read masking remains in lib/mcp-projection.js')
   const projection = await read('lib/mcp-projection.js')
-  assert.notEqual(functionBody(projection, 'restoreRedactedSpec'), undefined, 'lib/mcp-projection.js 必须实现 restoreRedactedSpec')
+  const updates = await read('lib/mcp-update-values.js')
+  assert.notEqual(functionBody(projection, 'projectConfigValues'), undefined, 'read projection must have one implementation')
+  assert.notEqual(functionBody(updates, 'admitMcpUpdate'), undefined, 'root/leaf retention authorization must have one implementation')
+  assert.equal(functionBody(projection, 'restoreRedactedSpec'), undefined, 'obsolete unbound retention must not coexist with scoped admission')
+  assert.equal(functionBody(projection, 'restoreRedactedMap'), undefined, 'map retention must not be implemented twice')
 
   // ④ 反向：装配面必须还在 index.js。少了这一半，"全都搬走"也能让上面几条变绿，
   // 而 index.js 一旦不再导出 gateway，整个插件就没有 wire 面了。

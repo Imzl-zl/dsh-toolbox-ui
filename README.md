@@ -61,7 +61,7 @@
 - 从本机其他客户端**导入**：Claude Code、Codex、OpenCode、pi、Claude Desktop、Cursor、Windsurf、VS Code、Gemini CLI、Roo Code 与跨工具共享配置，也能直接粘贴 JSON；写入前预览，支持「合并」与「替换」
 - **跨工作区搬运**：把本项目的 MCP 复制到另一个已注册工作区（在宿主内完成，凭据不经过浏览器），或导出成 JSON 备份 / 分享
 - **工具分组与批量**：「工具」页全页可多选（内置 / MCP / 其他）；动作条对勾选集合或当前筛选结果一键设常驻/按需/跟随，可一步撤销；「存为分组」把这一批保存成自定义分组（组级默认 + 逐工具例外，新成员自动继承）。分组写在 profile patch 的 `config.customGroups`，是全局配置，项目作用域只读
-- **工具延迟加载（ToolSearch）**：让某个服务器的工具不再每轮常驻上下文——模型先看到一份**只列工具名**的目录，用内置的 `tool_search` 搜到（关键词或 `select:<确切名字>`）之后，完整参数 schema 才进它的工具列表并可直接调用。默认不开：行上的「延迟 / 全量」芯片改的是**整台默认**（写组级策略），模型实际看到多少还要看工具页里的逐工具覆盖；环境变量 `DSH_MCP_TOOL_SEARCH=off` 整体退回全量注入。选成「按需」的工具，模型要先经 `tool_search` 拿到 schema 才能用；没有可搜的工具时搜索入口本身不出现。机制的三个上限在工具页**顶部**的「搜索设置」里调，写进 profile patch 的 `config.toolSearch`
+- **工具延迟加载（ToolSearch）**：让某个服务器的工具不再每轮常驻上下文——模型先看到一份**只列工具名**的目录，用内置的 `tool_search` 搜到（关键词或 `select:<确切名字>`）之后，完整参数 schema 才进它的工具列表并可直接调用。默认不开：行上的「延迟 / 全量」芯片改的是**整台默认**（写组级策略），模型实际看到多少还要看工具页里的逐工具覆盖；环境变量 `DSH_MCP_TOOL_SEARCH=off` 整体退回全量注入。选成「按需」的工具，模型要先经 `tool_search` 拿到 schema 才能用；没有可搜的工具时搜索入口本身不出现。机制的三个上限在工具页**顶部**的「搜索设置」里调，写进 profile patch 的 `config.toolSearch`。工具名看不懂时，模型可用 `mode: "browse"` 按页查看当前来源的用途和声明参数名，再按确切名字加载；浏览只看元数据，不自动加载或执行。此能力只需插件本身，不要求下载 embedding 模型或另外配置服务
 
 **工具面**
 
@@ -96,10 +96,10 @@
 
 ```sh
 # 推荐：npm 安装 —— 之后 `dsh plugin update` 在 ^1.x 内自动升小版本
-dsh plugin --profile web add dsh-toolbox-ui@^1.14.0
+dsh plugin --profile web add dsh-toolbox-ui@^1.15.0
 
 # 或固定 GitHub release tag（不自动跨版本，升级要换 tag 重新 add）
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.14.0
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.15.0
 ```
 
 装完**重启 `dsh web`**。卸载（不会删除 profile 里已有的 MCP 条目）：

@@ -168,6 +168,17 @@ test('the CI host matrix lists exactly the legs in scripts/host-presets.mjs', as
   }
 })
 
+test('tag publishing waits for the same CI host matrix on the tag commit', async () => {
+  const ci = parse(await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8'))
+  const release = parse(await readFile(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8'))
+  assert.ok(Object.hasOwn(ci.on, 'workflow_call'), 'release must reuse the CI workflow')
+  const publisher = Object.values(release.jobs).find((job) => job.steps?.some((step) => /\bnpm publish\b/.test(step.run || '')))
+  assert.ok(publisher, 'find the job that actually publishes the package')
+  const needs = Array.isArray(publisher.needs) ? publisher.needs : [publisher.needs]
+  assert.ok(needs.some((id) => release.jobs[id]?.uses === './.github/workflows/ci.yml'), 'the publishing job cannot bypass CI on the same commit')
+  assert.doesNotMatch(publisher.if || '', /always\s*\(/, 'failed gates must block publishing')
+})
+
 test('runtime YAML parser includes the nested-collection stack overflow fix', () => {
   const [major, minor, patchVersion] = packageJson.dependencies.yaml.split('.').map(Number)
   assert.equal(major, 2)
@@ -285,7 +296,8 @@ test('agent mount takes the agent from the official agent/created payload, never
   // 而宿主把 reject 当作「否决这次会话创建」—— 取值必须留在 try 里面。
   assert.match(runtime, /ctx\.on\("agent\/created", async \(payload\) =>/)
   assert.match(runtime, /const payloadAgent = payload\?\.agent;/)
-  assert.match(runtime, /mountProjectMcpForAgent\(ctx, payloadAgent, generation, \{ signal: payload\?\.signal \}\)/)
+  assert.match(runtime, /mountProjectMcpForAgent\(ctx, payloadAgent, \{ signal: payload\?\.signal \}\)/)
+  assert.match(runtime, /reconcileWorkspaceConnections\(ctx, wsPath, \{ creatingAgent: agent, signal: options\.signal \}\)/)
   assert.doesNotMatch(runtime, /ctx\.on\("agent\/created", async \(\{ agent \}\)/)
   assert.match(runtime, /const agentCtx = agent\?\.ctx;/)
   assert.match(runtime, /if \(!agentCtx\)/)
@@ -407,14 +419,15 @@ test('mount failures are attributed to the row and the detail pane, not only a b
 })
 
 test('global MCPs are inspectable from a project tab but stay read-only there', () => {
-  // 长得像列表项却点不开，是最直接的交互不一致。
-  assert.match(client, /onClick: \(\) => onSelect\(s\.serverName\),[^]*?onKeyDown[^]*?dsh-mcp-item-name/)
+  // 项目中的全局行要有可独立聚焦的选择按钮，不能借同行的屏蔽开关选择。
+  const globalList = client.slice(client.indexOf('const GlobalServerList ='), client.indexOf('const detailTab ='))
+  assert.match(globalList, /rowSelectButton\(s\.serverName, selected === s\.serverName, \(\) => onSelect\(s\.serverName\)\)/)
   assert.match(client, /return shared \? \{ \.\.\.shared, managed: false, foreign: 'global' \} : null/)
   assert.match(client, /if \(scope === 'global' \|\| !globalOpen\) return servers\.find/)
   assert.match(client, /const isForeign = server\.foreign === 'global'/)
   // 只读的同时仍要能改「对本项目是否可见」，否则详情页比列表还弱。
   assert.match(client, /isForeign\s*\n\s*\? h\(React2\.Fragment, null,[^]*?onToggleExclude\(server\.serverName, next\)/)
-  assert.match(client, /isForeign \? t\('全局配置（在「全局」标签页可编辑）'\)/)
+  assert.match(client, /isForeign \? t\('全局配置（在此只读）'\)/, 'viewing ownership must not promise editability in another unsupported context')
   assert.doesNotMatch(client, /← 从左侧选择一个 MCP/)
 })
 
@@ -436,15 +449,22 @@ test('结果提示以宿主 note 为准，live:failed 按错误显示（不再�
   assert.doesNotMatch(client, /flash\(successMsg \|\|/, '旧顺序（successMsg 优先）不得回来')
 })
 
-test('client validates reconnect delay ordering without rejecting DSH-supported decimals', () => {
-  assert.match(client, /Number\.isFinite\(initialDelay\)/)
-  assert.match(client, /initialDelay > maxDelay/)
+test('client emits finite decimal drafts while common Host admission owns delay ordering', async () => {
+  const { admitMcpUpdate } = await import('../lib/mcp-update-values.js')
+  const current = { name: 'shape', transport: 'stdio', command: 'node' }
+  const spec = { ...current, reconnect: { enabled: true, initialDelayMs: 1.5, maxDelayMs: 2.5, maxAttempts: 10 } }
+  const accepted = admitMcpUpdate(spec, current).spec
+  assert.equal(accepted.reconnect.initialDelayMs, 1.5)
+  assert.equal(accepted.reconnect.maxDelayMs, 2.5)
+  assert.throws(() => admitMcpUpdate({ ...spec, reconnect: { ...spec.reconnect, initialDelayMs: 4.5 } }, current), /initialDelayMs.*maxDelayMs/)
+  assert.match(client, /numericDraft/)
+  assert.match(client, /Number\.isFinite\(value\)/)
   assert.doesNotMatch(client, /\[timeout, initialDelay, maxDelay, attempts\]\.every/)
 })
 
 test('client preserves prototype-shaped header and env keys entered in the form', () => {
-  assert.match(client, /setOwn\(hd, r\.k\.trim\(\), fromFormValue\(r\.v\)\)/)
-  assert.match(client, /setOwn\(ev, r\.k\.trim\(\), fromFormValue\(r\.v\)\)/)
+  assert.match(client, /setOwn\(hd, (\w+)\.k\.trim\(\), fromFormValue\(\1\.v\)\)/)
+  assert.match(client, /setOwn\(ev, (\w+)\.k\.trim\(\), fromFormValue\(\1\.v\)\)/)
 })
 
 test('client moves focus into dialogs so Escape handlers receive keyboard events', () => {
@@ -770,9 +790,20 @@ test('project MCP: what the README promises the panel shows, the panel actually 
   //（disabled 会让被禁用的 server 悄悄启用；项目级预算旋钮则会被静默清空）。
   // defer（ToolSearch 延迟开关）由表单渲染（复选框直接赋值），但行投影仍必须带上它，
   // 否则打开编辑框时复选框初始值是错的。
-  assert.match(client, /if \(initial\.enabled === false\) spec\.disabled = true;/)
+  assert.doesNotMatch(client, /if \(initial\.enabled === false\) spec\.disabled = true;/, 'effective state must not overwrite original lifecycle source')
+  const { admitMcpUpdate } = await import('../lib/mcp-update-values.js')
+  const { workspaceServerView } = await import('../lib/mcp-rows.js')
+  const original = { name: 'shape', transport: 'stdio', command: 'node', disabled: true, idleTimeoutMs: 0, readyTimeoutMs: 0, defer: false }
+  const retained = admitMcpUpdate({ name: original.name, transport: original.transport, preserveFields: ['command', 'idleTimeoutMs', 'readyTimeoutMs'] }, original, { scope: 'workspace' }).spec
+  assert.equal(retained.disabled, true)
+  assert.equal(retained.idleTimeoutMs, 0)
+  assert.equal(retained.readyTimeoutMs, 0)
+  const row = workspaceServerView(original)
+  assert.equal(row.idleTimeoutMs, 0)
+  assert.equal(row.readyTimeoutMs, 0)
+  assert.equal(row.defer, false)
   assert.match(client, /for \(const key of \['idleTimeoutMs', 'readyTimeoutMs'\]\)/)
-  assert.match(rows, /"idleTimeoutMs", "readyTimeoutMs", "defer"\]\) if \(server\[field\] !== undefined\)/)
+  assert.match(rows, /projectConfigValues\(server, \{ scope: "workspace", managed: true \}\)/)
   // 详情页空态不能承诺“刷新即可看到工具”：那要求 tools RPC 真能枚举共享作用域层，
   // 而 toolInventory 只认 loader 条目 + 全局视图。要么能枚举，要么别承诺。
   assert.doesNotMatch(client, /刷新即可看到工具/)
@@ -797,7 +828,7 @@ test('project MCP: the shared-connection reference is owned by cordis, not by ou
   assert.match(runtime, /无法为项目 MCP 挂载器建立生命周期归属/)
   // 并发等待者不能拿到一份正在 teardown 的连接（refs 从 0 再加回去）。
   assert.match(runtime, /entry\.released = true/)
-  assert.match(runtime, /if \(entry\.released\) continue/)
+  assert.match(runtime, /if \(bucket\.get\(key\) !== cell \|\| !entry \|\| entry\.released\) continue;\s*if \(!isCurrent\(\)\) return undefined;\s*clearIdleRetire\(entry\);\s*entry\.refs \+= 1/)
 })
 
 test('project MCP: the design doc states the protocol claim per spec revision and names no false escape hatch', () => {

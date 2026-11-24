@@ -7,21 +7,27 @@
 > `add` / `removeServer` / `installBuiltins` 的运行中生效已在第五轮修好（§12.3 #24）、
 > 第六轮用真 Include + 真重启终验（§12.3 #26 与 OPEN-ITEMS 的 O1R）。
 
-## 当前契约（v1.14.0）
+## 当前契约（v1.15.0）
 
 本文保留历次设计与实测的历史论据；当前行为以下列契约及生产代码/回归测试为准，不能把旧实验数字用于当前通用版。
 
 - 完整 schema 继续按需搜索加载。除名字目录外，增加**非穷尽、最多 800 个 UTF-16 字符**的用途提示（包含标题、名称和 JSON 转义）；仅整条选择/省略，不裁切文字。
 - 用途统一引用当前 agent / step 允许且仍 deferred 的实际元数据：首个非空段在 160 字符内整段引用；否则只取首个 ICU 分句候选，在有终句标记且不超过 240 字符时整句引用。没有工具名单、身份/描述哈希门控、人工用途表、已知工具优先或 embeddings。
-- MCP 当前实际 instructions 非空时，不再重复提示；否则每 owner 至多一条例子，全局至多三条，仍受总字符预算约束。这只按说明存在性去重，不判断说明质量。
+- MCP 当前实际 instructions 非空时，不再重复常驻提示；否则每 owner 至多一条例子。按来源先各给一次机会，再追加宿主例子；实际装不下的首例可尝试同源后续完整例子，不再额外限制三台服务器。总预算仍为 800 字符。这只按说明存在性去重，不判断说明质量。
 - 有限提示可以省略工具；完整目录、全文描述索引与原 schema 均保留。元数据不是调用契约或授权，源首句及 ICU 文本边界也不是语义概括的保证。**尚未验证通用版的模型质量或总 token 收益。**
 - 名字与用途来自同一 PresentationSnapshot；缓存按实际 MCP 说明内容失效，命中也发布当前组装统计。`chars` / `budget` 仍仅表示名字目录，新增 `capabilityChars` / `capabilityCount` / `discoveryChars` 也不是完整请求或计费 token。
 - 混合搜索批次的淘汰保护按**本批返回总数**计算；默认值、普通装配的作用域/加载守卫、native/PTC 绑定和恢复协议不变。
 
-未发布维护修正：
+补充边界与维护修正：
 
 - `select:` 的全名、裸名和可还原的连接写法按解析后的完整工具名合并；不同工具仍分别返回，未命中的请求仍明确标出。批次保护只数实际返回的不同定义。
 - 现代宿主不保留本次实际注册的 ToolSearch 引导时（例如 `complete: true`），不追加目录、用途提示或 PTC 手册。只有同一步准入中被宿主完整声明的定义才无需再经本插件发现，其他宿主守卫不变。全部准入定义都已直发时撤掉本插件的 native 搜索入口；PTC 或宿主仍延迟的工具保留显式搜索路径。旧宿主在 waterfall 后自行恢复独占段，既有加载行为不改。
+- 完整发现集恢复仍从会话投影读取 v2 的有序替换快照，累计快照仅存于结果 meta。投影缺席或失败时，native 只从成功派生回执恢复近期、最多 `maxDiscovered` 个新发现；会忽略结构损坏的回执，不承诺还原淘汰或工具使用顺序。PTC 嵌套派发不在派生消息中，没有这条备用路径。
+- 现代投影在 `register()` 的 thenable 交付有效句柄后才算就绪，即使 thenable 本身可调用也一样。异步装配和搜索等待终态；同步守卫在等待期间不会把暂时读不到当成永久空状态。清理可等待注册与释放；旧版同步 disposer 保持同步。
+- PTC 回执和守卫指向 `run_code` 内的 SDK 绑定（如 `await tools["<exact name>"](args)`）。签名继续用宿主的类型渲染，只合并布局换行，不修改键或枚举字面量。native 保留按确切名称直调的指引。
+- `tool_search` 新增显式 `mode: "browse"`：query 可省略，也可按词过滤；server 精确限定当前 MCP owner，cursor 延续当前会话/版本/过滤的页面。返回完整名字、来源原文短用途和前十个声明参数名（含本地引用/组合对象分支）；不是完整 schema、不加载或执行，也不会清空 v2 恢复状态。说明不足返回 null，完整定义仍可经 `select:` 读取。无外部事实或操作需求时可直接回答，探索足够即停止，不要求遍历所有页。
+- 搜索与查询共用通用标识符拆词；原工具名、完整描述和调用 schema 不改，参数索引排除 JSON Schema 结构词、保留真实字段和注释/值。TF/DF/长度统计绑定目录快照；runtime 的 `+server` 使用真实 owner 过滤，不把工具名包含服务器词误当归属。没有 embedding、词典或额外模型部署。
+- 本轮 8 对模型对照中必要实际调用保持 5/5、控制案均零工具；严格输出 6/8 与 7/8 的差别仅为 JSON fence，不证明主动性或召回率提高。能力浏览在新版被实际使用两次。两处元数据/预算边界后续修订只跑本地回归，未追加模型请求；取舍与证据边界见 [来源公平提示与按需浏览决定](../.agents/notes/implemented/2026-11-23-toolsearch-source-browse.md) 与 [恢复与 PTC 回执决定](../.agents/notes/implemented/2026-11-23-toolsearch-recovery-and-ptc-receipts.md)。
 
 实现见 [用途提示](../lib/tool-discovery-cues.js)、[运行时](../lib/tool-search-runtime.js)与[呈现投影](../lib/tool-search-presentation.js)；独立回归见[通用元数据测试](../test/tool-discovery-generic-hints.test.mjs)与[真实宿主测试](../test/tool-search-capability-cues.test.mjs)。取舍见[通用用途提示决定](../.agents/notes/implemented/2026-11-22-toolsearch-generic-purpose-hints.md)。
 

@@ -1,6 +1,6 @@
 name: release
 
-# 一次发布 = 推一个 tag。CI 依次做：校验 tag 与 version 一致 -> 跑测试 -> 发 npm -> 建 GitHub Release。
+# 一次发布 = 推一个 tag。复用同提交的完整 CI（含宿主矩阵），通过后才准发 npm / 建 GitHub Release。
 #
 # npm 侧用 **trusted publishing（OIDC）**：不需要任何长期 token，
 # 由 npm 用短时签名凭据认证（见 docs/installation.md 的发布流程）。
@@ -27,13 +27,19 @@ on:
         type: boolean
         default: true
 
-permissions:
-  contents: write # gh release create
-  id-token: write # npm trusted publishing（OIDC）
-
 jobs:
+  # Note: 发布复用同一提交的 CI —— .agents/notes/implemented/2026-11-23-release-verification-gate.md
+  verify:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   release:
+    needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release create
+      id-token: write # npm trusted publishing（OIDC）
     steps:
       - uses: actions/checkout@v7
 
@@ -57,10 +63,6 @@ jobs:
           pkg="$(node -p "require('./package.json').version")"
           echo "dry run on ${GITHUB_REF_NAME}: ${pkg}"
 
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 11
-
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -69,14 +71,6 @@ jobs:
       # trusted publishing 需要 npm CLI >= 11.5.1（OIDC 支持）
       - name: Use a trusted-publishing capable npm
         run: npm install -g npm@^11
-
-      - name: Install development dependencies
-        run: pnpm install --frozen-lockfile
-
-      # 与本地 `npm test` 同一条门槛（含真机集成用例）。
-      # 若某次发布希望跳过，删掉这一步即可——发布的是已提交的预构建 lib/，没有构建步骤。
-      - name: Test
-        run: npm test
 
       # ⚠️ 已经发过的版本要**跳过**，而不是报错：
       # 一个新包名的**首个版本**必须先由维护者本地交互式发布（npm 要求包先存在，才能配置

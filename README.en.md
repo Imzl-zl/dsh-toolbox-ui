@@ -61,7 +61,7 @@ Tool definitions drop from **89.9K** to **9.4K** — **80.5K less (-89.5%)**, ab
 - **Import** configuration from other clients installed on this machine: Claude Code, Codex, OpenCode, pi, Claude Desktop, Cursor, Windsurf, VS Code, Gemini CLI, Roo Code and the cross-tool shared config — or paste JSON directly. Previewed before writing, with merge and replace modes
 - **Move servers between workspaces**: copy this project's MCP servers into another registered workspace (done inside the Host, so credentials never pass through the browser), or export the whole project config as JSON
 - **Tool groups and bulk changes**: the Tools page supports selection across built-in, MCP and other tools; the action bar applies resident / on-demand / follow to the selection (or to the current filter result when nothing is selected) with a one-step undo. "Save as group" turns that batch into a named group with its own default plus per-tool exceptions, and new members inherit it. Groups live in `config.customGroups` in the profile patch and are global; project scopes are read-only
-- **Deferred tool loading (ToolSearch)**: a server's tools no longer have to stay resident in context every turn — the model first sees a **name-only** catalog and, once `tool_search` finds a tool (by keyword or `select:<exact name>`), its full parameter schema enters the tool list and becomes directly callable. Off by default: the "Deferred / Resident" chip on a row changes the **server default** (a group policy), while per-tool overrides on the Tools page can still keep individual tools elsewhere; set `DSH_MCP_TOOL_SEARCH=off` to fall back to full injection everywhere. A tool marked "On demand" must be found via `tool_search` before it can be called; when there is nothing to search the search entry point itself disappears. Its three limits live under "Search settings" at the **top** of the Tools page and are stored as `config.toolSearch` in the profile patch
+- **Deferred tool loading (ToolSearch)**: a server's tools no longer have to stay resident in context every turn — the model first sees a **name-only** catalog and, once `tool_search` finds a tool (by keyword or `select:<exact name>`), its full parameter schema enters the tool list and becomes directly callable. Off by default: the "Deferred / Resident" chip on a row changes the **server default** (a group policy), while per-tool overrides on the Tools page can still keep individual tools elsewhere; set `DSH_MCP_TOOL_SEARCH=off` to fall back to full injection everywhere. A tool marked "On demand" must be found via `tool_search` before it can be called; when there is nothing to search the search entry point itself disappears. Its three limits live under "Search settings" at the **top** of the Tools page and are stored as `config.toolSearch` in the profile patch. For unfamiliar names, the model can use `mode: "browse"` to page through current source purposes and declared argument names, then load by exact name; browsing metadata alone neither loads nor executes tools. This requires only the plugin, with no embedding model download or separate service
 
 **Tools**
 
@@ -96,10 +96,10 @@ Tool definitions drop from **89.9K** to **9.4K** — **80.5K less (-89.5%)**, ab
 
 ```sh
 # Recommended: from npm — `dsh plugin update` then upgrades within ^1.x
-dsh plugin --profile web add dsh-toolbox-ui@^1.14.0
+dsh plugin --profile web add dsh-toolbox-ui@^1.15.0
 
 # Or pin a GitHub release tag (no automatic upgrades; re-add with a new tag)
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.14.0
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.15.0
 ```
 
 Then **restart `dsh web`**. To uninstall (your existing MCP entries stay):

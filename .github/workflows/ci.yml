@@ -1,13 +1,13 @@
 name: ci
 
 # 行业标准：每次推到 main、每个 PR 都跑一遍测试，不要等到发版才发现坏。
-# 与 release.yml 共用同一套门槛（同一份 lockfile、同一 node 大版本、同一个 npm test），
-# 区别只是不发版——tag 推送由 release.yml 负责，这里的 branches 过滤保证 tag 不会重复触发。
+# release.yml 在 tag 对应的同一提交复用本流程；普通 tag 推送不额外触发一遍 CI。
 on:
   push:
     branches:
       - main
   pull_request:
+  workflow_call:
 
 # 标准做法：同一分支的新推送取消上一次未跑完的运行，省 runner 也省等待。
 concurrency:

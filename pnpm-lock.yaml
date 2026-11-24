@@ -69,6 +69,9 @@ importers:
       '@deepseek-ai/dsh-typert-protocol':
         specifier: 0.2.2-rc.5
         version: 0.2.2-rc.5(@deepseek-ai/cordis@4.1.0)
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
 packages:
 
@@ -576,6 +579,11 @@ packages:
   smol-toml@1.8.0:
     resolution: {integrity: sha512-kCZr2V3ch9i00x8zXRhjUNVcjG9ijES5dDudkXvUVCT5QlJNQWElSJdZqyPemffHoLNUYwOcou0Fy+ojN0uHSQ==}
     engines: {node: '>= 18'}
+
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
 
   undici@8.11.2:
     resolution: {integrity: sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==}
@@ -1104,6 +1112,8 @@ snapshots:
   shebang-regex@3.0.0: {}
 
   smol-toml@1.8.0: {}
+
+  typescript@5.9.3: {}
 
   undici@8.11.2: {}
 
