@@ -25,14 +25,14 @@
 推荐用 npm 安装：包里的 `^1.x` 范围让后续 `dsh plugin update` 能自动升级小版本。
 
 ```sh
-dsh plugin --profile web add dsh-toolbox-ui@^1.15.0
+dsh plugin --profile web add dsh-toolbox-ui@^1.15.1
 ```
 
 也可以固定 GitHub release tag（适合需要锁定某个具体版本时）：
 
 ```sh
 # 固定 release tag
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.15.0
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.15.1
 
 # 或固定某个 commit
 dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#<commit>
@@ -83,7 +83,7 @@ dsh plugin --profile web update dsh-toolbox-ui
 
 | 安装规格 | `update` 的效果 | 怎么跨版本 |
 |---|---|---|
-| `dsh-toolbox-ui@^1.15.0`（npm，推荐） | 在 `^1.x` 内自动升到最新小版本，不会跨到 2.0.0 | 已是自动；跨大版本显式安装 `@^2` |
+| `dsh-toolbox-ui@^1.15.1`（npm，推荐） | 在 `^1.x` 内自动升到最新小版本，不会跨到 2.0.0 | 已是自动；跨大版本显式安装 `@^2` |
 | `github:...#v1.4.0`（tag） | 重新解析同一个 tag，**不会动** | 换成新 tag 重新 `add`：`... #<新 tag>` |
 | `github:...#<commit>` | 同上，固定在 commit | 用新 commit/tag 重新 `add` |
 | `github:...#main`（分支） | 拉取最新 main | 已是自动；但不推荐生产（无 release 门槛） |

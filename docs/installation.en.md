@@ -25,14 +25,14 @@ The development baseline tracks the latest verified RC and mirrors every peer de
 Installing via npm is recommended: the `^1.x` range in the package lets a later `dsh plugin update` upgrade minor versions automatically.
 
 ```sh
-dsh plugin --profile web add dsh-toolbox-ui@^1.15.0
+dsh plugin --profile web add dsh-toolbox-ui@^1.15.1
 ```
 
 You can also pin a GitHub release tag (useful when you need to lock a specific version):
 
 ```sh
 # 固定 release tag
-dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.15.0
+dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#v1.15.1
 
 # 或固定某个 commit
 dsh plugin --profile web add github:Imzl-zl/dsh-toolbox-ui#<commit>
@@ -83,7 +83,7 @@ The behavior differs depending on the spec used at install time:
 
 | Install spec | Effect of `update` | How to cross versions |
 |---|---|---|
-| `dsh-toolbox-ui@^1.15.0` (npm, recommended) | Automatically upgrades to the latest minor version within `^1.x`, never crossing into 2.0.0 | Already automatic; for a major version, explicitly install `@^2` |
+| `dsh-toolbox-ui@^1.15.1` (npm, recommended) | Automatically upgrades to the latest minor version within `^1.x`, never crossing into 2.0.0 | Already automatic; for a major version, explicitly install `@^2` |
 | `github:...#v1.4.0` (tag) | Re-resolves the same tag, **does not move** | Switch to a new tag and `add` again: `... #<new tag>` |
 | `github:...#<commit>` | Same as above, pinned to the commit | `add` again with a new commit/tag |
 | `github:...#main` (branch) | Pulls the latest main | Already automatic; but not recommended for production (no release gate) |

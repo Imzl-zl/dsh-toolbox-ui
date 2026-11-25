@@ -383,7 +383,10 @@ test('manual refresh provides progress and completion feedback', () => {
   assert.match(client, /t\('已刷新，共 \{count\} 个 MCP', \{ count: next\.length \}\)/)
 })
 
-test('client avoids full-screen backdrop filters and skips stale or unchanged polling renders', () => {
+test('full-screen overlays use the native translucent mask and never add backdrop filters', () => {
+  for (const name of ['dsh-mcp-overlay', 'dsh-mcp-panel-overlay']) {
+    assert.match(client, new RegExp(`\\.${name}\\{[^}]*background:var\\(--dsw-alias-bg-mask-1\\)`))
+  }
   assert.doesNotMatch(client, /dsh-mcp-(?:panel-)?overlay\{[^}]*backdrop-filter/)
   assert.match(client, /revision !== revisionRef\.current/)
   assert.match(client, /seq !== loadSeq\.current/)
